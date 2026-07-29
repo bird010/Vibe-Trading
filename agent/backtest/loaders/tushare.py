@@ -18,8 +18,10 @@ TUSHARE_TOKEN_PLACEHOLDERS = {"", "your-tushare-token"}
 
 
 def _is_index(code: str) -> bool:
-    """Detect A-share index symbols (000xxx.SH, 000300.SH, 399xxx.SZ)."""
+    """Detect supported A-share index symbols, including H00300.CSI."""
     upper = code.upper()
+    if upper == "H00300.CSI":
+        return True
     if upper.endswith(".SH"):
         digits = upper.split(".")[0]
         return len(digits) == 6 and digits.isdigit() and digits.startswith("000")

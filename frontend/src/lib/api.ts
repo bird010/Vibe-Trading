@@ -73,6 +73,38 @@ function appendQueryParam(url: string, key: string, value: string): string {
 
 export const api = {
   uploadFile,
+  getStockPredStatus: () => request<StockPredStatus>("/stockpred/status"),
+  getGraphBacktestDefaults: () =>
+    request<GraphBacktestDefaults>("/stockpred/graph/defaults"),
+  listGraphBacktests: (limit = 20) =>
+    request<GraphRunSummary[]>(
+      `/stockpred/graph/backtests?limit=${encodeURIComponent(String(limit))}`,
+    ),
+  createGraphBacktest: (body: GraphBacktestRequest) =>
+    request<GraphBacktestCreated>("/stockpred/graph/backtests", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  graphBacktestStreamUrl: (runId: string) =>
+    withAuthQuery(
+      `${BASE}/stockpred/graph/backtests/${encodeURIComponent(runId)}/events`,
+    ),
+  listStockPredStrategies: () => request<{ strategies: StrategyDescriptor[] }>("/stockpred/strategies").then((body) => body.strategies),
+  listUnfinishedStrategyBatches: () => request<StrategyBatchSummary[]>("/stockpred/strategy-batches"),
+  createStrategyBatch: (body: StrategyBatchRequest) => request<StrategyBatchCreated>("/stockpred/strategy-batches", { method: "POST", body: JSON.stringify(body) }),
+  getStrategyBatch: (batchId: string, sortBy = "sharpe", descending = true) => request<StrategyBatchSummary>(`/stockpred/strategy-batches/${encodeURIComponent(batchId)}?sort_by=${encodeURIComponent(sortBy)}&descending=${descending}`),
+  listRecentStrategyBatches: (limit = 20) => request<StrategyBatchSummary[]>(`/stockpred/strategy-batches/recent?limit=${encodeURIComponent(String(limit))}`),
+  strategyBatchStreamUrl: (batchId: string) => withAuthQuery(`${BASE}/stockpred/strategy-batches/${encodeURIComponent(batchId)}/events`),
+  // Cohort data endpoints
+  getCohortMetrics: (runId: string) => request<CohortAggregateMetrics>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/metrics`),
+  getCohortReturns: (runId: string) => request<CohortReturn[]>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/returns`),
+  getCohortQuality: (runId: string) => request<CohortQualityReport>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/quality`),
+  getCohortSymbols: (runId: string) => request<CohortSymbolsResponse>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/symbols`),
+  getCohortPeriodBreakdown: (runId: string) => request<CohortPeriodRow[]>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/period-breakdown`),
+  getCohortChart: (runId: string, code: string) => request<CohortChartData>(`/stockpred/runs/${encodeURIComponent(runId)}/cohort/chart/${encodeURIComponent(code)}`),
+  // Leaderboard endpoints
+  getLeaderboard: (protocolKey: string, sortBy = "mean_return", limit = 50) => request<LeaderboardResponse>(`/stockpred/leaderboard?protocol_key=${encodeURIComponent(protocolKey)}&sort_by=${encodeURIComponent(sortBy)}&limit=${encodeURIComponent(String(limit))}`),
+  listLeaderboardProtocols: () => request<{ protocols: string[] }>("/stockpred/leaderboard/protocols"),
   listRuns: (limit?: number) => request<RunListItem[]>(`/runs${limit ? `?limit=${encodeURIComponent(String(limit))}` : ""}`),
   getRun: (id: string, params: RunDetailParams = {}) => {
     const q = new URLSearchParams();
@@ -278,6 +310,136 @@ export interface UpdateDataSourceSettingsRequest {
   clear_tushare_token?: boolean;
 }
 
+export interface StockPredStatus {
+  ready: boolean;
+  contract: "stockpred-data/v1";
+  root?: string;
+  as_of?: string;
+  tables: Array<{
+    name: string;
+    version?: number;
+    max_date?: string;
+    status: string;
+  }>;
+  error_code?: string;
+  message?: string;
+}
+
+// Cohort evaluation types (signal_cohort_v1)
+export interface CohortAggregateMetrics {
+  mean_return: number;
+  median_return: number;
+  std_return: number;
+  win_rate: number;
+  p5: number;
+  p25: number;
+  p75: number;
+  p95: number;
+  mean_excess_return: number;
+  positive_excess_ratio: number;
+  mean_fill_rate: number;
+  mean_idle_cash_ratio: number;
+  mean_cost_ratio: number;
+  mean_unliquidated_ratio: number;
+  valid_cohort_count: number;
+  total_cohort_count: number;
+  hac_se: number;
+  bootstrap_ci: { lower: number; upper: number; mean: number } | null;
+}
+
+export interface CohortReturn {
+  cohort_id: string;
+  committed_capital_return: number | null;
+  executed_capital_return?: number | null;
+  raw_signal_return: number | null;
+  horizon_mark_return?: number | null;
+  liquidation_return?: number | null;
+  benchmark_return?: number | null;
+  target_horizon_excess_return?: number | null;
+  liquidation_policy_excess_return?: number | null;
+  fill_rate?: number | null;
+  idle_cash_ratio?: number | null;
+  cost_ratio?: number | null;
+  exit_delay_days?: number | null;
+  unliquidated_ratio?: number | null;
+  status: string;
+}
+
+export interface CohortQualityReport {
+  ranking_eligible: boolean;
+  valid_eval_ratio: number;
+  failures: string[];
+}
+
+export interface CohortChartData {
+  code: string;
+  ohlcv: Array<Record<string, number | string>>;
+  orders: Array<Record<string, number | string>>;
+}
+
+export interface CohortSymbolsResponse { symbols: string[]; }
+export interface CohortPeriodRow { period: string; count: number; mean_return: number | null; win_rate: number | null; }
+
+export interface LeaderboardEntry {
+  run_id: string;
+  strategy_id: string;
+  mean_return: number;
+  win_rate: number;
+  valid_cohort_count: number;
+  pit_assurance: string;
+}
+
+export interface LeaderboardResponse {
+  protocol_key: string;
+  total: number;
+  entries: LeaderboardEntry[];
+}
+
+export interface GraphBacktestRequest {
+  start: string;
+  end: string;
+  mode: "parity" | "research";
+  top_n?: number;
+  eval_step?: number;
+}
+
+export interface GraphBacktestDefaults {
+  mode: "parity";
+  benchmark_code: "000300.SH";
+  top_n: 50;
+  eval_step: 5;
+  forward_days: 5;
+  locked_fields: string[];
+}
+
+export interface GraphBacktestCreated {
+  run_id: string;
+  events_url: string;
+}
+
+export interface GraphRunSummary {
+  run_id: string;
+  status: string;
+  phase?: string;
+  created_at: string;
+  start: string;
+  end: string;
+  mode: "parity" | "research";
+  strategy_id?: string;
+  strategy_name?: string;
+}
+
+export interface GraphSignalPoint {
+  time: string;
+  code: string;
+  score: number;
+  rank: number;
+  direction: string;
+  stage: string;
+  action: string;
+  risk_adjustment?: number;
+}
+
 // --- Types matching backend API contracts ---
 
 export interface RunListItem {
@@ -315,7 +477,9 @@ export interface TradeMarker {
   side: "BUY" | "SELL";
   price: number;
   qty?: number;
+  status?: "FILLED" | "PARTIAL" | "REJECTED";
   reason?: string;
+  exit_delay_days?: number;
   text?: string;
 }
 
@@ -371,6 +535,27 @@ export interface ValidationData {
   };
 }
 
+export interface SymbolPerformanceMetrics {
+  symbol: string;
+  total_return?: number;
+  annual_return?: number;
+  annual_volatility?: number;
+  max_drawdown?: number;
+  sharpe?: number;
+  sortino?: number;
+  calmar?: number;
+  win_rate?: number;
+  profit_loss_ratio?: number;
+  trade_count?: number;
+  avg_holding_days?: number;
+}
+
+export interface StrategyDescriptor { id: string; name: string; kind: "graph" | "alpha_zoo"; zoo?: string | null; columns_required?: string[]; min_warmup_bars?: number; }
+export interface StrategyBatchRequest { start: string; end: string; strategy_ids?: string[]; select_all?: boolean; mode?: "parity" | "research"; idempotency_key?: string; top_n?: number; eval_step?: number; forward_days?: number; portfolio_capital?: number; max_participation?: number; }
+export interface StrategyBatchCreated { batch_id: string; events_url: string; }
+export interface StrategyBatchReport { strategy_id: string; strategy_name: string; status: string; detail_status?: string | null; detail_reason?: string | null; run_id?: string | null; metrics: Record<string, number>; reason?: string | null; }
+export interface StrategyBatchSummary { batch_id: string; status: string; phase?: string; created_at?: string; updated_at?: string; comparison_key?: string; screening_done?: number; screening_total?: number; detail_done?: number; detail_total?: number; detail_space_estimate_bytes?: number; reports: StrategyBatchReport[]; }
+
 export interface RunData {
   status: string;
   run_id: string;
@@ -379,8 +564,10 @@ export interface RunData {
   run_directory?: string;
   run_stage?: string;
   run_context?: Record<string, unknown>;
+  strategy_snapshot?: { strategy_version: string; git_commit?: string | null; git_dirty?: boolean; descriptor: { id: string; name?: string; kind: "graph" | "alpha_zoo"; zoo?: string | null } };
 
   metrics?: BacktestMetrics;
+  symbol_metrics?: SymbolPerformanceMetrics[];
   artifacts?: ArtifactInfo[];
   run_card?: RunCard;
   validation?: ValidationData;
@@ -389,6 +576,7 @@ export interface RunData {
   price_series?: Record<string, PriceBar[]>;
   indicator_series?: Record<string, Record<string, IndicatorPoint[]>>;
   trade_markers?: TradeMarker[];
+  graph_signal_series?: Record<string, GraphSignalPoint[]>;
   equity_curve?: EquityPoint[];
   trade_log?: Array<Record<string, string>>;
   run_logs?: Array<{ source?: string; line_number?: number; message?: string }>;
@@ -414,15 +602,14 @@ export interface RunCardArtifact {
   sha256: string;
 }
 
-export interface BacktestMetrics {
-  final_value: number;
-  total_return: number;
-  annual_return: number;
-  max_drawdown: number;
-  sharpe: number;
-  win_rate: number;
-  trade_count: number;
-  [key: string]: number;
+export type BacktestMetrics = Record<string, number> & {
+  final_value?: number;
+  total_return?: number;
+  annual_return?: number;
+  max_drawdown?: number;
+  sharpe?: number;
+  win_rate?: number;
+  trade_count?: number;
 }
 
 

@@ -107,8 +107,15 @@ ashare = [
 harmonic = [
     "pyharmonics>=1.5.0",
 ]
+stockpred = [
+    # StockPred local Lance data integration. pylance is required to read
+    # Lance datasets; without it the stockpred loader reports unavailable
+    # and the registry falls through to remote loaders.
+    "pylance>=0.10.0",
+]
 dev = [
     "pytest>=7.0",
+    "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
     "pytest-socket>=0.7.0",
 ]

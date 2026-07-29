@@ -65,6 +65,7 @@ class TestIsIndex:
         "000016.SH",  # SSE 50
         "399001.SZ",  # Shenzhen Component
         "399006.SZ",  # ChiNext Index
+        "H00300.CSI",  # CSI 300 total-return index
     ])
     def test_index_codes_match(self, code: str) -> None:
         assert _is_index(code)
@@ -166,6 +167,16 @@ class TestFetchDailyFrameRouting:
         loader = self._make_loader()
         loader.api.index_daily.return_value = _make_ohlcv_df()
         result = loader._fetch_daily_frame("000001.SH", "20250102", "20250110")
+        loader.api.index_daily.assert_called_once()
+        loader.api.daily.assert_not_called()
+        assert result is not None
+
+    def test_csi_total_return_index_routes_to_index_daily(self) -> None:
+        loader = self._make_loader()
+        loader.api.index_daily.return_value = _make_ohlcv_df()
+
+        result = loader._fetch_daily_frame("H00300.CSI", "20250102", "20250110")
+
         loader.api.index_daily.assert_called_once()
         loader.api.daily.assert_not_called()
         assert result is not None
@@ -301,6 +312,7 @@ class TestMergeBasicFieldsGuard:
     @pytest.mark.parametrize("code", [
         "510050.SH",  # ETF
         "000300.SH",  # index
+        "H00300.CSI",  # total-return index
         "00700.HK",   # HK
         "AAPL.US",    # US
         "BTC-USDT",   # crypto

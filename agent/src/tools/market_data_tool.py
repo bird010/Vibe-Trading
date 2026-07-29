@@ -37,6 +37,7 @@ class MarketDataTool(BaseTool):
                 "type": "string",
                 "enum": [
                     "auto",
+                    "stockpred",
                     "yfinance",
                     "yahoo",
                     "okx",

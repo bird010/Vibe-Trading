@@ -150,7 +150,7 @@ class TestFallbackChains:
         """Equity chains lead with throttle-tolerant public sources and trail
         with key-gated REST fallbacks, in the exact reviewed order."""
         assert FALLBACK_CHAINS["a_share"] == [
-            "tencent", "mootdx", "eastmoney", "baostock", "akshare", "tushare", "local",
+            "stockpred", "tencent", "mootdx", "eastmoney", "baostock", "akshare", "tushare", "local",
         ]
         assert FALLBACK_CHAINS["us_equity"] == [
             "yahoo", "stooq", "sina", "eastmoney", "yfinance", "tiingo", "fmp",
@@ -173,12 +173,16 @@ class TestFallbackChains:
         assert "baostock" in FALLBACK_CHAINS["a_share"]
 
     def test_unchanged_chains_preserved(self) -> None:
-        """crypto/futures/fund/macro/forex chains must be left untouched."""
+        """crypto/macro/futures/fund/forex chains must be left untouched."""
         assert FALLBACK_CHAINS["crypto"] == ["okx", "ccxt", "yfinance", "local"]
         assert FALLBACK_CHAINS["futures"] == ["tushare", "akshare", "local"]
         assert FALLBACK_CHAINS["fund"] == ["tushare", "akshare", "local"]
         assert FALLBACK_CHAINS["macro"] == ["akshare", "tushare", "local"]
         assert FALLBACK_CHAINS["forex"] == ["akshare", "yfinance", "local"]
+
+    def test_stockpred_leads_a_share_chain(self) -> None:
+        """stockpred must be the first entry in the a_share fallback chain."""
+        assert FALLBACK_CHAINS["a_share"][0] == "stockpred"
 
 
 # ---------------------------------------------------------------------------

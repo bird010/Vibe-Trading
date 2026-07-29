@@ -4201,6 +4201,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from src.factors.cli_handlers import add_subparser as _add_alpha_subparser
     _add_alpha_subparser(subparsers)
 
+    from src.stockpred.cli_handlers import add_subparser as _add_stockpred_subparser
+    _add_stockpred_subparser(subparsers)
+
     # Hypothesis Registry subcommands
     from src.hypotheses.cli_handlers import add_subparser as _add_hypothesis_subparser
     _add_hypothesis_subparser(subparsers)
@@ -4696,6 +4699,9 @@ def main(argv: list[str] | None = None) -> int:
         return _coerce_exit_code(cmd_show(args.show))
     if args.command == "chat":
         return _coerce_exit_code(cmd_interactive(args.chat_max_iter))
+    if args.command == "stockpred":
+        from src.stockpred.cli_handlers import dispatch as _stockpred_dispatch
+        return _coerce_exit_code(_stockpred_dispatch(args))
     if args.command == "alpha":
         from src.factors.cli_handlers import dispatch as _alpha_dispatch
         return _coerce_exit_code(_alpha_dispatch(args))

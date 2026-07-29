@@ -139,13 +139,37 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
     }
 
     // Trade markers
-    const marks = (markers || []).map(m => ({
-      coord: [m.time, m.price],
-      value: m.side === "BUY" ? "B" : "S",
-      name: [`${m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
-      itemStyle: { color: m.side === "BUY" ? t.upColor : t.downColor },
-      label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
-    }));
+    const marks = (markers || []).map(m => {
+      const status = m.status?.toUpperCase();
+      const delayed = Number(m.exit_delay_days || 0) > 0;
+      const value = delayed
+        ? "D"
+        : status === "REJECTED"
+          ? "X"
+          : status === "PARTIAL"
+            ? "P"
+            : m.side === "BUY" ? "B" : "S";
+      const color = delayed
+        ? "#8b5cf6"
+        : status === "REJECTED"
+          ? t.textColor
+          : status === "PARTIAL"
+            ? t.warningColor
+            : m.side === "BUY" ? t.upColor : t.downColor;
+      return {
+        coord: [m.time, m.price],
+        value,
+        name: [
+          `${m.side} @ ${m.price}`,
+          m.qty ? `Qty: ${m.qty}` : "",
+          status ? `Status: ${status}` : "",
+          delayed ? `Delay: ${m.exit_delay_days}d` : "",
+          m.reason ? `Reason: ${m.reason}` : "",
+        ].filter(Boolean).join("\n"),
+        itemStyle: { color },
+        label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
+      };
+    });
 
     // Volume
     const vol = data.map((d, i) => ({
