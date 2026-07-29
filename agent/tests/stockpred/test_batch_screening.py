@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import importlib
+import os
 from collections import Counter
 from contextlib import contextmanager
 
 import pandas as pd
 import pytest
 
+import src.stockpred.batch_screening as batch_screening
 from backtest.stockpred_strategy.runner import StockPredStrategyBacktestRunner
 from backtest.stockpred.cohort.engine import CohortRunResult
 from backtest.stockpred.cohort.engine import cohort_config_from_strategy_config
@@ -18,6 +21,14 @@ from src.stockpred.strategies.contracts import (
     StrategySourceFile,
 )
 from src.stockpred.strategies.panel import StockPredPanelBuilder
+
+
+def test_default_process_worker_limit_is_eight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STOCKPRED_BATCH_WORKERS", raising=False)
+
+    reloaded = importlib.reload(batch_screening)
+
+    assert reloaded._EVAL_PROCESS_WORKERS == min(8, os.cpu_count() or 4)
 
 
 class _Gateway:

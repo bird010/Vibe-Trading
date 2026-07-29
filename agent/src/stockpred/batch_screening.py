@@ -32,8 +32,8 @@ def _patch_cohort_metric_schema(run_dir: Path) -> None:
     req_data.setdefault("context", {})["metric_schema_version"] = "signal_cohort_v1"
     atomic_json(req_path, req_data)
 
-# Process pool workers: configurable via env var, default min(2, cpu_count)
-_EVAL_PROCESS_WORKERS = int(os.environ.get("STOCKPRED_BATCH_WORKERS", min(2, os.cpu_count() or 2)))
+# Process pool workers: configurable via env var, default min(8, cpu_count)
+_EVAL_PROCESS_WORKERS = int(os.environ.get("STOCKPRED_BATCH_WORKERS", min(8, os.cpu_count() or 4)))
 
 
 class AlphaBatchScreeningCoordinator:
