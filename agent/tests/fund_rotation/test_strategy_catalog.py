@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel
 
 from backtest.fund_rotation.catalog import (
     FUND_ROTATION_CONFIG_INVALID,
     FUND_ROTATION_DUPLICATE_STRATEGY_ID,
     FUND_ROTATION_INTERFACE_INCOMPATIBLE,
     FUND_ROTATION_STRATEGY_NOT_FOUND,
+    FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID,
     CatalogError,
     FundRotationStrategyCatalog,
 )
-from backtest.fund_rotation.contracts import (
-    FundRotationStrategyDescriptor,
-    StrategyDiagnostics,
-)
+from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor
 from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
     CorrelationAllMembersStrategy,
 )
@@ -70,6 +67,60 @@ class TestCatalogRegistration:
         with pytest.raises(CatalogError) as exc_info:
             FundRotationStrategyCatalog([_Bad])
         assert exc_info.value.code == FUND_ROTATION_INTERFACE_INCOMPATIBLE
+
+    def test_empty_interface_version_rejected_at_startup(self):
+        desc = FundRotationStrategyDescriptor(
+            id="empty_ver", name="x", description="d",
+            interface_version="", supported_universe=("etf",), deterministic=True,
+        )
+
+        class _EmptyVer:
+            descriptor = desc
+            config_model = CorrelationAllMembersStrategy.config_model
+
+            def resolve_requirements(self, config):
+                raise NotImplementedError
+
+            def create_session(self, initialization, config):
+                raise NotImplementedError
+
+        with pytest.raises(CatalogError) as exc_info:
+            FundRotationStrategyCatalog([_EmptyVer])
+        assert exc_info.value.code == FUND_ROTATION_INTERFACE_INCOMPATIBLE
+
+    def test_list_multiple_strategies_sorted_by_id(self):
+        def _make(cls_id: str):
+            desc = FundRotationStrategyDescriptor(
+                id=cls_id, name=cls_id, description="d",
+                interface_version="1.0", supported_universe=("etf",), deterministic=True,
+            )
+
+            class _S:
+                descriptor = desc
+                config_model = CorrelationAllMembersStrategy.config_model
+
+                def resolve_requirements(self, config):
+                    raise NotImplementedError
+
+                def create_session(self, initialization, config):
+                    raise NotImplementedError
+
+            return _S
+
+        # Insert out of order; list() must sort by strategy_id.
+        catalog = FundRotationStrategyCatalog([_make("zeta"), _make("alpha")])
+        assert [e.strategy_id for e in catalog.list()] == ["alpha", "zeta"]
+
+    def test_snapshot_invalid_on_unreadable_source(self, monkeypatch):
+        import backtest.fund_rotation.catalog as catalog_mod
+
+        def _bad_getfile(cls):
+            return "/nonexistent/path/strategy.py"
+
+        monkeypatch.setattr(catalog_mod.inspect, "getfile", _bad_getfile)
+        with pytest.raises(CatalogError) as exc_info:
+            FundRotationStrategyCatalog([CorrelationAllMembersStrategy])
+        assert exc_info.value.code == FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID
 
 
 class TestCatalogResolve:
