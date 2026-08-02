@@ -10,8 +10,49 @@ first day's return is measured against 1.0 rather than dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class TargetSnapshot:
+    """One target-weight decision: the signal date and its target weights.
+
+    ``weights`` maps ts_code -> target weight (treated as read-only). A signal
+    with empty weights means "hold cash" (design §7.1 SET_TARGETS to cash).
+    """
+
+    signal_date: pd.Timestamp
+    weights: Mapping[str, float]
+
+
+def schedule_targets(
+    targets: Sequence[TargetSnapshot],
+    evaluation_dates: Sequence[pd.Timestamp],
+) -> dict[pd.Timestamp, TargetSnapshot]:
+    """Map each target to its execution date (design §24).
+
+    Execution happens at the first evaluation trading day STRICTLY AFTER the
+    signal date. A signal dated before the first evaluation day therefore
+    executes at the first evaluation day (the pre-evaluation target builds the
+    initial position at the interval open). When several signals map to the same
+    execution day, the latest signal supersedes the earlier ones.
+
+    Args:
+        targets: target-weight decisions (any order).
+        evaluation_dates: the formal evaluation trading calendar.
+
+    Returns:
+        Mapping of execution_date -> the TargetSnapshot to execute then.
+    """
+    eval_dates = sorted(evaluation_dates)
+    schedule: dict[pd.Timestamp, TargetSnapshot] = {}
+    for snap in sorted(targets, key=lambda s: s.signal_date):
+        exec_date = next((d for d in eval_dates if d > snap.signal_date), None)
+        if exec_date is not None:
+            schedule[exec_date] = snap  # later signal supersedes
+    return schedule
 
 
 @dataclass(frozen=True)

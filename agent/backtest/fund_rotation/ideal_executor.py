@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import pandas as pd
+
+from backtest.fund_rotation.evaluation import TargetSnapshot, schedule_targets
 
 
 def run_daily_ideal_account(
     weekly_targets: dict[str, dict[str, float]],
     fund_daily: pd.DataFrame,
     fund_adj: pd.DataFrame,
+    evaluation_dates: Sequence[str] | None = None,
 ) -> pd.Series:
-    """Execute signals at the next valid open without fees, lots, or capacity limits."""
+    """Execute signals at the next valid open without fees, lots, or capacity limits.
+
+    ``evaluation_dates`` (optional) is the formal evaluation trading calendar;
+    when given, a pre-evaluation signal activates at the first evaluation day
+    (design §24). When omitted, all market dates are used.
+    """
     if not weekly_targets or fund_daily.empty or fund_adj.empty:
         return pd.Series(dtype=float, name="theoretical_strategy")
 
@@ -38,17 +48,22 @@ def run_daily_ideal_account(
     }
 
     activations: dict[str, dict[str, float]] = {}
-    for signal_date, raw_targets in sorted(weekly_targets.items()):
-        targets = {
-            str(code): float(weight)
-            for code, weight in raw_targets.items()
-            if float(weight) > 0
-        }
-        activation_date = next((date for date in dates if date > str(signal_date)), None)
-        if activation_date is not None:
-            # A later signal mapped to the same market day supersedes the
-            # earlier one before any order is attempted.
-            activations[activation_date] = targets
+    # §24: unify execution scheduling — each signal activates at the first
+    # trading day strictly after the signal date (a pre-evaluation signal
+    # activates at the first available trading day).
+    snapshots = [
+        TargetSnapshot(
+            pd.Timestamp(signal_date),
+            {str(code): float(weight) for code, weight in raw_targets.items() if float(weight) > 0},
+        )
+        for signal_date, raw_targets in weekly_targets.items()
+    ]
+    eval_dates = [pd.Timestamp(d) for d in (evaluation_dates if evaluation_dates is not None else dates)]
+    for exec_date, snap in schedule_targets(snapshots, eval_dates).items():
+        # A later signal mapped to the same market day supersedes the earlier
+        # one before any order is attempted (schedule_targets already resolves
+        # this; str() key keeps the existing string-date activation map).
+        activations[exec_date.strftime("%Y%m%d")] = dict(snap.weights)
 
     cash = 1.0
     quantities: dict[str, float] = {}

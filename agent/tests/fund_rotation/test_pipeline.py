@@ -348,3 +348,49 @@ class TestPipelineE2E:
         r54 = run_signal_pipeline(config, fd54, fa54, df54)
         assert len(r54.weekly_targets) >= 1
         assert min(r54.weekly_targets) == "20230106"  # 53rd week-ending
+
+    def test_pre_evaluation_target_executes_at_first_evaluation_day(self):
+        """§24 — a target dated before start_date is preserved and builds the
+        initial position at the first evaluation trading day (not discarded)."""
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+        # First signal week is 20220527 (Friday); the Monday after is 20220530.
+        # Setting start_date=20220530 makes 20220527 a pre-evaluation target.
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+            min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220530", end_date="20230701",
+        )
+        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+
+        # Output signals are trimmed to >= start_date (pre-eval signal excluded).
+        assert "20220527" not in result.weekly_targets
+        assert min(result.weekly_targets) == "20220603"
+
+        # But execution preserved the pre-evaluation target: the first order
+        # lands on the first evaluation trading day (20220530), NOT on the first
+        # in-evaluation signal's execution day (which would be 20220606).
+        order_dates = sorted(o["trade_date"] for o in result.orders if o["trade_date"])
+        assert order_dates[0] == "20220530"
+
+        # The pre-evaluation order targets the 20220527 signal's ETFs.
+        first_orders = [o for o in result.orders if o["trade_date"] == "20220530"]
+        assert first_orders, "expected orders on the first evaluation day"
+        assert all(o["trade_date"] == "20220530" for o in first_orders)
+
+    def test_no_pre_evaluation_target_first_execution_at_first_signal(self):
+        """With start_date before the first signal, the first execution is the
+        first trading day after the first in-evaluation signal (20220527 ->
+        20220530), i.e. the pre-evaluation path is not triggered."""
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+            min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230701",
+        )
+        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        # First signal 20220527 is in-evaluation; executes next trading day.
+        assert min(result.weekly_targets) == "20220527"
+        order_dates = sorted(o["trade_date"] for o in result.orders if o["trade_date"])
+        assert order_dates[0] == "20220530"

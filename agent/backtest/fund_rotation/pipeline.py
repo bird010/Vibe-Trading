@@ -16,7 +16,12 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 from backtest.fund_rotation.config import FundRotationConfig
-from backtest.fund_rotation.evaluation import EvaluationContext, validate_equity_index
+from backtest.fund_rotation.evaluation import (
+    EvaluationContext,
+    TargetSnapshot,
+    schedule_targets,
+    validate_equity_index,
+)
 from backtest.fund_rotation.universe import (
     ExclusionReason,
     ExclusionRecord,
@@ -439,22 +444,33 @@ def run_signal_pipeline(
         code for targets in result.weekly_targets.values() for code in targets
     ))
 
-    # §8: Trim signals to user-specified start_date.
-    # Training uses extended history, but output signals/trades/equity must
-    # not begin before start_date.
+    # §8/§24: Trim output signals to user-specified start_date, but preserve the
+    # full target set (including the last pre-evaluation signal) for execution so
+    # the initial position is built at the first evaluation trading day.
     _notify("GENERATING_TARGETS")
+    execution_targets = dict(result.weekly_targets)
     if config.start_date:
         result.weekly_targets = {
             wk: tgts for wk, tgts in result.weekly_targets.items()
             if wk >= config.start_date
         }
 
+    # Evaluation trading calendar (within [start_date, end_date]) shared by the
+    # ideal and real executors so a pre-evaluation signal activates at the first
+    # evaluation day (§24).
+    all_dates_sorted = sorted(fund_daily["trade_date"].astype(str).unique())
+    evaluation_dates = [
+        d for d in all_dates_sorted
+        if (not config.start_date or d >= config.start_date)
+        and (not config.end_date or d <= config.end_date)
+    ]
+
     # Step 7: Execute the ideal account at the first valid open after each
     # signal.  It ignores fees, capacity, and lot constraints, but preserves
     # the real signal timing and adjusted overnight/intraday return split.
-    if result.weekly_targets:
+    if execution_targets:
         result.strategy_cumulative = run_daily_ideal_account(
-            result.weekly_targets, fund_daily, fund_adj,
+            execution_targets, fund_daily, fund_adj, evaluation_dates=evaluation_dates,
         )
         if config.start_date:
             result.strategy_cumulative = result.strategy_cumulative[
@@ -465,7 +481,8 @@ def run_signal_pipeline(
     # This ordering is also the public task-state contract (§15.2).
     _notify("EXECUTING")
     exec_ctx = _build_execution_context(fund_daily, fund_adj, config, profiler=profiler)
-    _run_execution_loop(result, config, exec_ctx, profiler=profiler)
+    _run_execution_loop(result, config, exec_ctx, profiler=profiler,
+                        execution_targets=execution_targets)
 
     # Step 9: Benchmarks — §14.1
     _notify("COMPUTING_BENCHMARKS")
@@ -597,16 +614,19 @@ def _run_execution_loop(
     config: FundRotationConfig,
     ctx: ExecutionContext,
     profiler: ExecutionProfiler | None = None,
+    execution_targets: dict | None = None,
 ) -> None:
     """§12 — Run continuous-account execution with daily equity tracking.
 
     Anti-look-ahead: signal generated at signal_week close → execute at first
-    trade day STRICTLY AFTER signal_week (typically next Monday).
+    trade day STRICTLY AFTER signal_week (typically next Monday). A
+    pre-evaluation signal executes at the first evaluation trading day (§24).
 
     Integrates: ADV20 capacity, participation-rate slippage, OrderManager
     residual orders, daily mark-to-market equity, and fee impacts.
     """
-    if not result.weekly_targets:
+    targets_map = execution_targets if execution_targets is not None else result.weekly_targets
+    if not targets_map:
         return
 
     rules = ChinaETFExecutionRules(
@@ -623,14 +643,21 @@ def _run_execution_loop(
     adj_lookup = ctx.adj_lookup
     all_trade_dates = ctx.all_trade_dates
 
-    # Determine execution schedule: signal_week -> first trade date strictly after
-    signal_weeks_sorted = sorted(result.weekly_targets.keys())
-    exec_schedule: list[tuple[str, str, dict[str, float]]] = []  # (signal_week, exec_date, targets)
-    for signal_week in signal_weeks_sorted:
-        exec_date = _find_first_trade_date_after(all_trade_dates, signal_week)
-        if exec_date is None:
-            continue
-        exec_schedule.append((signal_week, exec_date, result.weekly_targets[signal_week]))
+    # §24: build the execution schedule via the shared schedule_targets. The
+    # evaluation calendar is the trading days within [start_date, end_date]; a
+    # pre-evaluation signal maps to the first evaluation trading day, and an
+    # in-evaluation signal maps to the first trading day strictly after it.
+    eval_calendar = [
+        d for d in all_trade_dates
+        if (not config.start_date or d >= config.start_date)
+        and (not config.end_date or d <= config.end_date)
+    ]
+    snapshots = [TargetSnapshot(pd.Timestamp(sw), tgts) for sw, tgts in targets_map.items()]
+    schedule = schedule_targets(snapshots, [pd.Timestamp(d) for d in eval_calendar])
+    exec_schedule: list[tuple[str, str, dict[str, float]]] = [
+        (snap.signal_date.strftime("%Y%m%d"), exec_date.strftime("%Y%m%d"), dict(snap.weights))
+        for exec_date, snap in sorted(schedule.items())
+    ]
 
     if not exec_schedule:
         return

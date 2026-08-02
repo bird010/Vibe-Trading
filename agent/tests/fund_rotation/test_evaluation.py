@@ -6,9 +6,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from backtest.fund_rotation.evaluation import EvaluationContext, validate_equity_index
+from backtest.fund_rotation.evaluation import (
+    EvaluationContext,
+    TargetSnapshot,
+    schedule_targets,
+    validate_equity_index,
+)
 from backtest.fund_rotation.metrics import compute_performance_metrics
-
 
 # ── EvaluationContext calendar construction ──
 
@@ -138,3 +142,54 @@ class TestInitialNavMetrics:
         metrics = compute_performance_metrics(cumulative, periods_per_year=244, initial_nav=1.0)
         assert metrics["max_drawdown"] == pytest.approx(-0.05)
         assert metrics["max_drawdown_recovery_periods"] == 1
+
+
+# ── schedule_targets ──
+
+def _ts(s: str) -> pd.Timestamp:
+    return pd.Timestamp(s)
+
+
+class TestScheduleTargets:
+    EVAL_DATES = [_ts("20240102"), _ts("20240103"), _ts("20240104"), _ts("20240105")]
+
+    def test_in_evaluation_signal_executes_next_eval_day(self):
+        targets = [TargetSnapshot(_ts("20240102"), {"A": 0.5})]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        # Signal on 20240102 -> first eval day strictly after = 20240103.
+        assert list(schedule.keys()) == [_ts("20240103")]
+        assert schedule[_ts("20240103")].weights == {"A": 0.5}
+
+    def test_pre_evaluation_signal_executes_at_first_eval_day(self):
+        # Signal before the first evaluation day builds the initial position at
+        # the interval open (design §24).
+        targets = [TargetSnapshot(_ts("20231220"), {"A": 1.0})]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        assert list(schedule.keys()) == [_ts("20240102")]  # first eval day
+        assert schedule[_ts("20240102")].weights == {"A": 1.0}
+
+    def test_later_signal_supersedes_on_same_exec_day(self):
+        targets = [
+            TargetSnapshot(_ts("20240102"), {"A": 0.5}),
+            TargetSnapshot(_ts("20240102"), {"B": 0.7}),  # same signal date, later
+        ]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        assert schedule[_ts("20240103")].weights == {"B": 0.7}
+
+    def test_signal_after_last_eval_day_is_not_scheduled(self):
+        targets = [TargetSnapshot(_ts("20240110"), {"A": 1.0})]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        assert schedule == {}
+
+    def test_empty_weights_means_cash(self):
+        targets = [TargetSnapshot(_ts("20240102"), {})]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        assert schedule[_ts("20240103")].weights == {}
+
+    def test_multiple_signals_map_to_distinct_exec_days(self):
+        targets = [
+            TargetSnapshot(_ts("20240102"), {"A": 0.5}),
+            TargetSnapshot(_ts("20240103"), {"B": 0.5}),
+        ]
+        schedule = schedule_targets(targets, self.EVAL_DATES)
+        assert set(schedule.keys()) == {_ts("20240103"), _ts("20240104")}
