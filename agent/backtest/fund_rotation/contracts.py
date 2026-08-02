@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AbstractSet, Mapping, Protocol, runtime_checkable
+from typing import AbstractSet, Mapping, Protocol, Sequence, runtime_checkable
 
 import pandas as pd
 from pydantic import BaseModel
@@ -229,3 +229,37 @@ def validate_target_decision(
         raise StrategyContractViolation(
             f"target_weights + cash_weight must sum to 1.0, got {total}"
         )
+
+
+def merge_requirements(
+    requirements: Sequence[StrategyDataRequirements],
+) -> StrategyDataRequirements:
+    """§23 — merge several strategies' data requirements into one.
+
+    Datasets and fields are unioned; warmup is the maximum; needs_benchmark is
+    the logical OR; the frequency must be consistent across all requirements
+    (conflicting frequencies fail explicitly). No clustering-gate parameter is
+    part of the common requirements object.
+    """
+    if not requirements:
+        raise ValueError("no requirements to merge")
+    datasets: set[str] = set()
+    fields: set[str] = set()
+    warmup = 0
+    needs_benchmark = False
+    frequencies: set[str] = set()
+    for req in requirements:
+        datasets.update(req.required_datasets)
+        fields.update(req.required_fields)
+        warmup = max(warmup, req.warmup_trade_days)
+        needs_benchmark = needs_benchmark or req.needs_benchmark
+        frequencies.add(req.frequency)
+    if len(frequencies) > 1:
+        raise ValueError(f"conflicting rebalance frequencies: {sorted(frequencies)}")
+    return StrategyDataRequirements(
+        required_datasets=tuple(sorted(datasets)),
+        required_fields=tuple(sorted(fields)),
+        warmup_trade_days=warmup,
+        frequency=next(iter(frequencies)),
+        needs_benchmark=needs_benchmark,
+    )
