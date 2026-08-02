@@ -432,3 +432,56 @@ class TestPipelineE2E:
         assert min(result.weekly_targets) == "20220527"
         order_dates = sorted(o["trade_date"] for o in result.orders if o["trade_date"])
         assert order_dates[0] == "20220530"
+
+    def test_no_targets_produces_cash_nav_over_full_evaluation_interval(self):
+        """§32.1 — with no targets the execution loop still emits a cash NAV
+        (initial NAV) spanning the full evaluation calendar, not an empty
+        series."""
+        from backtest.fund_rotation.pipeline import (
+            PipelineResult, _build_execution_context, _run_execution_loop,
+        )
+        fund_daily, fund_adj, _ = _synthetic_data(n_etfs=10, n_weeks=80)
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+            min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230701",
+        )
+        ctx = _build_execution_context(fund_daily, fund_adj, config)
+        eval_dates = [d for d in ctx.all_trade_dates if "20220101" <= d <= "20230701"]
+        result = PipelineResult()
+        _run_execution_loop(result, config, ctx, execution_targets={},
+                            evaluation_dates=eval_dates)
+        assert len(result.executed_equity) == len(eval_dates)
+        assert (result.executed_equity == 1.0).all()
+
+    def test_all_blocked_produces_cash_nav_over_full_interval(self):
+        """§32.1 — when every increase is blocked (insufficient cash after
+        commission), the NAV stays cash over the full evaluation interval."""
+        from backtest.fund_rotation.pipeline import (
+            PipelineResult, _build_execution_context, _run_execution_loop,
+        )
+        fund_daily, fund_adj, _ = _synthetic_data(n_etfs=10, n_weeks=80)
+        # Tiny capital: target size rounds below one lot (100 shares), so every
+        # buy is blocked for insufficient cash after commission/lot.
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+            min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            initial_capital=10.0, commission_min=5.0,
+            start_date="20220101", end_date="20230701",
+        )
+        ctx = _build_execution_context(fund_daily, fund_adj, config)
+        eval_dates = [d for d in ctx.all_trade_dates if "20220101" <= d <= "20230701"]
+        targets = {"20220603": {"510300.SH": 1.0}}
+        result = PipelineResult(weekly_targets=dict(targets))
+        _run_execution_loop(result, config, ctx, execution_targets=dict(targets),
+                            evaluation_dates=eval_dates)
+        # Every buy attempt is blocked for insufficient cash.
+        buy_events = [e for e in result.trade_events if e.get("action") == "BUY"]
+        assert buy_events, "expected buy attempts"
+        assert all(e["status"] == "BLOCKED" for e in buy_events)
+        assert all("insufficient_cash" in e["reason"] for e in buy_events)
+        # Cash NAV over the full evaluation interval.
+        assert len(result.executed_equity) == len(eval_dates)
+        assert (result.executed_equity == 1.0).all()

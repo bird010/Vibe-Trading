@@ -476,6 +476,12 @@ def run_signal_pipeline(
             result.strategy_cumulative = result.strategy_cumulative[
                 result.strategy_cumulative.index >= config.start_date
             ]
+    else:
+        # No targets: the theoretical strategy holds cash (initial NAV) over the
+        # full evaluation interval, so metrics are defined and zero (§32.1).
+        result.strategy_cumulative = pd.Series(
+            1.0, index=list(evaluation_dates), name="theoretical_strategy",
+        )
 
     # Step 8: Execute the continuous account before benchmark computation.
     # This ordering is also the public task-state contract (§15.2).
@@ -629,7 +635,21 @@ def _run_execution_loop(
     residual orders, daily mark-to-market equity, and fee impacts.
     """
     targets_map = execution_targets if execution_targets is not None else result.weekly_targets
+    # §24: the evaluation calendar (trading days within [start_date, end_date])
+    # is the single source passed by the caller; fall back to deriving it from
+    # the context when not supplied.
+    if evaluation_dates is None:
+        evaluation_dates = [
+            d for d in ctx.all_trade_dates
+            if (not config.start_date or d >= config.start_date)
+            and (not config.end_date or d <= config.end_date)
+        ]
     if not targets_map:
+        # No targets: hold cash (initial NAV) over the full evaluation interval
+        # so equity and metrics are defined even without any trade (§32.1).
+        result.executed_equity = pd.Series(
+            1.0, index=list(evaluation_dates), name="executed_strategy",
+        )
         return
 
     rules = ChinaETFExecutionRules(
@@ -646,18 +666,9 @@ def _run_execution_loop(
     adj_lookup = ctx.adj_lookup
     all_trade_dates = ctx.all_trade_dates
 
-    # §24: build the execution schedule via the shared schedule_targets. The
-    # evaluation calendar (trading days within [start_date, end_date]) is the
-    # single source passed by the caller; a pre-evaluation signal maps to the
-    # first evaluation trading day, and an in-evaluation signal maps to the first
-    # trading day strictly after it. Fall back to deriving the calendar from the
-    # context when the caller does not supply it.
-    if evaluation_dates is None:
-        evaluation_dates = [
-            d for d in all_trade_dates
-            if (not config.start_date or d >= config.start_date)
-            and (not config.end_date or d <= config.end_date)
-        ]
+    # §24: build the execution schedule via the shared schedule_targets. A
+    # pre-evaluation signal maps to the first evaluation trading day, and an
+    # in-evaluation signal maps to the first trading day strictly after it.
     snapshots = [TargetSnapshot(pd.Timestamp(sw), tgts) for sw, tgts in targets_map.items()]
     schedule = schedule_targets(snapshots, [pd.Timestamp(d) for d in evaluation_dates])
     exec_schedule: list[tuple[str, str, dict[str, float]]] = [
@@ -666,13 +677,16 @@ def _run_execution_loop(
     ]
 
     if not exec_schedule:
+        # Targets exist but none are schedulable within the evaluation interval:
+        # hold cash over the full interval.
+        result.executed_equity = pd.Series(
+            1.0, index=list(evaluation_dates), name="executed_strategy",
+        )
         return
 
-    # Determine the full date range for daily equity
-    first_exec_date = exec_schedule[0][1]
-    last_date = all_trade_dates[-1] if all_trade_dates else first_exec_date
-    # Only track equity from first execution date onward
-    equity_dates = [d for d in all_trade_dates if d >= first_exec_date]
+    # Track daily equity over the full evaluation interval (§24/§32.1). Days
+    # before the first execution hold cash (initial NAV).
+    equity_dates = list(evaluation_dates)
 
     # Map exec_date -> (signal_week, targets) for quick lookup
     exec_date_map: dict[str, tuple[str, dict[str, float]]] = {}

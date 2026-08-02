@@ -2,12 +2,17 @@
   "note": "Approved golden divergences introduced by Phase 0 correctness fixes (design spec \u00a732.1). Each approved_prefix whitelists diff lines (by prefix) that are expected consequences of an approved fix. Task 8 finalizes and reviews this list against the full post-fix golden. Prefixes are intentionally scoped per fix category so unintended changes elsewhere (orders, equity curves, cluster labels, integer shares) still fail the golden test.",
   "approved_prefixes": [
     "strategy_metrics.",
-    "benchmark_metrics."
+    "benchmark_metrics.",
+    "positions_summary"
   ],
   "categories": {
-    "\u9996\u671f\u6536\u76ca/\u6307\u6807 (Task 5: initial_nav anchor, design \u00a732.1)": {
+    "首期收益/指标 (Task 5: initial_nav anchor, design §32.1)": {
       "prefixes": ["strategy_metrics.", "benchmark_metrics."],
       "explanation": "compute_performance_metrics now prepends a dateless initial_nav=1.0 anchor: the first evaluation day's return is measured against 1.0 (not dropped), num_periods increases by 1, and total_return is measured from the anchor. Equity curves, orders, fills, positions, rebalance weeks and cluster labels are unchanged."
+    },
+    "完整评价区间覆盖 (Task 7: full-interval equity, design §24/§32.1)": {
+      "prefixes": ["positions_summary"],
+      "explanation": "Daily equity/positions now span the full evaluation calendar [start_date, end_date]; days before the first execution hold cash (initial NAV). positions_summary therefore grows from the first-execution-onward length to the full evaluation-calendar length (cash rows prepended). The executed_equity curve (equity_curves) is still reindexed to the common comparison interval and remains verified unchanged."
     }
   }
 }
