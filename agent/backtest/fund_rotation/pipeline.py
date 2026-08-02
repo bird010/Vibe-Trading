@@ -331,8 +331,13 @@ def run_signal_pipeline(
 
         # Recluster if needed
         if weeks_since_recluster >= config.recluster_interval_weeks or not current_clusters:
-            # Use data up to signal week for correlation
-            lookback_start = max(0, week_idx - config.correlation_lookback_weeks)
+            # §32.1: the correlation window must contain exactly
+            # correlation_lookback_weeks weekly-return observations, ending at
+            # the signal week (inclusive) and never including future data.
+            # Weekly returns need N+1 weekend prices for N returns, so the
+            # window starts at week_idx - lookback + 1 (the first valid return
+            # row), giving exactly `correlation_lookback_weeks` rows.
+            lookback_start = max(0, week_idx - config.correlation_lookback_weeks + 1)
             window_returns = weekly_returns.iloc[lookback_start:week_idx + 1]
 
             # Historical eligibility at this signal date

@@ -288,3 +288,63 @@ class TestPipelineE2E:
         assert all(fm is None for fm in calls), (
             f"every pipeline pct_change must pass fill_method=None, got {calls}"
         )
+
+    def test_correlation_window_is_exactly_lookback_rows(self, monkeypatch):
+        """§32.1 — the window fed to correlation has exactly lookback rows and
+        ends at the signal week (no future data)."""
+        windows: list = []
+        from backtest.fund_rotation import pipeline as pipeline_mod
+        orig = pipeline_mod.compute_correlation_distance
+
+        def spy(sub_returns, **kwargs):
+            windows.append(list(sub_returns.index))
+            return orig(sub_returns, **kwargs)
+
+        monkeypatch.setattr(
+            "backtest.fund_rotation.pipeline.compute_correlation_distance", spy,
+        )
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=52, correlation_lookback_weeks=52,
+            min_valid_weeks=20, min_pairwise_weeks=20, recluster_interval_weeks=26,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230701",
+        )
+        run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        assert windows, "correlation distance was not exercised"
+        for week_endings in windows:
+            assert len(week_endings) == 52, (
+                f"correlation window must contain exactly 52 weekly returns, "
+                f"got {len(week_endings)}"
+            )
+
+    def test_52_week_boundary_first_signal_and_insufficient(self):
+        """§32.1 — 52 week-endings cannot form a complete 52-return window (no
+        signal, not an error); 53 week-endings produce the first signal; fewer
+        than 52 raises a defined insufficient-history error (no silent window
+        shortening)."""
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=52, correlation_lookback_weeks=52,
+            min_valid_weeks=20, min_pairwise_weeks=20, recluster_interval_weeks=26,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230701",
+        )
+
+        # 51 week-endings -> insufficient history (defined failure).
+        fd51, fa51, df51 = _synthetic_data(n_etfs=10, n_weeks=51)
+        with pytest.raises(ValueError, match="Insufficient history"):
+            run_signal_pipeline(config, fd51, fa51, df51)
+
+        # 52 week-endings -> only 51 valid returns, no complete window -> no signal.
+        fd52, fa52, df52 = _synthetic_data(n_etfs=10, n_weeks=52)
+        r52 = run_signal_pipeline(config, fd52, fa52, df52)
+        assert len(r52.weekly_targets) == 0
+
+        # 54 week-endings -> the first signal lands on the 53rd week-ending
+        # (20230106); the 54th week provides a next trading day so the signal
+        # executes. (Exactly 53 weeks cannot run end-to-end: the first signal
+        # would sit on the last week-ending with no execution day — §32.1.)
+        fd54, fa54, df54 = _synthetic_data(n_etfs=10, n_weeks=54)
+        r54 = run_signal_pipeline(config, fd54, fa54, df54)
+        assert len(r54.weekly_targets) >= 1
+        assert min(r54.weekly_targets) == "20230106"  # 53rd week-ending

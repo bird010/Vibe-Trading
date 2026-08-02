@@ -187,6 +187,28 @@ class TestWeeklyReturns:
         week_endings = result.index.get_level_values("week_ending").astype(str).tolist()
         assert "20240104" in week_endings
 
+    def test_53_weekend_prices_form_52_valid_returns(self):
+        """§32.1 — 53 consecutive valid weekend prices form exactly 52 weekly returns."""
+        start = pd.Timestamp("2022-01-07")  # a Friday
+        rows, adj_rows = [], []
+        price = 100.0
+        for w in range(53):
+            friday = start + pd.Timedelta(weeks=w)
+            for offset in range(5):  # Mon-Fri
+                d = (friday - pd.Timedelta(days=4) + pd.Timedelta(days=offset)).strftime("%Y%m%d")
+                price *= 1.01
+                rows.append({"ts_code": "A", "trade_date": d, "close": round(price, 3)})
+                adj_rows.append({"ts_code": "A", "trade_date": d, "adj_factor": 1.0})
+        daily = _fund_daily_df(rows)
+        adj = _fund_adj_df(adj_rows)
+        as_of = (start + pd.Timedelta(weeks=52)).strftime("%Y%m%d")
+        result = compute_weekly_returns(daily, adj, as_of_date=as_of)
+        # 53 week-endings -> 53 rows, the first is NaN -> exactly 52 valid returns.
+        assert len(result) == 53
+        assert len(result["A"].dropna()) == 52
+        # The first (earliest) week-ending has no prior price -> NaN return.
+        assert np.isnan(result["A"].iloc[0])
+
 
 def _spy_pct_change(monkeypatch):
     """Record the fill_method kwarg of every DataFrame/Series pct_change call.
