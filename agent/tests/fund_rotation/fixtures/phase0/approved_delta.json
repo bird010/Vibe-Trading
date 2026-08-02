@@ -3,7 +3,7 @@
   "approved_prefixes": [
     "strategy_metrics.",
     "benchmark_metrics.",
-    "positions_summary"
+    "positions_summary: length differs"
   ],
   "categories": {
     "首期收益/指标 (Task 5: initial_nav anchor, design §32.1)": {
@@ -11,8 +11,8 @@
       "explanation": "compute_performance_metrics now prepends a dateless initial_nav=1.0 anchor: the first evaluation day's return is measured against 1.0 (not dropped), num_periods increases by 1, and total_return is measured from the anchor. Equity curves, orders, fills, positions, rebalance weeks and cluster labels are unchanged."
     },
     "完整评价区间覆盖 (Task 7: full-interval equity, design §24/§32.1)": {
-      "prefixes": ["positions_summary"],
-      "explanation": "Daily equity/positions now span the full evaluation calendar [start_date, end_date]; days before the first execution hold cash (initial NAV). positions_summary therefore grows from the first-execution-onward length to the full evaluation-calendar length (cash rows prepended). The executed_equity curve (equity_curves) is still reindexed to the common comparison interval and remains verified unchanged."
+      "prefixes": ["positions_summary: length differs"],
+      "explanation": "Daily equity/positions now span the full evaluation calendar [start_date, end_date]; days before the first execution hold cash (initial NAV). positions_summary therefore grows from the first-execution-onward length to the full evaluation-calendar length (cash rows prepended); only the length-difference line is whitelisted so any row-level regression in the overlapping execution period still fails. The executed_equity curve (equity_curves) is still reindexed to the common comparison interval and remains verified unchanged."
     }
   }
 }
