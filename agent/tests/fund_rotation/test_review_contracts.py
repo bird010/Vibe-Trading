@@ -190,3 +190,44 @@ def test_metrics_pct_change_uses_fill_method_none(monkeypatch):
     assert all(fm is None for fm in calls), (
         f"metrics pct_change must pass fill_method=None, got {calls}"
     )
+
+
+# ── Phase 1 architecture guards (§15.1/§16: no clustering in public layer) ──
+
+def test_public_contracts_do_not_import_clustering_or_strategy_internals():
+    """Public contracts/catalog must not import clustering, correlation,
+    momentum, or any concrete strategy-internal module."""
+    from backtest.fund_rotation import catalog, contracts
+
+    forbidden_import_fragments = (
+        "fund_rotation.clustering",
+        "fund_rotation.correlation",
+        "fund_rotation.momentum",
+        "fund_rotation.strategies.correlation_all_members.strategy",
+        "fund_rotation.strategies.correlation_all_members.config",
+    )
+    for mod in (contracts, catalog):
+        src = inspect.getsource(mod)
+        import_lines = [
+            ln for ln in src.splitlines()
+            if ln.strip().startswith(("import ", "from "))
+        ]
+        for ln in import_lines:
+            for frag in forbidden_import_fragments:
+                assert frag not in ln, (
+                    f"{mod.__name__} imports forbidden module: {ln.strip()}"
+                )
+
+
+def test_decision_context_exposes_no_lance_path_or_mutable_config():
+    """§6 — StrategyDecisionContext exposes only signal_date, a controlled
+    data view and read-only previous weights; no raw Lance path/dataset handle
+    and no mutable pipeline config."""
+    from backtest.fund_rotation.contracts import StrategyDecisionContext
+
+    fields = set(StrategyDecisionContext.__dataclass_fields__)
+    assert fields == {"signal_date", "data_view", "previous_target_weights"}
+    for forbidden in ("lance", "dataset", "fund_daily", "fund_adj", "config", "pipeline"):
+        assert not any(forbidden in f for f in fields), (
+            f"decision context must not expose {forbidden!r}"
+        )
