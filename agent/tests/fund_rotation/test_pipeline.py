@@ -377,6 +377,44 @@ class TestPipelineE2E:
         first_orders = [o for o in result.orders if o["trade_date"] == "20220530"]
         assert first_orders, "expected orders on the first evaluation day"
         assert all(o["trade_date"] == "20220530" for o in first_orders)
+        # The initial position is built via BUY orders at the first eval day open.
+        assert any(o["direction"] == "BUY" for o in first_orders)
+
+    def test_three_path_first_execution_day_consistency(self):
+        """§24/step 4 — the real executor schedules the same pre-evaluation
+        target to the same first evaluation day produced by the shared
+        schedule_targets (the ideal executor's identical scheduling is covered
+        by test_ideal_executor.py)."""
+        from backtest.fund_rotation.evaluation import TargetSnapshot, schedule_targets
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+        base = dict(k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+                    min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+                    momentum_window_weeks=4)
+        # Recover the pre-evaluation target (week 20220527) via an early start.
+        early = run_signal_pipeline(
+            FundRotationConfig(**base, start_date="20220101", end_date="20230701"),
+            fund_daily, fund_adj, dim_fund,
+        )
+        pre_eval_target = early.weekly_targets["20220527"]
+
+        # Canonical schedule from the shared function + evaluation calendar.
+        eval_dates = [pd.Timestamp(d) for d in sorted(
+            d for d in fund_daily["trade_date"].astype(str).unique()
+            if "20220530" <= d <= "20230701"
+        )]
+        schedule = schedule_targets(
+            [TargetSnapshot(pd.Timestamp("20220527"), pre_eval_target)], eval_dates,
+        )
+        canonical_first = min(schedule).strftime("%Y%m%d")
+        assert canonical_first == "20220530"
+
+        # Real executor's first order matches the canonical schedule.
+        result = run_signal_pipeline(
+            FundRotationConfig(**base, start_date="20220530", end_date="20230701"),
+            fund_daily, fund_adj, dim_fund,
+        )
+        real_first = min(o["trade_date"] for o in result.orders if o["trade_date"])
+        assert real_first == canonical_first
 
     def test_no_pre_evaluation_target_first_execution_at_first_signal(self):
         """With start_date before the first signal, the first execution is the

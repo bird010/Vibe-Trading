@@ -482,7 +482,8 @@ def run_signal_pipeline(
     _notify("EXECUTING")
     exec_ctx = _build_execution_context(fund_daily, fund_adj, config, profiler=profiler)
     _run_execution_loop(result, config, exec_ctx, profiler=profiler,
-                        execution_targets=execution_targets)
+                        execution_targets=execution_targets,
+                        evaluation_dates=evaluation_dates)
 
     # Step 9: Benchmarks — §14.1
     _notify("COMPUTING_BENCHMARKS")
@@ -498,7 +499,8 @@ def run_signal_pipeline(
         buy_hold_run = PipelineResult(
             weekly_targets={first_week: {"510300.SH": 1.0}},
         )
-        _run_execution_loop(buy_hold_run, config, exec_ctx, profiler=profiler)
+        _run_execution_loop(buy_hold_run, config, exec_ctx, profiler=profiler,
+                            evaluation_dates=evaluation_dates)
         result.buy_hold_benchmark = buy_hold_run.executed_equity
 
         # §14.1.1: Dynamic equal-weight theoretical index (no execution costs).
@@ -615,6 +617,7 @@ def _run_execution_loop(
     ctx: ExecutionContext,
     profiler: ExecutionProfiler | None = None,
     execution_targets: dict | None = None,
+    evaluation_dates: list[str] | None = None,
 ) -> None:
     """§12 — Run continuous-account execution with daily equity tracking.
 
@@ -644,16 +647,19 @@ def _run_execution_loop(
     all_trade_dates = ctx.all_trade_dates
 
     # §24: build the execution schedule via the shared schedule_targets. The
-    # evaluation calendar is the trading days within [start_date, end_date]; a
-    # pre-evaluation signal maps to the first evaluation trading day, and an
-    # in-evaluation signal maps to the first trading day strictly after it.
-    eval_calendar = [
-        d for d in all_trade_dates
-        if (not config.start_date or d >= config.start_date)
-        and (not config.end_date or d <= config.end_date)
-    ]
+    # evaluation calendar (trading days within [start_date, end_date]) is the
+    # single source passed by the caller; a pre-evaluation signal maps to the
+    # first evaluation trading day, and an in-evaluation signal maps to the first
+    # trading day strictly after it. Fall back to deriving the calendar from the
+    # context when the caller does not supply it.
+    if evaluation_dates is None:
+        evaluation_dates = [
+            d for d in all_trade_dates
+            if (not config.start_date or d >= config.start_date)
+            and (not config.end_date or d <= config.end_date)
+        ]
     snapshots = [TargetSnapshot(pd.Timestamp(sw), tgts) for sw, tgts in targets_map.items()]
-    schedule = schedule_targets(snapshots, [pd.Timestamp(d) for d in eval_calendar])
+    schedule = schedule_targets(snapshots, [pd.Timestamp(d) for d in evaluation_dates])
     exec_schedule: list[tuple[str, str, dict[str, float]]] = [
         (snap.signal_date.strftime("%Y%m%d"), exec_date.strftime("%Y%m%d"), dict(snap.weights))
         for exec_date, snap in sorted(schedule.items())
@@ -1130,15 +1136,3 @@ def _mark_to_market(
             price = executor._last_close.get(code, 0.0)
         equity += size * price
     return equity
-
-
-def _find_first_trade_date_after(trade_dates: list[str], target: str) -> str | None:
-    """Find the first trade date STRICTLY AFTER target from a sorted list.
-
-    Anti-look-ahead: signal at week_ending (Friday close) → execute next
-    trading day (typically Monday).
-    """
-    for d in trade_dates:
-        if d > target:
-            return d
-    return None

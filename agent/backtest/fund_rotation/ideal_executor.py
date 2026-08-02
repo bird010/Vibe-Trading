@@ -59,11 +59,20 @@ def run_daily_ideal_account(
         for signal_date, raw_targets in weekly_targets.items()
     ]
     eval_dates = [pd.Timestamp(d) for d in (evaluation_dates if evaluation_dates is not None else dates)]
+    market_dates = set(dates)
     for exec_date, snap in schedule_targets(snapshots, eval_dates).items():
         # A later signal mapped to the same market day supersedes the earlier
         # one before any order is attempted (schedule_targets already resolves
-        # this; str() key keeps the existing string-date activation map).
-        activations[exec_date.strftime("%Y%m%d")] = dict(snap.weights)
+        # this). Align the activation to the first actual market day >= exec_date
+        # so it never lands on a day absent from the merged market frame (e.g. a
+        # day with no positive adj_factor); it rolls forward to the next valid
+        # market day, matching the legacy next-valid-open behaviour.
+        exec_key = exec_date.strftime("%Y%m%d")
+        if exec_key not in market_dates:
+            exec_key = next((d for d in dates if d >= exec_key), None)
+            if exec_key is None:
+                continue
+        activations[exec_key] = dict(snap.weights)
 
     cash = 1.0
     quantities: dict[str, float] = {}

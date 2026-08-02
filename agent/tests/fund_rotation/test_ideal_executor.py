@@ -37,6 +37,40 @@ def test_signal_after_friday_close_does_not_capture_monday_gap():
     assert equity.loc["20240108"] == pytest.approx(1.0)
 
 
+def test_pre_evaluation_signal_activates_at_first_evaluation_day():
+    """§24 — with evaluation_dates supplied, a signal dated before the first
+    evaluation day activates at the first evaluation day (not the first market
+    day after the signal)."""
+    daily, adj = _market([
+        ("20240105", "ETF", 100.0, 105.0),
+        ("20240108", "ETF", 105.0, 110.0),
+        ("20240109", "ETF", 110.0, 120.0),
+    ])
+    # Signal dated 20240104 (before the first market day 20240105); evaluation
+    # starts 20240108.
+    equity = run_daily_ideal_account(
+        {"20240104": {"ETF": 1.0}}, daily, adj,
+        evaluation_dates=["20240108", "20240109"],
+    )
+    # No position on 20240105 (still cash); activation happens on 20240108.
+    assert equity.loc["20240105"] == pytest.approx(1.0)
+    assert equity.loc["20240108"] == pytest.approx(110.0 / 105.0)
+
+
+def test_omitting_evaluation_dates_falls_back_to_full_market_calendar():
+    """Without evaluation_dates, a pre-evaluation signal activates at the first
+    market day after the signal (legacy behaviour)."""
+    daily, adj = _market([
+        ("20240105", "ETF", 100.0, 105.0),
+        ("20240108", "ETF", 105.0, 110.0),
+    ])
+    equity = run_daily_ideal_account(
+        {"20240104": {"ETF": 1.0}}, daily, adj,
+    )
+    # Activates at the first market day after the signal (20240105).
+    assert equity.loc["20240105"] == pytest.approx(105.0 / 100.0)
+
+
 def test_symbols_execute_independently_and_missing_open_remains_residual_cash():
     daily, adj = _market([
         ("20240105", "A", 100.0, 100.0),
