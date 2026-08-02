@@ -119,6 +119,8 @@ def compute_weekly_returns(
     weekly_close.index = weekly_close.index.strftime("%Y%m%d")
     weekly_close.index.name = "week_ending"
 
-    # Compute returns
-    weekly_returns = weekly_close.pct_change()
+    # Compute returns (fill_method=None: never forward-fill missing prices
+    # before differencing, so a price gap yields NaN rather than a spurious
+    # cross-gap return — design §6/§32.1, robust across pandas versions).
+    weekly_returns = weekly_close.pct_change(fill_method=None)
     return weekly_returns

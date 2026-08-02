@@ -186,3 +186,82 @@ class TestWeeklyReturns:
         # First week ending should be 20240104 (Thursday, last available)
         week_endings = result.index.get_level_values("week_ending").astype(str).tolist()
         assert "20240104" in week_endings
+
+
+def _spy_pct_change(monkeypatch):
+    """Record the fill_method kwarg of every DataFrame/Series pct_change call.
+
+    A call that omits fill_method is recorded as the sentinel "ABSENT" so the
+    contract test can distinguish "not passed" from "passed as None".
+    """
+    calls: list = []
+    orig_df = pd.DataFrame.pct_change
+    orig_series = pd.Series.pct_change
+
+    def df_spy(self, *args, **kwargs):
+        calls.append(kwargs.get("fill_method", "ABSENT"))
+        return orig_df(self, *args, **kwargs)
+
+    def series_spy(self, *args, **kwargs):
+        calls.append(kwargs.get("fill_method", "ABSENT"))
+        return orig_series(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "pct_change", df_spy)
+    monkeypatch.setattr(pd.Series, "pct_change", series_spy)
+    return calls
+
+
+class TestMissingReturnPolicy:
+    """§6/§32.1 — missing prices must not be forward-filled before differencing."""
+
+    def test_gap_yields_nan_not_cross_gap_return(self):
+        """A missing week-ending close produces NaN returns, not a spurious jump.
+
+        Two ETFs are used so the week with A's missing close is retained in the
+        wide frame (B has a value there); A's weekly close is NaN that week, and
+        the return after the gap must stay NaN rather than a forward-filled
+        cross-gap value.
+        """
+        daily = _fund_daily_df([
+            {"ts_code": "A", "trade_date": "20240105", "close": 100.0},
+            {"ts_code": "A", "trade_date": "20240112", "close": float("nan")},  # missing
+            {"ts_code": "A", "trade_date": "20240119", "close": 120.0},
+            {"ts_code": "B", "trade_date": "20240105", "close": 50.0},
+            {"ts_code": "B", "trade_date": "20240112", "close": 55.0},
+            {"ts_code": "B", "trade_date": "20240119", "close": 60.0},
+        ])
+        adj = _fund_adj_df([
+            {"ts_code": "A", "trade_date": "20240105", "adj_factor": 1.0},
+            {"ts_code": "A", "trade_date": "20240112", "adj_factor": 1.0},
+            {"ts_code": "A", "trade_date": "20240119", "adj_factor": 1.0},
+            {"ts_code": "B", "trade_date": "20240105", "adj_factor": 1.0},
+            {"ts_code": "B", "trade_date": "20240112", "adj_factor": 1.0},
+            {"ts_code": "B", "trade_date": "20240119", "adj_factor": 1.0},
+        ])
+        result = compute_weekly_returns(daily, adj, as_of_date="20240119")
+        a_by_week = result["A"].to_dict()
+        # The week after A's gap (20240119) must be NaN, NOT 120/100-1 = 0.2
+        # (which a forward-fill would fabricate across the missing week).
+        assert np.isnan(a_by_week["20240119"]), (
+            f"expected NaN return after gap, got {a_by_week['20240119']}"
+        )
+        assert not np.isclose(a_by_week["20240119"], 120.0 / 100.0 - 1.0)
+        # B has no gap: its return is well-defined.
+        assert np.isclose(result["B"].to_dict()["20240119"], 60.0 / 55.0 - 1.0)
+
+    def test_compute_weekly_returns_passes_fill_method_none(self, monkeypatch):
+        """Contract: the returns path must explicitly pass fill_method=None."""
+        calls = _spy_pct_change(monkeypatch)
+        daily = _fund_daily_df([
+            {"ts_code": "A", "trade_date": "20240105", "close": 100.0},
+            {"ts_code": "A", "trade_date": "20240112", "close": 110.0},
+        ])
+        adj = _fund_adj_df([
+            {"ts_code": "A", "trade_date": "20240105", "adj_factor": 1.0},
+            {"ts_code": "A", "trade_date": "20240112", "adj_factor": 1.0},
+        ])
+        compute_weekly_returns(daily, adj, as_of_date="20240112")
+        assert calls, "pct_change was not called by compute_weekly_returns"
+        assert all(fm is None for fm in calls), (
+            f"every pct_change must pass fill_method=None, got {calls}"
+        )

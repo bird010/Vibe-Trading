@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from backtest.engines.base import BaseEngine
 from backtest.fund_rotation import pipeline
+from backtest.fund_rotation.metrics import compute_performance_metrics
 from src.stockpred.fund_rotation import artifacts, service
 from src.api.fund_rotation_routes import register_fund_rotation_routes
 
@@ -156,3 +157,36 @@ def test_invalid_state_transition_is_not_silently_swallowed():
 
 def test_only_one_etf_capacity_execution_implementation_exists():
     assert inspect.getsource(pipeline).count("def _execute_with_capacity(") == 1
+
+
+def _spy_pct_change(monkeypatch):
+    """Record fill_method kwarg of every Series/DataFrame pct_change call."""
+    calls: list = []
+    orig_series = pd.Series.pct_change
+    orig_df = pd.DataFrame.pct_change
+
+    def series_spy(self, *args, **kwargs):
+        calls.append(kwargs.get("fill_method", "ABSENT"))
+        return orig_series(self, *args, **kwargs)
+
+    def df_spy(self, *args, **kwargs):
+        calls.append(kwargs.get("fill_method", "ABSENT"))
+        return orig_df(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "pct_change", series_spy)
+    monkeypatch.setattr(pd.DataFrame, "pct_change", df_spy)
+    return calls
+
+
+def test_metrics_pct_change_uses_fill_method_none(monkeypatch):
+    """§6/§32.1 — metrics must not forward-fill missing values before differencing."""
+    calls = _spy_pct_change(monkeypatch)
+    cumulative = pd.Series(
+        [1.0, 1.01, 1.02, 1.015, 1.03, 1.04],
+        index=["20240101", "20240102", "20240103", "20240104", "20240105", "20240108"],
+    )
+    compute_performance_metrics(cumulative, periods_per_year=244)
+    assert calls, "pct_change was not called by compute_performance_metrics"
+    assert all(fm is None for fm in calls), (
+        f"metrics pct_change must pass fill_method=None, got {calls}"
+    )

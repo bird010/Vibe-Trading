@@ -23,7 +23,7 @@ def compute_performance_metrics(
         return {"annual_return": 0.0, "annual_volatility": 0.0, "sharpe": 0.0,
                 "sortino": 0.0, "max_drawdown": 0.0, "calmar": 0.0}
 
-    returns = cumulative.pct_change().dropna()
+    returns = cumulative.pct_change(fill_method=None).dropna()
     n = len(returns)
 
     # Annualized return
@@ -116,8 +116,8 @@ def compute_excess_metrics(
     strat = strategy_cumulative.loc[common]
     bench = benchmark_cumulative.loc[common]
 
-    strat_ret = strat.pct_change().dropna()
-    bench_ret = bench.pct_change().dropna()
+    strat_ret = strat.pct_change(fill_method=None).dropna()
+    bench_ret = bench.pct_change(fill_method=None).dropna()
     excess_ret = strat_ret - bench_ret
 
     # Annualized excess return (arithmetic mean of periodic excess * periods_per_year)
@@ -147,7 +147,7 @@ def compute_yearly_breakdown(
     if cumulative.empty or len(cumulative) < 2:
         return {}
 
-    returns = cumulative.pct_change().dropna()
+    returns = cumulative.pct_change(fill_method=None).dropna()
     # Group by year (extract from index)
     try:
         years = pd.to_datetime(returns.index, format="%Y%m%d").year

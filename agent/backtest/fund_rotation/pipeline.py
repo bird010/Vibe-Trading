@@ -534,7 +534,7 @@ def run_signal_pipeline(
     if result.cluster_history:
         result.robustness["cluster_stability"] = compute_cluster_stability(result.cluster_history)
     if not result.strategy_cumulative.empty:
-        strat_returns = result.strategy_cumulative.pct_change().dropna()
+        strat_returns = result.strategy_cumulative.pct_change(fill_method=None).dropna()
         if len(strat_returns) >= 24:
             result.robustness["bootstrap"] = time_block_bootstrap(strat_returns)
         else:

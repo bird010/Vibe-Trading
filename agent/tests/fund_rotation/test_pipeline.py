@@ -255,3 +255,36 @@ class TestPipelineE2E:
             "EXECUTING",
             "COMPUTING_BENCHMARKS",
         ]
+
+    def test_full_pipeline_pct_change_uses_fill_method_none(self, monkeypatch):
+        """§6/§32.1 — every pct_change across the fund-rotation path (returns,
+        metrics, robustness) must explicitly pass fill_method=None."""
+        calls: list = []
+        orig_series = pd.Series.pct_change
+        orig_df = pd.DataFrame.pct_change
+
+        def series_spy(self, *args, **kwargs):
+            calls.append(kwargs.get("fill_method", "ABSENT"))
+            return orig_series(self, *args, **kwargs)
+
+        def df_spy(self, *args, **kwargs):
+            calls.append(kwargs.get("fill_method", "ABSENT"))
+            return orig_df(self, *args, **kwargs)
+
+        monkeypatch.setattr(pd.Series, "pct_change", series_spy)
+        monkeypatch.setattr(pd.DataFrame, "pct_change", df_spy)
+
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20,
+            correlation_lookback_weeks=20, min_valid_weeks=10,
+            min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230701",
+        )
+        run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+
+        assert calls, "pct_change was not exercised by the pipeline"
+        assert all(fm is None for fm in calls), (
+            f"every pipeline pct_change must pass fill_method=None, got {calls}"
+        )
