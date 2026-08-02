@@ -6,10 +6,7 @@ Targets → Execution → Benchmarks → Metrics → Results
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import json
 import logging
-import time as _time
 
 import pandas as pd
 
@@ -18,8 +15,6 @@ logger = logging.getLogger(__name__)
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.evaluation import (
     EvaluationContext,
-    TargetSnapshot,
-    schedule_targets,
     validate_equity_index,
 )
 from backtest.fund_rotation.universe import (
@@ -34,11 +29,6 @@ from backtest.fund_rotation.clustering import hierarchical_cluster
 from backtest.fund_rotation.momentum import compute_cluster_momentum, select_top_clusters, build_target_weights
 from backtest.fund_rotation.metrics import compute_performance_metrics
 from backtest.fund_rotation.robustness import compute_cluster_stability, time_block_bootstrap
-from backtest.fund_rotation.executor import PortfolioExecutor, RebalanceResult
-from backtest.fund_rotation.etf_rules import ChinaETFExecutionRules
-from backtest.fund_rotation.capacity import compute_adv20, apply_capacity_and_slippage, ADVIndex
-from backtest.fund_rotation.orders import OrderManager, AttemptStatus
-from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_change
 from backtest.fund_rotation.ideal_executor import run_daily_ideal_account
 from backtest.fund_rotation.benchmarks import compute_equal_weight_theoretical_index
 
@@ -46,16 +36,16 @@ from backtest.fund_rotation.benchmarks import compute_equal_weight_theoretical_i
 # Execution & valuation live in the common execution module (Phase 2 Task 2);
 # the pipeline imports them under their legacy private names for compatibility.
 from backtest.fund_rotation.execution import (
-    ExecutionContext,
+    ExecutionContext,  # noqa: F401  (re-exported for legacy callers)
     ExecutionProfiler,
     PipelineResult,
     align_theoretical_to_common_dates as _align_theoretical_to_common_dates,
     build_execution_context as _build_execution_context,
-    execute_with_capacity as _execute_with_capacity,
+    execute_with_capacity as _execute_with_capacity,  # noqa: F401  (re-exported)
     first_actual_fill_date as _first_actual_fill_date,
-    mark_to_market as _mark_to_market,
+    mark_to_market as _mark_to_market,  # noqa: F401  (re-exported)
     run_execution_loop as _run_execution_loop,
-    serialize_orders as _serialize_orders,
+    serialize_orders as _serialize_orders,  # noqa: F401  (re-exported)
 )
 
 
