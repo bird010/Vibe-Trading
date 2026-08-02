@@ -156,7 +156,13 @@ def test_invalid_state_transition_is_not_silently_swallowed():
 
 
 def test_only_one_etf_capacity_execution_implementation_exists():
-    assert inspect.getsource(pipeline).count("def _execute_with_capacity(") == 1
+    # Phase 2 Task 2 (§12/§32.3): the single implementation lives in the
+    # common execution module; the legacy pipeline only delegates to it.
+    from backtest.fund_rotation import execution
+
+    assert inspect.getsource(execution).count("def execute_with_capacity(") == 1
+    assert inspect.getsource(pipeline).count("def _execute_with_capacity(") == 0
+    assert inspect.getsource(pipeline).count("def execute_with_capacity(") == 0
 
 
 def _spy_pct_change(monkeypatch):
