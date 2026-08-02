@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -32,43 +34,47 @@ class _FakeStrategy:
     pass
 
 
-def _bind_class_to_file(cls: type, file_path: Path) -> None:
-    cls.__module__ = "my_strategy.strategy"
-    # inspect.getfile falls back to the module's __file__; set via globals.
-    import types
-
+def _bind_class_to_file(cls: type, file_path: Path, monkeypatch) -> None:
+    """Point inspect.getfile(cls) at a temp file via a monkeypatched module
+    (auto-cleaned by monkeypatch)."""
     mod = types.ModuleType("my_strategy.strategy")
     mod.__file__ = str(file_path)
-    import sys
-
-    sys.modules["my_strategy.strategy"] = mod
+    monkeypatch.setitem(sys.modules, "my_strategy.strategy", mod)
     cls.__module__ = "my_strategy.strategy"
 
 
 class TestStrategyPackageSnapshot:
-    def test_excludes_pycache(self, strategy_pkg: Path):
-        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py")
+    def test_excludes_pycache(self, strategy_pkg: Path, monkeypatch):
+        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py", monkeypatch)
         snap = snapshot_strategy_package(_FakeStrategy)
         assert all("__pycache__" not in p for p in snap.relative_paths)
         assert "strategy.py" in snap.relative_paths
         assert "config.py" in snap.relative_paths
 
-    def test_stable_across_calls(self, strategy_pkg: Path):
-        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py")
+    def test_stable_across_calls(self, strategy_pkg: Path, monkeypatch):
+        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py", monkeypatch)
         assert (
             snapshot_strategy_package(_FakeStrategy).implementation_hash
             == snapshot_strategy_package(_FakeStrategy).implementation_hash
         )
 
-    def test_sensitive_to_source_change(self, strategy_pkg: Path):
-        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py")
+    def test_sensitive_to_source_change(self, strategy_pkg: Path, monkeypatch):
+        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py", monkeypatch)
         before = snapshot_strategy_package(_FakeStrategy).implementation_hash
         (strategy_pkg / "strategy.py").write_text("VALUE = 2\n", encoding="utf-8")
         after = snapshot_strategy_package(_FakeStrategy).implementation_hash
         assert before != after
 
-    def test_captured_snapshot_immutable_to_lateral_disk_change(self, strategy_pkg: Path):
-        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py")
+    def test_records_per_file_sha256(self, strategy_pkg: Path, monkeypatch):
+        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py", monkeypatch)
+        snap = snapshot_strategy_package(_FakeStrategy)
+        file_hash_map = dict(snap.file_hashes)
+        assert set(file_hash_map) == set(snap.relative_paths)
+        # Each per-file hash is a 64-char hex SHA-256.
+        assert all(len(h) == 64 for h in file_hash_map.values())
+
+    def test_captured_snapshot_immutable_to_lateral_disk_change(self, strategy_pkg: Path, monkeypatch):
+        _bind_class_to_file(_FakeStrategy, strategy_pkg / "strategy.py", monkeypatch)
         captured = snapshot_strategy_package(_FakeStrategy)
         original_hash = captured.implementation_hash
         # Modify disk after capture; the captured object must not change (§19.1).
@@ -120,5 +126,6 @@ class TestRuntimeVersions:
         versions = record_runtime_versions()
         assert "python" in versions
         assert "pandas" in versions
+        assert "app" in versions
         # Versions are audit metadata; identity hash does not consume them.
         assert isinstance(versions["python"], str)

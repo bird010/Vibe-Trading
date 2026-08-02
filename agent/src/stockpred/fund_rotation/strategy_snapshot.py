@@ -38,6 +38,7 @@ FRAMEWORK_SOURCE_FILES: tuple[str, ...] = (
     "backtest/fund_rotation/orders.py",
     "backtest/fund_rotation/returns.py",
     "backtest/fund_rotation/metrics.py",
+    "backtest/fund_rotation/benchmarks.py",
     "backtest/fund_rotation/universe.py",
     "backtest/fund_rotation/ideal_executor.py",
 )
@@ -45,23 +46,31 @@ FRAMEWORK_SOURCE_FILES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class StrategySourceSnapshot:
-    """Captured strategy package source snapshot."""
+    """Captured strategy package source snapshot.
+
+    ``implementation_hash`` is the combined identity hash; ``file_hashes``
+    records each file's individual SHA-256 (relative path -> hex) for audit/
+    debugging (design §19 "各文件路径、内容和 SHA-256").
+    """
 
     implementation_hash: str
     relative_paths: tuple[str, ...]
+    file_hashes: tuple[tuple[str, str], ...] = ()
 
 
 def _hash_file_contents(paths_with_rel: list[tuple[str, bytes]]) -> str:
     """Stable hash over (relative_path, content) pairs.
 
     The relative path (POSIX separators) is mixed in so renamed files change the
-    hash; sorting upstream makes enumeration order irrelevant.
+    hash; sorting upstream makes enumeration order irrelevant. A NUL byte
+    separates path from content and each pair, avoiding concatenation ambiguity.
     """
     hasher = hashlib.sha256()
     for rel, content in paths_with_rel:
         hasher.update(rel.encode("utf-8"))
         hasher.update(b"\x00")
         hasher.update(content)
+        hasher.update(b"\x00")
     return hasher.hexdigest()
 
 
@@ -79,13 +88,17 @@ def snapshot_strategy_package(strategy_cls: type) -> StrategySourceSnapshot:
     )
     pairs: list[tuple[str, bytes]] = []
     rel_paths: list[str] = []
+    file_hashes: list[tuple[str, str]] = []
     for path in py_files:
         rel = path.relative_to(package_dir).as_posix()
+        content = path.read_bytes()
         rel_paths.append(rel)
-        pairs.append((rel, path.read_bytes()))
+        pairs.append((rel, content))
+        file_hashes.append((rel, hashlib.sha256(content).hexdigest()))
     return StrategySourceSnapshot(
         implementation_hash=_hash_file_contents(pairs),
         relative_paths=tuple(rel_paths),
+        file_hashes=tuple(file_hashes),
     )
 
 
@@ -135,6 +148,12 @@ def record_runtime_versions() -> dict[str, str]:
     + config + data yields the same identity regardless of where it runs).
     """
     versions: dict[str, str] = {"python": sys.version.split()[0]}
+    try:
+        from cli._version import __version__ as app_version
+
+        versions["app"] = app_version
+    except ImportError:  # pragma: no cover
+        versions["app"] = "unavailable"
     try:
         import pandas
 
