@@ -60,6 +60,17 @@ class CausalDataView:
     _universe_codes: frozenset
     _access_log: list = field(default_factory=list)
 
+    # Method -> datasets that method reads (for whitelist enforcement, §6).
+    _METHOD_DATASETS = {
+        "daily_bars": ("fund",),
+        "adjusted_closes": ("fund", "fact_fund_adj"),
+        "returns": ("fund", "fact_fund_adj"),
+        "causal_adv": ("fund",),
+        "fund_adjustments": ("fact_fund_adj",),
+        "eligible_universe": ("dim_fund",),
+        "trading_calendar": ("fund",),
+    }
+
     @property
     def signal_date(self) -> pd.Timestamp:
         return self._signal_date
@@ -70,6 +81,16 @@ class CausalDataView:
 
     # ── enforcement helpers ──
 
+    def _check_datasets(self, method: str) -> None:
+        declared = set(self._requirements.required_datasets)
+        needed = self._METHOD_DATASETS[method]
+        missing = {d for d in needed if d not in declared}
+        if missing:
+            raise UndeclaredStrategyDataAccess(
+                f"{method} requires undeclared datasets {sorted(missing)} "
+                f"(declared: {sorted(declared)})"
+            )
+
     def _check_fields(self, fields: Sequence[str]) -> None:
         declared = set(self._requirements.required_fields)
         for f in fields:
@@ -78,6 +99,24 @@ class CausalDataView:
                     f"field {f!r} is not declared in strategy requirements "
                     f"(declared: {sorted(declared)})"
                 )
+
+    def _check_lookback(self, method: str, lookback: int | None, unit_days: int) -> None:
+        """Reject lookbacks exceeding the declared warmup (in the method's unit).
+
+        ``unit_days`` converts the method's lookback unit to trading days
+        (1 for daily bars/calendar/adv, 5 for weekly, 21 for monthly).
+        """
+        if lookback is None:
+            return
+        if lookback < 0:
+            raise ValueError(f"{method} lookback must be non-negative, got {lookback}")
+        max_lookback = self._requirements.warmup_trade_days // unit_days
+        if lookback > max_lookback:
+            raise UndeclaredStrategyDataAccess(
+                f"{method} lookback {lookback} exceeds declared warmup "
+                f"({max_lookback} in this unit; warmup_trade_days="
+                f"{self._requirements.warmup_trade_days})"
+            )
 
     def _causal_filter(self, df: pd.DataFrame) -> pd.DataFrame:
         """Restrict to snapshot universe and dates <= signal_date."""
@@ -92,15 +131,24 @@ class CausalDataView:
     def _tail_dates(self, df: pd.DataFrame, lookback: int | None) -> pd.DataFrame:
         if lookback is None or df.empty or "trade_date" not in df.columns:
             return df
+        if lookback == 0:
+            return df.iloc[0:0]
         dates = sorted(df["trade_date"].astype(str).unique())
         keep = set(dates[-lookback:])
         return df[df["trade_date"].astype(str).isin(keep)]
 
     def _audit(self, method: str, fields: Sequence[str], df: pd.DataFrame) -> None:
         date_min = date_max = ""
-        if not df.empty and "trade_date" in df.columns:
-            ds = df["trade_date"].astype(str)
-            date_min, date_max = ds.min(), ds.max()
+        if not df.empty:
+            date_col = next(
+                (c for c in ("trade_date", "week_ending") if c in df.columns), None,
+            )
+            if date_col is not None:
+                ds = df[date_col].astype(str)
+                date_min, date_max = ds.min(), ds.max()
+            elif isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0:
+                date_min = df.index.min().strftime("%Y%m%d")
+                date_max = df.index.max().strftime("%Y%m%d")
         self._access_log.append(AccessRecord(
             method=method, fields=tuple(fields), rows=len(df),
             date_min=date_min, date_max=date_max,
@@ -109,7 +157,9 @@ class CausalDataView:
     # ── query surface ──
 
     def daily_bars(self, fields: Sequence[str], lookback: int | None = None) -> pd.DataFrame:
+        self._check_datasets("daily_bars")
         self._check_fields(fields)
+        self._check_lookback("daily_bars", lookback, unit_days=1)
         cols = ["ts_code", "trade_date", *[f for f in fields if f not in ("ts_code", "trade_date")]]
         df = self._causal_filter(self._fund_daily)
         df = df[[c for c in cols if c in df.columns]]
@@ -118,6 +168,8 @@ class CausalDataView:
         return df.copy()
 
     def adjusted_closes(self, lookback: int | None = None) -> pd.DataFrame:
+        self._check_datasets("adjusted_closes")
+        self._check_lookback("adjusted_closes", lookback, unit_days=1)
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
@@ -126,7 +178,9 @@ class CausalDataView:
         # Restrict columns to the snapshot universe.
         cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
         adj_close = adj_close[cols]
-        if lookback is not None:
+        if lookback == 0:
+            adj_close = adj_close.iloc[0:0]
+        elif lookback is not None:
             adj_close = adj_close.iloc[-lookback:]
         self._audit("adjusted_closes", ("adj_close",), adj_close.reset_index())
         return adj_close.copy()
@@ -136,6 +190,9 @@ class CausalDataView:
         frequency: Literal["daily", "weekly", "monthly"],
         lookback: int,
     ) -> pd.DataFrame:
+        self._check_datasets("returns")
+        unit_days = {"daily": 1, "weekly": 5, "monthly": 21}[frequency]
+        self._check_lookback("returns", lookback, unit_days=unit_days)
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
@@ -149,17 +206,28 @@ class CausalDataView:
             rets = compute_weekly_returns(self._fund_daily, self._fund_adj, signal_str)
             rets = rets[[c for c in rets.columns if str(c) in self._universe_codes]]
         elif frequency == "monthly":
-            monthly_close = adj_close.resample("ME").last()
+            monthly = adj_close.copy()
+            monthly.index = pd.to_datetime(monthly.index, format="%Y%m%d")
+            try:
+                monthly_close = monthly.resample("ME").last()  # pandas >= 2.2
+            except ValueError:  # pragma: no cover - pandas 2.0/2.1 alias
+                monthly_close = monthly.resample("M").last()
             rets = monthly_close.pct_change(fill_method=None)
         else:  # pragma: no cover - guarded by Literal
             raise UndeclaredStrategyDataAccess(f"unknown frequency {frequency!r}")
-        rets = rets.iloc[-lookback:]
+        if lookback == 0:
+            rets = rets.iloc[0:0]
+        else:
+            rets = rets.iloc[-lookback:]
         self._audit("returns", (frequency,), rets.reset_index())
         return rets.copy()
 
     def causal_adv(self, lookback_days: int = 20) -> pd.Series:
         """Causal average daily turnover (amount) per ETF, using only completed
         trading days strictly before the signal date."""
+        self._check_datasets("causal_adv")
+        self._check_fields(["amount"])
+        self._check_lookback("causal_adv", lookback_days, unit_days=1)
         df = self._causal_filter(self._fund_daily)
         if "amount" not in df.columns or df.empty:
             self._audit("causal_adv", ("amount",), df)
@@ -174,12 +242,15 @@ class CausalDataView:
         return adv.copy()
 
     def fund_adjustments(self, lookback: int | None = None) -> pd.DataFrame:
+        self._check_datasets("fund_adjustments")
+        self._check_lookback("fund_adjustments", lookback, unit_days=1)
         df = self._causal_filter(self._fund_adj)
         df = self._tail_dates(df, lookback)
         self._audit("fund_adjustments", ("adj_factor",), df)
         return df.copy()
 
     def eligible_universe(self) -> tuple[FundInstrument, ...]:
+        self._check_datasets("eligible_universe")
         dim = self._dim_fund
         dim = dim[dim["ts_code"].astype(str).isin(self._universe_codes)]
         instruments = tuple(
@@ -194,9 +265,13 @@ class CausalDataView:
         return instruments
 
     def trading_calendar(self, lookback: int | None = None) -> tuple[pd.Timestamp, ...]:
+        self._check_datasets("trading_calendar")
+        self._check_lookback("trading_calendar", lookback, unit_days=1)
         df = self._causal_filter(self._fund_daily)
         dates = sorted({str(d) for d in df["trade_date"]}) if not df.empty else []
-        if lookback is not None:
+        if lookback == 0:
+            dates = []
+        elif lookback is not None:
             dates = dates[-lookback:]
         self._audit("trading_calendar", ("trade_date",), df)
         return tuple(pd.Timestamp(d) for d in dates)

@@ -45,11 +45,12 @@ def _dim_fund():
 
 
 def _view(signal_date="20240109", universe=("A", "B", "C"),
-          fields=("close", "amount", "adj_factor", "open")):
+          fields=("close", "amount", "adj_factor", "open"),
+          datasets=("fund", "fact_fund_adj", "dim_fund"), warmup=100):
     req = StrategyDataRequirements(
-        required_datasets=("fund", "fact_fund_adj", "dim_fund"),
+        required_datasets=tuple(datasets),
         required_fields=tuple(fields),
-        warmup_trade_days=10, frequency="W", needs_benchmark=False,
+        warmup_trade_days=warmup, frequency="W", needs_benchmark=False,
     )
     return CausalDataView(
         _fund_daily=_fund_daily(), _fund_adj=_fund_adj(), _dim_fund=_dim_fund(),
@@ -118,6 +119,11 @@ class TestQuerySurface:
         rets = view.returns("daily", lookback=3)
         assert len(rets) <= 3
 
+    def test_returns_monthly(self):
+        view = _view(signal_date="20240110")
+        rets = view.returns("monthly", lookback=3)
+        assert isinstance(rets, pd.DataFrame)  # does not crash on string index
+
     def test_causal_adv_excludes_signal_date(self):
         view = _view(signal_date="20240109")
         adv = view.causal_adv(lookback_days=20)
@@ -155,3 +161,44 @@ class TestAccessAudit:
         assert log[0].rows > 0
         # No whole-table content recorded.
         assert not hasattr(log[0], "data")
+
+
+class TestDatasetAndLookbackEnforcement:
+    def test_undeclared_dataset_rejected(self):
+        # Only declares "fund"; fund_adjustments needs "fact_fund_adj".
+        view = _view(datasets=("fund",))
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            view.fund_adjustments()
+
+    def test_eligible_universe_requires_dim_dataset(self):
+        view = _view(datasets=("fund",))  # no dim_fund
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            view.eligible_universe()
+
+    def test_causal_adv_requires_amount_field(self):
+        view = _view(fields=("close",))  # amount not declared
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            view.causal_adv()
+
+    def test_lookback_overrun_rejected(self):
+        # warmup=10 trading days -> daily lookback capped at 10.
+        view = _view(warmup=10)
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            view.daily_bars(["close"], lookback=500)
+
+    def test_weekly_lookback_overrun_rejected(self):
+        # warmup=10 -> weekly lookback capped at 10//5 = 2.
+        view = _view(warmup=10)
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            view.returns("weekly", lookback=4)
+
+    def test_negative_lookback_rejected(self):
+        view = _view()
+        with pytest.raises(ValueError):
+            view.daily_bars(["close"], lookback=-1)
+
+    def test_lookback_zero_returns_empty(self):
+        view = _view(signal_date="20240110")
+        assert view.daily_bars(["close"], lookback=0).empty
+        assert view.returns("daily", lookback=0).empty
+        assert view.trading_calendar(lookback=0) == ()
