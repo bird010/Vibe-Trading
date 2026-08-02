@@ -163,19 +163,19 @@ class TestPriceLimits:
 class TestRoundSize:
     def test_rounds_down_to_integer(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(2.7, 5000.0) == 2
+        assert engine.round_size("IF2406.CFFEX", 2.7, 5000.0) == 2
 
     def test_exact_integer(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(5.0, 5000.0) == 5
+        assert engine.round_size("IF2406.CFFEX", 5.0, 5000.0) == 5
 
     def test_less_than_one_becomes_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(0.9, 5000.0) == 0
+        assert engine.round_size("IF2406.CFFEX", 0.9, 5000.0) == 0
 
     def test_negative_clamps_to_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(-2.0, 5000.0) == 0
+        assert engine.round_size("IF2406.CFFEX", -2.0, 5000.0) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -184,20 +184,18 @@ class TestRoundSize:
 
 
 class TestCommission:
-    def test_rate_commission_via_active_symbol(self) -> None:
-        """calc_commission uses _active_symbol for product-specific rate."""
+    def test_rate_commission_via_explicit_symbol(self) -> None:
+        """calc_commission uses the explicit product-specific rate."""
         engine = _make_engine()
-        engine._active_symbol = "IF2406.CFFEX"
-        comm = engine.calc_commission(2, 5000.0, 1, is_open=True)
+        comm = engine.calc_commission("IF2406.CFFEX", 2, 5000.0, 1, is_open=True)
         # 2 contracts × 5000 × 300 (multiplier) × 0.000023 = 69
         expected = 2 * 5000 * 300 * 0.000023
         assert comm == pytest.approx(expected, rel=0.01)
 
-    def test_fixed_commission_via_active_symbol(self) -> None:
+    def test_fixed_commission_via_explicit_symbol(self) -> None:
         """au uses fixed per-lot commission."""
         engine = _make_engine()
-        engine._active_symbol = "au2412.SHFE"
-        comm = engine.calc_commission(3, 500.0, 1, is_open=True)
+        comm = engine.calc_commission("au2412.SHFE", 3, 500.0, 1, is_open=True)
         expected = 3 * 10.0  # 10 RMB per lot
         assert comm == pytest.approx(expected)
 
@@ -209,7 +207,7 @@ class TestCommission:
 
     def test_commission_override(self) -> None:
         engine = _make_engine(commission_override=0.001)
-        comm = engine.calc_commission(5, 4000.0, 1, is_open=True)
+        comm = engine.calc_commission("IF2406.CFFEX", 5, 4000.0, 1, is_open=True)
         assert comm == pytest.approx(5 * 4000.0 * 0.001)
 
 
@@ -258,15 +256,15 @@ class TestMarginRate:
 class TestSlippage:
     def test_buy_slippage_increases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(5000.0, 1) > 5000.0
+        assert engine.apply_slippage("IF2406.CFFEX", 5000.0, 1) > 5000.0
 
     def test_sell_slippage_decreases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(5000.0, -1) < 5000.0
+        assert engine.apply_slippage("IF2406.CFFEX", 5000.0, -1) < 5000.0
 
     def test_custom_slippage(self) -> None:
         engine = _make_engine(slippage=0.002)
-        assert engine.apply_slippage(5000.0, 1) == pytest.approx(5010.0)
+        assert engine.apply_slippage("IF2406.CFFEX", 5000.0, 1) == pytest.approx(5010.0)
 
 
 # ---------------------------------------------------------------------------

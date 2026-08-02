@@ -97,3 +97,6 @@ tmp/
 .worktrees/
 .superpowers/
 .playwright-cli/
+.pytest_tmp/
+
+agent/tests/.pytest-*

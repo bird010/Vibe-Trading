@@ -3411,6 +3411,15 @@ register_stockpred_routes(
     require_event_stream_auth=require_event_stream_auth,
 )
 
+from src.api.fund_rotation_routes import register_fund_rotation_routes  # noqa: E402
+register_fund_rotation_routes(
+    app,
+    runs_dir=RUNS_DIR,
+    require_auth=require_auth,
+    require_event_stream_auth=require_event_stream_auth,
+    stockpred_root=Path(__file__).resolve().parent.parent.parent / "StockPred",
+)
+
 
 # ============================================================================
 # Scheduled Research Routes

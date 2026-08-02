@@ -175,19 +175,19 @@ class GlobalFuturesEngine(FuturesBaseEngine):
                         return False
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """Integer contracts, minimum 1."""
         return max(int(raw_size), 0)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
-        """Per-contract fixed commission (uses _active_symbol for product lookup).
+    def calc_commission(self, symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
+        """Per-contract fixed commission using the explicit product symbol.
 
         ``_direction`` is unused — reserved for future borrow/financing
         asymmetry on short positions.
         """
         if self._comm_override is not None:
             return size * self._comm_override
-        return self.calc_commission_for_symbol(self._active_symbol, size, price, is_open)
+        return self.calc_commission_for_symbol(symbol, size, price, is_open)
 
     def calc_commission_for_symbol(
         self, symbol: str, size: float, price: float, is_open: bool,
@@ -207,7 +207,7 @@ class GlobalFuturesEngine(FuturesBaseEngine):
         rate = _COMMISSION_PER_CONTRACT.get(product, _DEFAULT_COMMISSION)
         return size * rate
 
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, _symbol: str, price: float, direction: int) -> float:
         """Slippage model for liquid global futures."""
         return price * (1 + direction * self.slippage_rate)
 

@@ -136,19 +136,19 @@ class TestPriceLimits:
 class TestRoundSize:
     def test_integer_rounding(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(3.7, 5000.0) == 3
+        assert engine.round_size("ESZ4", 3.7, 5000.0) == 3
 
     def test_exact_integer(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(5.0, 5000.0) == 5
+        assert engine.round_size("ESZ4", 5.0, 5000.0) == 5
 
     def test_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(0.5, 5000.0) == 0
+        assert engine.round_size("ESZ4", 0.5, 5000.0) == 0
 
     def test_negative_to_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(-1.0, 5000.0) == 0
+        assert engine.round_size("ESZ4", -1.0, 5000.0) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -157,17 +157,15 @@ class TestRoundSize:
 
 
 class TestCommission:
-    def test_es_commission_via_active_symbol(self) -> None:
-        """calc_commission uses _active_symbol for product lookup."""
+    def test_es_commission_via_explicit_symbol(self) -> None:
+        """calc_commission uses the explicit product symbol."""
         engine = _make_engine()
-        engine._active_symbol = "ESZ4"
-        comm = engine.calc_commission(2, 5000.0, 1, is_open=True)
+        comm = engine.calc_commission("ESZ4", 2, 5000.0, 1, is_open=True)
         assert comm == pytest.approx(2 * 2.25)
 
-    def test_micro_commission_via_active_symbol(self) -> None:
+    def test_micro_commission_via_explicit_symbol(self) -> None:
         engine = _make_engine()
-        engine._active_symbol = "MESZ4"
-        comm = engine.calc_commission(10, 5000.0, 1, is_open=True)
+        comm = engine.calc_commission("MESZ4", 10, 5000.0, 1, is_open=True)
         assert comm == pytest.approx(10 * 0.62)
 
     def test_symbol_aware_direct(self) -> None:
@@ -177,7 +175,7 @@ class TestCommission:
 
     def test_commission_override(self) -> None:
         engine = _make_engine(commission_per_contract=1.0)
-        comm = engine.calc_commission(5, 5000.0, 1, is_open=True)
+        comm = engine.calc_commission("ESZ4", 5, 5000.0, 1, is_open=True)
         assert comm == pytest.approx(5.0)
 
 
@@ -213,12 +211,12 @@ class TestContractMultiplier:
 class TestSlippage:
     def test_buy_increases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(5000.0, 1) > 5000.0
+        assert engine.apply_slippage("ESZ4", 5000.0, 1) > 5000.0
 
     def test_sell_decreases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(5000.0, -1) < 5000.0
+        assert engine.apply_slippage("ESZ4", 5000.0, -1) < 5000.0
 
     def test_custom_slippage(self) -> None:
         engine = _make_engine(slippage=0.001)
-        assert engine.apply_slippage(5000.0, 1) == pytest.approx(5005.0)
+        assert engine.apply_slippage("ESZ4", 5000.0, 1) == pytest.approx(5005.0)

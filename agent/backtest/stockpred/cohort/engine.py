@@ -42,6 +42,9 @@ from backtest.stockpred.execution.policy import ExecutionPolicy, MarketView, Pos
 from backtest.stockpred.execution.valuation import ValuationPolicy
 from src.stockpred.graph.adjustment import apply_qfq
 
+# Bump when eligibility gate semantics change (enters protocol fingerprint)
+ELIGIBILITY_POLICY_VERSION = "eligibility_v2"
+
 
 class CohortBacktestConfig(BaseModel):
     """Configuration for a cohort backtest run."""
@@ -297,6 +300,7 @@ class CohortRunner:
             "benchmark_code": config.benchmark_code,
             "execution_policy_version": "exec_v1",
             "cost_policy_version": "cost_v1",
+            "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
             "max_exit_extension_days": config.max_exit_extension_days,
             "stale_price_limit_days": config.stale_price_limit_days,
             "min_raw_label_coverage": config.min_raw_label_coverage,
@@ -784,7 +788,10 @@ class CohortRunner:
             or getattr(getattr(self.strategy, "descriptor", None), "metadata", {}).get("dependencies", ())
             or ("__unproven_strategy_dependencies__",)
         )
-        pit_result = classify_pit_assurance(table_deps)
+        # Merge engine-common dependencies (benchmark reads fact_index_daily, etc.)
+        from src.stockpred.strategies.adapters import ENGINE_COMMON_DEPENDENCIES
+        merged_deps = sorted(set(table_deps) | set(ENGINE_COMMON_DEPENDENCIES))
+        pit_result = classify_pit_assurance(merged_deps)
         protocol_config["pit_assurance"] = pit_result.level
 
         # If snapshot_only, force ranking_eligible=false

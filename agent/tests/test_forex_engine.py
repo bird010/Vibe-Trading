@@ -107,19 +107,19 @@ class TestCanExecute:
 class TestRoundSize:
     def test_rounds_to_micro_lot(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(15500.0, 1.1) == 15000
+        assert engine.round_size("EUR/USD", 15500.0, 1.1) == 15000
 
     def test_exact_lot(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(100000.0, 1.1) == 100000
+        assert engine.round_size("EUR/USD", 100000.0, 1.1) == 100000
 
     def test_less_than_micro_is_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(999.0, 1.1) == 0
+        assert engine.round_size("EUR/USD", 999.0, 1.1) == 0
 
     def test_negative_clamps(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(-5000.0, 1.1) == 0
+        assert engine.round_size("EUR/USD", -5000.0, 1.1) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +130,11 @@ class TestRoundSize:
 class TestCommission:
     def test_zero_commission(self) -> None:
         engine = _make_engine()
-        assert engine.calc_commission(100000, 1.1, 1, is_open=True) == 0.0
+        assert engine.calc_commission("EUR/USD", 100000, 1.1, 1, is_open=True) == 0.0
 
     def test_zero_on_close(self) -> None:
         engine = _make_engine()
-        assert engine.calc_commission(100000, 1.1, -1, is_open=False) == 0.0
+        assert engine.calc_commission("EUR/USD", 100000, 1.1, -1, is_open=False) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -145,13 +145,11 @@ class TestCommission:
 class TestSlippage:
     def test_buy_increases_price(self) -> None:
         engine = _make_engine()
-        engine._active_symbol = "EUR/USD"
-        assert engine.apply_slippage(1.1050, 1) > 1.1050
+        assert engine.apply_slippage("EUR/USD", 1.1050, 1) > 1.1050
 
     def test_sell_decreases_price(self) -> None:
         engine = _make_engine()
-        engine._active_symbol = "EUR/USD"
-        assert engine.apply_slippage(1.1050, -1) < 1.1050
+        assert engine.apply_slippage("EUR/USD", 1.1050, -1) < 1.1050
 
     def test_symbol_aware_spread(self) -> None:
         """EUR/USD has 1.0 pip spread; half = 0.5 pip + 0.3 slippage."""

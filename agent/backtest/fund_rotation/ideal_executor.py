@@ -1,0 +1,145 @@
+"""Daily ideal target-weight account with next-trading-open execution semantics."""
+
+from __future__ import annotations
+
+import pandas as pd
+
+
+def run_daily_ideal_account(
+    weekly_targets: dict[str, dict[str, float]],
+    fund_daily: pd.DataFrame,
+    fund_adj: pd.DataFrame,
+) -> pd.Series:
+    """Execute signals at the next valid open without fees, lots, or capacity limits."""
+    if not weekly_targets or fund_daily.empty or fund_adj.empty:
+        return pd.Series(dtype=float, name="theoretical_strategy")
+
+    daily = fund_daily[["trade_date", "ts_code", "open", "close"]].copy()
+    adj = fund_adj[["trade_date", "ts_code", "adj_factor"]].copy()
+    daily[["trade_date", "ts_code"]] = daily[["trade_date", "ts_code"]].astype(str)
+    adj[["trade_date", "ts_code"]] = adj[["trade_date", "ts_code"]].astype(str)
+    market = daily.merge(adj, on=["trade_date", "ts_code"], how="inner")
+    for column in ("open", "close", "adj_factor"):
+        market[column] = pd.to_numeric(market[column], errors="coerce")
+    market = market[market["adj_factor"].gt(0)].copy()
+    if market.empty:
+        return pd.Series(dtype=float, name="theoretical_strategy")
+    market["adj_open"] = market["open"] * market["adj_factor"]
+    market["adj_close"] = market["close"] * market["adj_factor"]
+
+    dates = sorted(market["trade_date"].unique())
+    open_by_date = {
+        date: group.loc[group["adj_open"].gt(0)].set_index("ts_code")["adj_open"].to_dict()
+        for date, group in market.groupby("trade_date", sort=False)
+    }
+    close_by_date = {
+        date: group.loc[group["adj_close"].gt(0)].set_index("ts_code")["adj_close"].to_dict()
+        for date, group in market.groupby("trade_date", sort=False)
+    }
+
+    activations: dict[str, dict[str, float]] = {}
+    for signal_date, raw_targets in sorted(weekly_targets.items()):
+        targets = {
+            str(code): float(weight)
+            for code, weight in raw_targets.items()
+            if float(weight) > 0
+        }
+        activation_date = next((date for date in dates if date > str(signal_date)), None)
+        if activation_date is not None:
+            # A later signal mapped to the same market day supersedes the
+            # earlier one before any order is attempted.
+            activations[activation_date] = targets
+
+    cash = 1.0
+    quantities: dict[str, float] = {}
+    pending_notional: dict[str, float] = {}
+    last_close: dict[str, float] = {}
+    last_close_date: dict[str, str] = {}
+    last_close_source: dict[str, str] = {}
+    stale_valuations: list[dict] = []
+    date_ordinal = {date: index for index, date in enumerate(dates)}
+    equity: dict[str, float] = {}
+    for trade_date in dates:
+        opens = open_by_date[trade_date]
+        closes = close_by_date[trade_date]
+        open_nav = cash + sum(
+            quantity * opens.get(code, last_close.get(code, 0.0))
+            for code, quantity in quantities.items()
+        )
+
+        targets = activations.get(trade_date)
+        if targets is not None:
+            # Replacing this mapping cancels every residual from an older
+            # signal.  Store desired capital at activation; successful legs
+            # are not continuously rebalanced on later holding days.
+            pending_notional = {
+                code: open_nav * targets.get(code, 0.0)
+                for code in sorted(set(quantities) | set(targets))
+                if quantities.get(code, 0.0) > 0 or targets.get(code, 0.0) > 0
+            }
+
+        # Valid-open reductions fund valid-open additions.  A missing-open
+        # leg remains pending and its existing holding (or cash) is retained.
+        for code in sorted(list(pending_notional)):
+            price = opens.get(code)
+            if price is None:
+                continue
+            current = quantities.get(code, 0.0) * price
+            desired = pending_notional[code]
+            if desired < current - 1e-12:
+                cash += current - desired
+                quantities[code] = desired / price
+                pending_notional.pop(code)
+            elif abs(desired - current) <= 1e-12:
+                pending_notional.pop(code)
+
+        buy_needs = {
+            code: desired - quantities.get(code, 0.0) * opens[code]
+            for code, desired in pending_notional.items()
+            if code in opens and desired > quantities.get(code, 0.0) * opens[code] + 1e-12
+        }
+        total_buy = sum(buy_needs.values())
+        buy_scale = min(cash / total_buy, 1.0) if total_buy > 0 else 0.0
+        for code in sorted(buy_needs):
+            spend = buy_needs[code] * buy_scale
+            was_empty = quantities.get(code, 0.0) <= 0
+            quantities[code] = quantities.get(code, 0.0) + spend / opens[code]
+            cash -= spend
+            if spend > 0 and was_empty:
+                # A real fill is the only confirmed valuation anchor available
+                # when the opening day has no close.
+                last_close[code] = opens[code]
+                last_close_date[code] = trade_date
+                last_close_source[code] = "execution_open"
+            if buy_scale >= 1.0 - 1e-12:
+                pending_notional.pop(code)
+
+        close_nav = cash + sum(
+            quantity * closes.get(code, last_close.get(code, 0.0))
+            for code, quantity in quantities.items()
+        )
+        equity[trade_date] = close_nav
+        for code, quantity in quantities.items():
+            if quantity <= 0 or code in closes:
+                continue
+            anchor_date = last_close_date.get(code, trade_date)
+            stale_valuations.append({
+                "trade_date": trade_date,
+                "ts_code": code,
+                "mark_price": last_close.get(code, 0.0),
+                "last_valid_close_date": anchor_date,
+                "stale_days": date_ordinal[trade_date] - date_ordinal.get(anchor_date, date_ordinal[trade_date]),
+                "anchor_source": (
+                    "execution_open"
+                    if last_close_source.get(code) == "execution_open"
+                    else "last_valid_close"
+                ),
+            })
+        for code, price in closes.items():
+            last_close[code] = price
+            last_close_date[code] = trade_date
+            last_close_source[code] = "close"
+
+    result = pd.Series(equity, name="theoretical_strategy", dtype=float)
+    result.attrs["stale_valuations"] = stale_valuations
+    return result

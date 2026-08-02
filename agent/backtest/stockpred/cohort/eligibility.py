@@ -50,6 +50,7 @@ class SignalEligibilityGate:
     exclude_st: bool = True
     allowed_exchanges: tuple[str, ...] = ("SSE", "SZSE")
     min_adj_coverage: float = 0.98
+    min_market_coverage: float = 0.98
 
     def check(
         self,
@@ -182,6 +183,8 @@ class SignalEligibilityGate:
         total = len(candidate_codes)
         adj_rejected = sum(reason == REASON_ADJ_INCOMPLETE for reason in rejected.values())
         coverage = (total - adj_rejected) / total if total > 0 else 0.0
+        unverifiable_count = len(unverifiable_raw) + len(unverifiable_st)
+        market_data_coverage = (total - unverifiable_count) / total if total > 0 else 0.0
         return EligibilityResult(
             eligible_codes=sorted(eligible),
             rejected=rejected,
@@ -191,8 +194,14 @@ class SignalEligibilityGate:
                 "rejected": len(rejected),
                 "rejection_rate": len(rejected) / total if total > 0 else 0.0,
                 "adjustment_coverage": coverage,
+                "market_data_coverage": market_data_coverage,
             },
-            data_failure=(adj_rejected > 0 and coverage < self.min_adj_coverage) or bool(set(rejected) - universe_codes) or bool(unverifiable_raw) or bool(unverifiable_st) or not bool(market_calendar),
+            data_failure=(
+                (adj_rejected > 0 and coverage < self.min_adj_coverage)
+                or bool(set(rejected) - universe_codes)
+                or market_data_coverage < self.min_market_coverage
+                or not bool(market_calendar)
+            ),
         )
 
     @staticmethod

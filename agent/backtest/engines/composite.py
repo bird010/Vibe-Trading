@@ -113,26 +113,23 @@ class CompositeEngine(BaseEngine):
         # Delegate remaining checks (price limits, short-sell block, etc.)
         return self._rule_for(symbol).can_execute(symbol, direction, bar)
 
-    def round_size(self, raw_size: float, price: float) -> float:
-        """Delegate to active symbol's sub-engine."""
-        return self._rule_for(self._active_symbol).round_size(raw_size, price)
+    def round_size(self, symbol: str, raw_size: float, price: float) -> float:
+        """Delegate using the explicit instrument symbol."""
+        return self._rule_for(symbol).round_size(symbol, raw_size, price)
 
     def calc_commission(
-        self, size: float, price: float, direction: int, is_open: bool,
+        self, symbol: str, size: float, price: float, direction: int, is_open: bool,
     ) -> float:
         """Delegate to active symbol's sub-engine."""
-        return self._rule_for(self._active_symbol).calc_commission(
-            size, price, direction, is_open,
+        return self._rule_for(symbol).calc_commission(
+            symbol, size, price, direction, is_open,
         )
 
-    def apply_slippage(self, price: float, direction: int) -> float:
-        """Delegate to active symbol's sub-engine."""
-        sub = self._rule_for(self._active_symbol)
-        # ForexEngine needs _active_symbol set on the sub-engine
-        sub._active_symbol = self._active_symbol
-        return sub.apply_slippage(price, direction)
+    def apply_slippage(self, symbol: str, price: float, direction: int) -> float:
+        """Delegate using the explicit instrument symbol."""
+        return self._rule_for(symbol).apply_slippage(symbol, price, direction)
 
-    # ── PnL / margin dispatch (route by symbol, not _active_symbol) ──
+    # ── PnL / margin dispatch ──
 
     def _calc_pnl(
         self, symbol: str, direction: int, size: float,
@@ -171,7 +168,7 @@ class CompositeEngine(BaseEngine):
                 pos = self.positions.get(symbol)
                 if pos is not None:
                     mark_price = float(bar.get("close", pos.entry_price))
-                    liq_price = crypto_sub.apply_slippage(mark_price, -pos.direction)
+                    liq_price = crypto_sub.apply_slippage(symbol, mark_price, -pos.direction)
                     self._close_position(symbol, liq_price, timestamp, "liquidation")
 
         elif market == "forex":

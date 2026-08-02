@@ -75,9 +75,11 @@ def test_all_revisable_tables_defined():
 def test_all_strict_tables_defined():
     expected = {
         "stock",
+        "dim_stock",
         "fact_adj_factor",
         "fact_stock_limit",
         "dim_trade_cal",
         "fact_index_daily",
+        "fact_index_weight",
     }
     assert STRICT_TABLES == expected

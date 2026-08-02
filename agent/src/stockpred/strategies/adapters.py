@@ -11,8 +11,33 @@ from src.stockpred.contracts import StockPredDataError
 from src.stockpred.graph.service import GraphSignalConfig
 from src.stockpred.strategies.contracts import StrategyDescriptor, StrategyScore
 
+# Tables read by the cohort engine itself (benchmark computation),
+# merged into strategy deps before PIT classification.
+ENGINE_COMMON_DEPENDENCIES: tuple[str, ...] = (
+    "fact_index_daily",
+    "fact_stock_limit",
+)
+
 
 class AlphaZooStrategyAdapter:
+    """Adapter for Alpha Zoo factor strategies.
+
+    Factor computation uses only non-revisable market data (OHLCV, adjustment
+    factors, price limits, trade calendar).  However, the panel builder's
+    universe construction reads dim_stock_name_history for ST exclusion,
+    which is a revisable table — hence the snapshot_only PIT classification.
+    """
+
+    dependencies: tuple[str, ...] = (
+        "stock",
+        "dim_stock",
+        "fact_adj_factor",
+        "fact_stock_limit",
+        "dim_trade_cal",
+        "dim_stock_name_history",  # panel builder: ST filtering
+        "bridge_stock_industry",  # panel builder: universe construction
+    )
+
     def __init__(self, registry: Any, panel_builder: Any, descriptor: StrategyDescriptor) -> None:
         self.registry = registry
         self.panel_builder = panel_builder
@@ -35,6 +60,25 @@ class AlphaZooStrategyAdapter:
 
 
 class GraphStrategyAdapter:
+    """Adapter for Graph (LLM/knowledge-graph) strategies.
+
+    Uses revisable data (financials, name history, industry, daily basic,
+    money flow) in addition to market data.
+    """
+
+    dependencies: tuple[str, ...] = (
+        "stock",
+        "dim_stock",
+        "fact_adj_factor",
+        "dim_trade_cal",
+        "fact_index_weight",  # graph service: index membership edges
+        "fact_fina_indicator",
+        "dim_stock_name_history",
+        "bridge_stock_industry",
+        "fact_stock_daily_basic",
+        "fact_moneyflow",
+    )
+
     def __init__(self, signal_service: Any) -> None:
         self.signal_service = signal_service
 

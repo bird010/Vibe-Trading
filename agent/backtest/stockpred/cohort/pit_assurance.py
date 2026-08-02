@@ -12,10 +12,12 @@ from typing import Literal
 # Non-revisable tables with clear event dates (can achieve strict with version freeze)
 STRICT_TABLES: set[str] = {
     "stock",
+    "dim_stock",
     "fact_adj_factor",
     "fact_stock_limit",
     "dim_trade_cal",
     "fact_index_daily",
+    "fact_index_weight",
 }
 
 # Revisable tables requiring bi-temporal history for strict assurance

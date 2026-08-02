@@ -187,11 +187,11 @@ class ChinaFuturesEngine(FuturesBaseEngine):
                         return False
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """Minimum 1 contract, integer lots only."""
         return max(int(raw_size), 0)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
+    def calc_commission(self, symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
         """Commission varies by product: fixed per-lot or percentage of notional.
 
         ``_direction`` is unused — reserved for future open/close-fee
@@ -199,7 +199,7 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         """
         if self._commission_override is not None:
             return size * price * self._commission_override
-        return self.calc_commission_for_symbol(self._active_symbol, size, price, is_open)
+        return self.calc_commission_for_symbol(symbol, size, price, is_open)
 
     def calc_commission_for_symbol(
         self, symbol: str, size: float, price: float, is_open: bool,
@@ -222,7 +222,7 @@ class ChinaFuturesEngine(FuturesBaseEngine):
             return size * price * cm * value
         return size * value
 
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, _symbol: str, price: float, direction: int) -> float:
         """Futures slippage."""
         return price * (1 + direction * self.slippage_rate)
 

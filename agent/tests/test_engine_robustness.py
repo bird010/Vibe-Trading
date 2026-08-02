@@ -119,15 +119,16 @@ class TestSymbolIsolation:
 
         engine = ChinaAEngine({"initial_cash": 1_000_000})
 
-        # Patch _rebalance to throw for BAD only
-        original_rebalance = ChinaAEngine._rebalance
+        # Patch the market-rule hook to throw for BAD only. The legacy
+        # per-symbol _rebalance interface no longer exists after migration.
+        original_can_execute = ChinaAEngine.can_execute
 
-        def _exploding_rebalance(self, symbol, target_weight, df, ts, equity):
+        def _exploding_can_execute(self, symbol, direction, bar):
             if symbol == "BAD":
                 raise RuntimeError("Simulated failure for BAD")
-            return original_rebalance(self, symbol, target_weight, df, ts, equity)
+            return original_can_execute(self, symbol, direction, bar)
 
-        with patch.object(ChinaAEngine, "_rebalance", _exploding_rebalance):
+        with patch.object(ChinaAEngine, "can_execute", _exploding_can_execute):
             # Should NOT raise — exception is caught internally
             engine._execute_bars(dates, data_map, close_df, target_pos, valid_codes)
 

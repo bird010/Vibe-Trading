@@ -136,13 +136,31 @@ export function CohortStockPredReport({ runId }: Props) {
   );
 }
 
+// Fatal failures indicating truly invalid results (zero usable data)
+const FATAL_FAILURES = new Set(["no_valid_cohorts"]);
+
 function OverviewTab({ metrics, quality }: { metrics: CohortAggregateMetrics; quality: CohortQualityReport | null }) {
+  const fatalFailures = quality?.failures.filter((f) => FATAL_FAILURES.has(f)) ?? [];
+  const qualityGates = quality?.failures.filter((f) => !FATAL_FAILURES.has(f) && f !== "pit_assurance_snapshot_only") ?? [];
+  const hasPit = quality?.failures.includes("pit_assurance_snapshot_only") ?? false;
   return (
     <div className="space-y-4">
-      {quality && !quality.ranking_eligible && (
+      {fatalFailures.length > 0 && (
+        <div className="flex items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          <AlertTriangle className="h-4 w-4" />
+          回测结果无效：{fatalFailures.join(", ")}。请检查数据完整性或重新运行。
+        </div>
+      )}
+      {fatalFailures.length === 0 && qualityGates.length > 0 && (
         <div className="flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-800">
           <AlertTriangle className="h-4 w-4" />
-          Not eligible for strict leaderboard: {quality.failures.join(", ")}
+          回测已完成，但未满足严格排行榜质量门禁：{qualityGates.join(", ")}。结果可查看，不参与排行榜。
+        </div>
+      )}
+      {fatalFailures.length === 0 && qualityGates.length === 0 && hasPit && (
+        <div className="flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-800">
+          <AlertTriangle className="h-4 w-4" />
+          回测已完成；由于使用快照型可修订数据，仅供研究参考，不参与严格排行榜。
         </div>
       )}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
@@ -228,6 +246,9 @@ function StocksTab({ symbols, selectedSymbol, setSelectedSymbol, selectedCohort,
 }
 
 function QualityTab({ quality, metrics }: { quality: CohortQualityReport | null; metrics: CohortAggregateMetrics }) {
+  const fatalFailures = quality?.failures.filter((f) => FATAL_FAILURES.has(f)) ?? [];
+  const qualityGates = quality?.failures.filter((f) => !FATAL_FAILURES.has(f) && f !== "pit_assurance_snapshot_only") ?? [];
+  const hasPit = quality?.failures.includes("pit_assurance_snapshot_only") ?? false;
   return (
     <div className="space-y-4">
       <div className="rounded-lg border p-4">
@@ -236,9 +257,19 @@ function QualityTab({ quality, metrics }: { quality: CohortQualityReport | null;
           Ranking Eligibility
         </h3>
         <p className="text-sm">{quality?.ranking_eligible ? "Eligible for strict leaderboard" : "Not eligible"}</p>
-        {quality && quality.failures.length > 0 && (
+        {fatalFailures.length > 0 && (
           <ul className="mt-2 list-inside list-disc text-sm text-red-600">
-            {quality.failures.map((f) => <li key={f}>{f}</li>)}
+            {fatalFailures.map((f) => <li key={f}>{f} — 数据异常，结果无效</li>)}
+          </ul>
+        )}
+        {qualityGates.length > 0 && (
+          <ul className="mt-2 list-inside list-disc text-sm text-yellow-700">
+            {qualityGates.map((f) => <li key={f}>{f} — 未满足严格排行榜质量门禁</li>)}
+          </ul>
+        )}
+        {hasPit && (
+          <ul className="mt-2 list-inside list-disc text-sm text-yellow-700">
+            <li>pit_assurance_snapshot_only — 使用快照冻结数据，无完整双时态证明</li>
           </ul>
         )}
       </div>

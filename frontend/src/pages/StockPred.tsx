@@ -9,6 +9,7 @@ import {
   Loader2,
   Network,
   Play,
+  PieChart,
 } from "lucide-react";
 import {
   api,
@@ -16,6 +17,7 @@ import {
   type StrategyBatchSummary,
   type StrategyDescriptor,
 } from "@/lib/api";
+import { FundRotationTab } from "@/components/stockpred/fund-rotation/FundRotationTab";
 
 interface BacktestForm {
   start: string;
@@ -37,8 +39,11 @@ function initialDates(): Pick<BacktestForm, "start" | "end"> {
 
 const RUNNING_POLL_MS = 5000;
 
+type StockPredTab = "batch" | "fund-rotation" | "data";
+
 export function StockPred() {
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<StockPredTab>("batch");
   const batchStreamRef = useRef<EventSource | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
@@ -227,7 +232,32 @@ export function StockPred() {
           </div>
           <h1 className="mt-3 text-3xl font-bold tracking-tight">{t("stockPred.title")}</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">{t("stockPred.subtitle")}</p>
+          {/* Tab navigation — §7 */}
+          <nav className="mt-4 flex gap-1 rounded-lg border p-1">
+            {([
+              ["batch", "策略批测", Network],
+              ["fund-rotation", "基金轮动", PieChart],
+              ["data", "数据状态", Database],
+            ] as const).map(([id, label, Icon]) => (
+              <button
+                key={id}
+                onClick={() => setActiveTab(id)}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  activeTab === id
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </nav>
         </header>
+
+        {activeTab === "fund-rotation" && <FundRotationTab />}
+
+        {activeTab === "batch" && (<>
 
         {loading ? (
           <div className="grid gap-4 md:grid-cols-2">
@@ -554,6 +584,37 @@ export function StockPred() {
             </section>
           </div>
         ) : null}
+        </>)}
+
+        {activeTab === "data" && (
+          <section className="rounded-md border bg-card p-5">
+            <SectionTitle icon={Database} title={t("stockPred.dataStatus")} />
+            {statusLoading ? (
+              <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t("stockPred.loadingStatus")}
+              </div>
+            ) : (
+              <>
+                <div className="mt-4 flex items-center gap-2">
+                  {status?.ready ? (
+                    <CheckCircle2 className="h-5 w-5 text-success" />
+                  ) : (
+                    <AlertTriangle className="h-5 w-5 text-amber-500" />
+                  )}
+                  <span className="font-medium">
+                    {status?.ready ? t("stockPred.ready") : t("stockPred.notReady")}
+                  </span>
+                </div>
+                <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+                  <DataItem label={t("stockPred.contract")} value={status?.contract} />
+                  <DataItem label={t("stockPred.asOf")} value={status?.as_of} />
+                  <DataItem label={t("stockPred.dataRoot")} value={status?.root} wide />
+                </dl>
+              </>
+            )}
+          </section>
+        )}
       </div>
     </div>
   );

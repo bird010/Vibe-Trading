@@ -164,21 +164,21 @@ class TestPriceLimits:
 class TestRoundSize:
     def test_exact_lots(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(300.0, 15.0) == 300
+        assert engine.round_size("000001.SZ", 300.0, 15.0) == 300
 
     def test_rounds_down(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(350.0, 15.0) == 300
-        assert engine.round_size(199.0, 15.0) == 100
-        assert engine.round_size(99.0, 15.0) == 0
+        assert engine.round_size("000001.SZ", 350.0, 15.0) == 300
+        assert engine.round_size("000001.SZ", 199.0, 15.0) == 100
+        assert engine.round_size("000001.SZ", 99.0, 15.0) == 0
 
     def test_zero_size(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(0.0, 15.0) == 0
+        assert engine.round_size("000001.SZ", 0.0, 15.0) == 0
 
     def test_negative_clamps_to_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(-50.0, 15.0) == 0
+        assert engine.round_size("000001.SZ", -50.0, 15.0) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +191,14 @@ class TestCommission:
         """Small trades hit the ¥5 minimum."""
         engine = _make_engine()
         # 100 shares × ¥3 = ¥300 notional → 0.025% = ¥0.075 → min ¥5
-        comm = engine.calc_commission(100, 3.0, 1, is_open=True)
+        comm = engine.calc_commission("000001.SZ", 100, 3.0, 1, is_open=True)
         assert comm >= 5.0
 
     def test_buy_no_stamp_tax(self) -> None:
         """Buy side: no stamp tax."""
         engine = _make_engine()
-        comm_buy = engine.calc_commission(1000, 15.0, 1, is_open=True)
-        comm_sell = engine.calc_commission(1000, 15.0, 1, is_open=False)
+        comm_buy = engine.calc_commission("000001.SZ", 1000, 15.0, 1, is_open=True)
+        comm_sell = engine.calc_commission("000001.SZ", 1000, 15.0, 1, is_open=False)
         # Sell has stamp tax, buy doesn't → sell > buy
         assert comm_sell > comm_buy
 
@@ -207,12 +207,12 @@ class TestCommission:
         engine = _make_engine()
         size, price = 10000, 15.0
         notional = size * price  # 150,000
-        comm_sell = engine.calc_commission(size, price, 1, is_open=False)
+        comm_sell = engine.calc_commission("000001.SZ", size, price, 1, is_open=False)
         # Stamp tax portion = 150000 × 0.0005 = ¥75
         stamp_portion = notional * engine.stamp_tax
         assert stamp_portion == pytest.approx(75.0, abs=0.01)
         # Sell commission includes stamp tax
-        comm_buy = engine.calc_commission(size, price, 1, is_open=True)
+        comm_buy = engine.calc_commission("000001.SZ", size, price, 1, is_open=True)
         assert comm_sell - comm_buy == pytest.approx(stamp_portion, abs=0.1)
 
     def test_leverage_forced_one(self) -> None:
@@ -229,15 +229,15 @@ class TestCommission:
 class TestSlippage:
     def test_buy_slippage_increases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(100.0, 1) > 100.0
+        assert engine.apply_slippage("000001.SZ", 100.0, 1) > 100.0
 
     def test_sell_slippage_decreases_price(self) -> None:
         engine = _make_engine()
-        assert engine.apply_slippage(100.0, -1) < 100.0
+        assert engine.apply_slippage("000001.SZ", 100.0, -1) < 100.0
 
     def test_custom_slippage_rate(self) -> None:
         engine = _make_engine(slippage=0.005)
-        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.5)
+        assert engine.apply_slippage("000001.SZ", 100.0, 1) == pytest.approx(100.5)
 
 
 # ---------------------------------------------------------------------------
