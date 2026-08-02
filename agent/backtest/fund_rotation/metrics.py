@@ -63,7 +63,7 @@ def compute_performance_metrics(
     worst_period = float(returns.min()) if n > 0 else 0.0
 
     # Drawdown recovery time (periods from max DD trough back to prior peak)
-    recovery_periods = _drawdown_recovery_periods(cumulative)
+    recovery_periods = _drawdown_recovery_periods(anchored)
 
     return {
         "annual_return": annual_return,
@@ -80,31 +80,24 @@ def compute_performance_metrics(
 
 
 def _drawdown_recovery_periods(cumulative: pd.Series) -> int:
-    """Compute recovery time from max drawdown trough to prior peak.
+    """Periods from the max-drawdown trough to first recovery of the prior peak.
 
-    Returns number of periods, or -1 if not yet recovered.
+    Positional (index-label agnostic) so it is valid on an anchored series whose
+    first point is a dateless initial_nav anchor. Returns the number of periods
+    from the trough to the first point that reaches the prior peak, or -1 if not
+    yet recovered (0 for degenerate input).
     """
     if cumulative.empty or len(cumulative) < 2:
         return 0
     running_max = cumulative.cummax()
     drawdown = (cumulative - running_max) / running_max
-    trough_idx = drawdown.idxmin()
-    # Find the peak before trough
-    peak_val = running_max.loc[trough_idx]
-    # Find recovery point (first time cumulative >= peak_val after trough)
-    after_trough = cumulative.loc[trough_idx:]
-    recovered = after_trough[after_trough >= peak_val]
-    if len(recovered) <= 1:
-        return -1  # Not recovered
-    recovery_idx = recovered.index[1] if len(recovered) > 1 else recovered.index[0]
-    # Count periods between trough and recovery
-    all_idx = list(cumulative.index)
-    try:
-        trough_pos = all_idx.index(trough_idx)
-        recovery_pos = all_idx.index(recovery_idx)
-        return recovery_pos - trough_pos
-    except (ValueError, IndexError):
-        return -1
+    values = drawdown.to_numpy()
+    trough_pos = int(np.argmin(values))
+    peak_val = float(running_max.iloc[trough_pos])
+    for offset in range(1, len(cumulative) - trough_pos):
+        if float(cumulative.iloc[trough_pos + offset]) >= peak_val:
+            return offset
+    return -1
 
 
 def compute_excess_metrics(

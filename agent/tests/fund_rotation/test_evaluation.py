@@ -124,3 +124,17 @@ class TestInitialNavMetrics:
         metrics = compute_performance_metrics(cumulative, periods_per_year=244, initial_nav=1.0)
         assert metrics["total_return"] == pytest.approx(0.99 / 1.0 - 1.0)
         assert metrics["num_periods"] == 1
+
+    def test_recovery_never_recovers_from_anchor_drawdown(self):
+        # A first-day drop from the 1.0 anchor that never recovers: recovery = -1.
+        cumulative = pd.Series([0.95, 0.95, 0.95], index=["20240101", "20240102", "20240103"])
+        metrics = compute_performance_metrics(cumulative, periods_per_year=244, initial_nav=1.0)
+        assert metrics["max_drawdown"] == pytest.approx(-0.05)
+        assert metrics["max_drawdown_recovery_periods"] == -1
+
+    def test_recovery_counts_from_anchor_trough(self):
+        # Drop to 0.95 then back to the 1.0 peak one day later: recovery = 1 period.
+        cumulative = pd.Series([0.95, 1.00, 1.05], index=["20240101", "20240102", "20240103"])
+        metrics = compute_performance_metrics(cumulative, periods_per_year=244, initial_nav=1.0)
+        assert metrics["max_drawdown"] == pytest.approx(-0.05)
+        assert metrics["max_drawdown_recovery_periods"] == 1

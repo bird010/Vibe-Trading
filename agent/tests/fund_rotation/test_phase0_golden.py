@@ -407,7 +407,13 @@ def test_matches_pre_fix_golden():
 
 
 def _is_approved(diff: str, approved: dict) -> bool:
-    """Match a diff line against approved_delta prefixes (Task 8 mechanism)."""
+    """Match a diff line against approved_delta prefixes (Task 8 mechanism).
+
+    Key-set changes are never approved: a missing or renamed metric field must
+    fail the golden even when its namespace prefix is whitelisted.
+    """
+    if "keys differ" in diff:
+        return False
     for prefix in approved.get("approved_prefixes", []):
         if diff.startswith(prefix):
             return True
