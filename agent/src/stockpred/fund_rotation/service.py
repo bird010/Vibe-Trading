@@ -264,7 +264,7 @@ class FundRotationBacktestService:
             run_dir.append_event({"seq": sm.next_event_seq(), "stage": "FAILED", "ts": time.time(), "error": error_dict.get("message", str(exc))})
 
     def _load_data(self, config: FundRotationConfig):
-        """Load data from StockPred Lance datasets.
+        """Load data from StockPred Lance datasets at PINNED versions.
 
         Returns (fund_daily, fund_adj, dim_fund, data_snapshot) tuple.
         data_snapshot is a task-local dict (NOT stored on self) for concurrency safety.
@@ -281,7 +281,7 @@ class FundRotationBacktestService:
         lance_dir = self.stockpred_root / "data" / "lance" / "market_core"
 
         try:
-            import lance
+            import lance  # noqa: F401
         except ImportError as e:
             raise StructuredError(
                 code="LANCE_UNAVAILABLE",
@@ -290,14 +290,21 @@ class FundRotationBacktestService:
                 action_hint="pip install pylance",
             ) from e
 
-        import pandas as pd
-        import hashlib
+        # Fail fast with structured codes before pinning versions.
+        for name, code in (
+            ("fund.lance", "FUND_LANCE_MISSING"),
+            ("dim_fund.lance", "DIM_FUND_MISSING"),
+            ("fact_fund_adj.lance", "FUND_ADJ_MISSING"),
+        ):
+            if not (lance_dir / name).exists():
+                raise StructuredError(
+                    code=code,
+                    stage="VALIDATING_DATA",
+                    message=f"{name} not found at {lance_dir / name}",
+                    action_hint="Run StockPred data update first",
+                )
 
-        def _schema_hash(ds) -> str:
-            schema_str = str(ds.schema)
-            return hashlib.sha256(schema_str.encode()).hexdigest()[:12]
-
-        # Compute date bounds BEFORE opening datasets
+        # Compute date bounds BEFORE reading (training window lookback).
         data_start: str | None = None
         data_end: str | None = config.end_date or None
         if config.start_date:
@@ -309,96 +316,40 @@ class FundRotationBacktestService:
             except ValueError:
                 data_start = config.start_date
 
-        # Build Lance filter expression for date-bounded datasets
-        filter_parts = []
-        if data_start:
-            filter_parts.append(f"trade_date >= '{data_start}'")
-        if data_end:
-            filter_parts.append(f"trade_date <= '{data_end}'")
-        date_filter = " AND ".join(filter_parts) if filter_parts else None
+        # Pin the three Lance versions BEFORE any business read, then read at
+        # those versions only — never reopen the latest version (§2/§11).
+        from src.stockpred.fund_rotation.data_snapshot import (
+            hash_codes,
+            load_pinned_frames,
+            resolve_pinned_snapshot,
+        )
+        snapshot = resolve_pinned_snapshot(lance_dir)
+        fund_daily, fund_adj, dim_fund = load_pinned_frames(
+            snapshot, lance_dir, data_start=data_start, data_end=data_end,
+        )
 
-        # ── fund.lance loader ──
-        fund_path = lance_dir / "fund.lance"
-        if not fund_path.exists():
-            raise StructuredError(
-                code="FUND_LANCE_MISSING",
-                stage="VALIDATING_DATA",
-                message=f"fund.lance not found at {fund_path}",
-                action_hint="Run StockPred data update first",
-            )
-        ds_fund = lance.dataset(str(fund_path))
-        # Metadata: unfiltered full dataset stats
-        fund_meta = {
-            "version": ds_fund.version,
-            "path": str(fund_path),
-            "schema_hash": _schema_hash(ds_fund),
-            "rows": ds_fund.count_rows(),
-        }
-        _fund_dates_tbl = ds_fund.to_table(columns=["trade_date"])
-        _fund_dates_s = _fund_dates_tbl.column("trade_date").to_pandas().astype(str)
-        fund_meta["date_min"] = _fund_dates_s.min()
-        fund_meta["date_max"] = _fund_dates_s.max()
-        # Business data: filtered + column-selected
-        _fund_cols = ["ts_code", "trade_date", "open", "close", "vol", "amount", "high", "low", "pre_close"]
-        _fund_available = [c for c in _fund_cols if c in ds_fund.schema.names]
-        fund_tbl = ds_fund.to_table(columns=_fund_available, filter=date_filter)
-        fund_daily = fund_tbl.to_pandas()
-
-        # ── dim_fund.lance loader ──
-        dim_path = lance_dir / "dim_fund.lance"
-        if not dim_path.exists():
-            raise StructuredError(
-                code="DIM_FUND_MISSING",
-                stage="VALIDATING_DATA",
-                message=f"dim_fund.lance not found at {dim_path}",
-                action_hint="Run StockPred data update first",
-            )
-        ds_dim = lance.dataset(str(dim_path))
-        dim_meta = {
-            "version": ds_dim.version,
-            "path": str(dim_path),
-            "schema_hash": _schema_hash(ds_dim),
-            "rows": ds_dim.count_rows(),
-        }
-        # No trade_date column — load only needed columns
-        _dim_cols = ["ts_code", "name", "list_date"]
-        _dim_available = [c for c in _dim_cols if c in ds_dim.schema.names]
-        dim_fund = ds_dim.to_table(columns=_dim_available).to_pandas()
-
-        # ── fact_fund_adj.lance loader ──
-        adj_path = lance_dir / "fact_fund_adj.lance"
-        if not adj_path.exists():
-            raise StructuredError(
-                code="FUND_ADJ_MISSING",
-                stage="VALIDATING_DATA",
-                message=f"fact_fund_adj.lance not found at {adj_path}",
-                action_hint="Run StockPred fund_adj ingestion first",
-            )
-        ds_adj = lance.dataset(str(adj_path))
-        # Metadata: unfiltered
-        adj_meta = {
-            "version": ds_adj.version,
-            "path": str(adj_path),
-            "schema_hash": _schema_hash(ds_adj),
-            "rows": ds_adj.count_rows(),
-        }
-        _adj_dates_tbl = ds_adj.to_table(columns=["trade_date"])
-        _adj_dates_s = _adj_dates_tbl.column("trade_date").to_pandas().astype(str)
-        adj_meta["date_min"] = _adj_dates_s.min()
-        adj_meta["date_max"] = _adj_dates_s.max()
-        # Business data: filtered
-        _adj_cols = ["ts_code", "trade_date", "adj_factor"]
-        _adj_available = [c for c in _adj_cols if c in ds_adj.schema.names]
-        adj_tbl = ds_adj.to_table(columns=_adj_available, filter=date_filter)
-        fund_adj = adj_tbl.to_pandas()
-
-        # §5: Complete data snapshot (task-local, concurrency-safe)
+        # §5/§11: immutable snapshot identity for the manifest — three versions,
+        # ETF pool hash, trading calendar hash, and the total fingerprint.
         data_snapshot = {
             "datasets": {
-                "fund.lance": fund_meta,
-                "dim_fund.lance": dim_meta,
-                "fact_fund_adj.lance": adj_meta,
+                "fund.lance": {
+                    "version": snapshot.fund_version,
+                    "path": str(lance_dir / "fund.lance"),
+                },
+                "dim_fund.lance": {
+                    "version": snapshot.dim_version,
+                    "path": str(lance_dir / "dim_fund.lance"),
+                },
+                "fact_fund_adj.lance": {
+                    "version": snapshot.fund_adj_version,
+                    "path": str(lance_dir / "fact_fund_adj.lance"),
+                },
             },
+            "universe_codes_hash": hash_codes(snapshot.universe_codes),
+            "trading_dates_hash": hash_codes(snapshot.trading_dates),
+            "universe_count": len(snapshot.universe_codes),
+            "trading_dates_count": len(snapshot.trading_dates),
+            "fingerprint": snapshot.fingerprint,
             "load_range": {
                 "data_start": data_start,
                 "data_end": data_end,
