@@ -16,6 +16,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 from backtest.fund_rotation.config import FundRotationConfig
+from backtest.fund_rotation.evaluation import EvaluationContext, validate_equity_index
 from backtest.fund_rotation.universe import (
     ExclusionReason,
     ExclusionRecord,
@@ -517,22 +518,36 @@ def run_signal_pipeline(
             1.0, index=common_dates, name="cash",
         )
 
-    # Step 10: Metrics
+    # Step 10: Metrics — §24/§32.1 formal evaluation context. The initial_nav
+    # anchor (1.0) is the pre-interval principal; the first evaluation day's
+    # return is measured against it. The strict index check validates the equity
+    # series is well-formed (ordered, unique, within the evaluation interval).
+    # (Task 7 extends the equity to the full [start_date, end_date] calendar.)
+    if not result.executed_equity.empty:
+        eval_context = EvaluationContext(
+            trading_dates=tuple(pd.Timestamp(d) for d in result.executed_equity.index),
+            initial_nav=1.0,
+        )
+        validate_equity_index(result.executed_equity, eval_context)
+        initial_nav = eval_context.initial_nav
+    else:
+        initial_nav = 1.0
+
     if not result.strategy_cumulative.empty:
         result.strategy_metrics = compute_performance_metrics(
-            result.strategy_cumulative, periods_per_year=244,
+            result.strategy_cumulative, periods_per_year=244, initial_nav=initial_nav,
         )
     if not result.equal_weight_benchmark.empty:
         result.benchmark_metrics["equal_weight"] = compute_performance_metrics(
-            result.equal_weight_benchmark.dropna(), periods_per_year=244,
+            result.equal_weight_benchmark.dropna(), periods_per_year=244, initial_nav=initial_nav,
         )
     if not result.buy_hold_benchmark.empty:
         result.benchmark_metrics["buy_hold_510300"] = compute_performance_metrics(
-            result.buy_hold_benchmark.dropna(), periods_per_year=244,
+            result.buy_hold_benchmark.dropna(), periods_per_year=244, initial_nav=initial_nav,
         )
     if not result.cash_benchmark.empty:
         result.benchmark_metrics["cash"] = compute_performance_metrics(
-            result.cash_benchmark, periods_per_year=244,
+            result.cash_benchmark, periods_per_year=244, initial_nav=initial_nav,
         )
 
     # Step 11: Robustness — cluster stability and bootstrap

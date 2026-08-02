@@ -153,7 +153,7 @@ class TestPipelineE2E:
         metric_indexes = []
         bootstrap_indexes = []
 
-        def capture_metrics(series, periods_per_year=52):
+        def capture_metrics(series, periods_per_year=52, initial_nav=1.0):
             metric_indexes.append((series.index.copy(), periods_per_year))
             return {"annual_return": 0.0, "max_drawdown": 0.0}
 

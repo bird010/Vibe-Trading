@@ -9,25 +9,34 @@ import pandas as pd
 def compute_performance_metrics(
     cumulative: pd.Series,
     periods_per_year: int = 52,
+    initial_nav: float = 1.0,
 ) -> dict[str, float]:
     """§14.2 — Core return and risk metrics from a cumulative index series.
 
     Args:
-        cumulative: Cumulative return index (starts at 1.0).
-        periods_per_year: 52 for weekly data.
+        cumulative: Cumulative return index (daily NAV; its first point is the
+            first evaluation day's NAV, NOT the initial principal).
+        periods_per_year: 244 for daily data, 52 for weekly.
+        initial_nav: pre-interval NAV anchor (design §32.1). The first period
+            return is measured against this anchor (first_nav/initial_nav - 1)
+            via a dateless baseline prepended internally — not a fake trading day.
 
     Returns:
         Dict of metric_name -> value.
     """
-    if cumulative.empty or len(cumulative) < 2:
+    if cumulative.empty or len(cumulative) < 1:
         return {"annual_return": 0.0, "annual_volatility": 0.0, "sharpe": 0.0,
                 "sortino": 0.0, "max_drawdown": 0.0, "calmar": 0.0}
 
-    returns = cumulative.pct_change(fill_method=None).dropna()
-    n = len(returns)
+    # Prepend a dateless initial anchor as the pre-period baseline so the first
+    # evaluation day's return is captured relative to initial_nav (design §32.1).
+    anchor = pd.Series([float(initial_nav)], index=["__initial_nav_anchor__"])
+    anchored = pd.concat([anchor, cumulative])
+    returns = anchored.pct_change(fill_method=None).dropna()
+    n = len(returns)  # one return per evaluation day
 
-    # Annualized return
-    total_return = cumulative.iloc[-1] / cumulative.iloc[0] - 1.0
+    # Annualized return (total measured from the initial_nav anchor)
+    total_return = float(cumulative.iloc[-1]) / float(initial_nav) - 1.0
     years = n / periods_per_year
     annual_return = (1.0 + total_return) ** (1.0 / max(years, 1e-9)) - 1.0 if years > 0 else 0.0
 
@@ -42,9 +51,9 @@ def compute_performance_metrics(
     downside_std = float(downside.std(ddof=1)) * np.sqrt(periods_per_year) if len(downside) > 1 else 0.0
     sortino = annual_return / downside_std if downside_std > 1e-12 else 0.0
 
-    # Max drawdown
-    running_max = cumulative.cummax()
-    drawdown = (cumulative - running_max) / running_max
+    # Max drawdown (anchored so a first-day drop from initial_nav is captured)
+    running_max = anchored.cummax()
+    drawdown = (anchored - running_max) / running_max
     max_dd = float(drawdown.min())
 
     # Calmar
