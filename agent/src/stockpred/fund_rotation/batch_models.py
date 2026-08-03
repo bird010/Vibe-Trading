@@ -1,56 +1,107 @@
-"""Strategy batch request models and normalization — Phase 4 Task 2 (§21/§21.1).
-
-Single submission shape for one or many variants. The idempotency hash is
-computed over ``schema_version`` + the canonicalized CLIENT payload only:
-JSON typing, object-key sorting and declared aliases — never re-resolved
-strategy defaults, never server-generated fields (batch_id, timestamps,
-snapshots). The resolved strategy/config/implementation hashes are stored
-separately as ``resolved_batch_identity`` (§21.1).
-"""
+"""Strategy batch request models and canonical client-payload identity."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 RESEARCH_ONLY = "RESEARCH_ONLY"
-
-# Declared request aliases normalized before hashing (§21.1). None today; the
-# hook stays explicit so future aliases are a visible, tested change.
+SUPPORTED_SCHEMA_VERSION = "1"
+MAX_VARIANTS_PER_BATCH = 50
 _DECLARED_ALIASES: dict[str, str] = {}
 
 
 class BatchVariantRequest(BaseModel):
-    """One strategy variant: identity params only — ``label`` is display-only
-    and never enters the run identity (§21)."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    strategy_id: str = Field(min_length=1)
-    label: str | None = None
+    strategy_id: str = Field(min_length=1, max_length=128)
+    label: str | None = Field(default=None, max_length=128)
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class StrategyBatchRequest(BaseModel):
-    """Unified batch submission (§21): single- and multi-strategy share it."""
+class BatchExecutionRequest(BaseModel):
+    """Resolved public execution inputs; defaults are identity-bearing."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: str = Field(min_length=1)
-    idempotency_key: str = Field(min_length=1)
-    mode: str = Field(min_length=1)
+    initial_capital: float = Field(default=1_000_000.0, gt=0)
+    commission_rate: float = Field(default=0.00025, ge=0)
+    commission_min: float = Field(default=5.0, ge=0)
+    other_fee_rate: float = Field(default=0.0, ge=0)
+    max_participation_rate: float = Field(default=0.05, gt=0, le=1)
+    adv_lookback: int = Field(default=20, ge=1)
+    adv_min_observations: int = Field(default=10, ge=1)
+    base_slippage_bps: float = Field(default=5.0, ge=0)
+    max_slippage_bps: float = Field(default=30.0, ge=0)
+    lot_size: int = Field(default=100, ge=1)
+
+    @model_validator(mode="after")
+    def _cross_field_constraints(self) -> "BatchExecutionRequest":
+        if self.adv_min_observations > self.adv_lookback:
+            raise ValueError(
+                "adv_min_observations must be <= adv_lookback"
+            )
+        if self.max_slippage_bps < self.base_slippage_bps:
+            raise ValueError(
+                "max_slippage_bps must be >= base_slippage_bps"
+            )
+        return self
+
+
+class StrategyBatchRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: str
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    mode: str
     evaluation_start_date: str = Field(min_length=8, max_length=8)
     evaluation_end_date: str = Field(min_length=8, max_length=8)
-    execution: dict[str, Any] = Field(default_factory=dict)
-    variants: list[BatchVariantRequest] = Field(min_length=1)
+    execution: BatchExecutionRequest = Field(
+        default_factory=BatchExecutionRequest
+    )
+    variants: list[BatchVariantRequest] = Field(
+        min_length=1,
+        max_length=MAX_VARIANTS_PER_BATCH,
+    )
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema(cls, value: str) -> str:
+        if value != SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {SUPPORTED_SCHEMA_VERSION!r}, "
+                f"got {value!r}"
+            )
+        return value
 
     @field_validator("mode")
     @classmethod
     def _mode_research_only(cls, value: str) -> str:
         return validate_research_mode(value)
+
+    @field_validator("evaluation_start_date", "evaluation_end_date")
+    @classmethod
+    def _strict_date(cls, value: str) -> str:
+        try:
+            parsed = datetime.strptime(value, "%Y%m%d")
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid YYYYMMDD date: {value!r}"
+            ) from exc
+        normalized = parsed.strftime("%Y%m%d")
+        if normalized != value:
+            raise ValueError(f"invalid YYYYMMDD date: {value!r}")
+        return value
 
     @model_validator(mode="after")
     def _date_order(self) -> "StrategyBatchRequest":
@@ -62,7 +113,6 @@ class StrategyBatchRequest(BaseModel):
 
 
 def validate_research_mode(value: str) -> str:
-    """RESEARCH_ONLY is enforced exactly — no case variants, no live modes."""
     if value != RESEARCH_ONLY:
         raise ValueError(
             f"mode must be exactly {RESEARCH_ONLY!r}, got {value!r}"
@@ -71,12 +121,6 @@ def validate_research_mode(value: str) -> str:
 
 
 def canonical_payload_hash(request: StrategyBatchRequest) -> str:
-    """§21.1 — stable SHA-256 over schema_version + canonical client payload.
-
-    Normalization is limited to JSON typing, object-key sorting and declared
-    aliases; strategy defaults are NOT re-resolved here, so replaying an old
-    request after a service upgrade still binds to the original batch.
-    """
     payload = request.model_dump(mode="json")
     for old_name, new_name in _DECLARED_ALIASES.items():
         if old_name in payload:
