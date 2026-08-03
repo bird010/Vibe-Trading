@@ -91,12 +91,21 @@ class TestStrategyProtocol:
     def test_resolve_requirements_is_config_dependent(self):
         strategy = CorrelationAllMembersStrategy()
         req_small = strategy.resolve_requirements(
-            CorrelationAllMembersConfig(correlation_lookback_weeks=20, momentum_window_weeks=4)
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=20, min_training_weeks=20,
+                momentum_window_weeks=4,
+            )
         )
         req_large = strategy.resolve_requirements(
-            CorrelationAllMembersConfig(correlation_lookback_weeks=52, momentum_window_weeks=4)
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=52, min_training_weeks=52,
+                momentum_window_weeks=4,
+            )
         )
         assert req_large.warmup_trade_days > req_small.warmup_trade_days
+        # Warmup = one full window of weekly returns: (N+1) week-endings.
+        assert req_small.warmup_trade_days == (20 + 1) * 5 - 1
+        assert req_large.warmup_trade_days == (52 + 1) * 5 - 1
         assert "fund" in req_small.required_datasets
         assert req_small.needs_benchmark is True
 
@@ -109,33 +118,81 @@ class TestStrategyProtocol:
         session = strategy.create_session(init, cfg)
         assert isinstance(session, FundRotationStrategySession)
 
-    def test_session_scheduled_dates_within_bounds(self):
+    def test_session_scheduled_dates_are_week_endings_within_bounds(self):
         strategy = CorrelationAllMembersStrategy()
         cfg = CorrelationAllMembersConfig()
         init = StrategyInitializationContext(run_id="r1", evaluation_calendar=())
         session = strategy.create_session(init, cfg)
-        calendar = tuple(f"2024{m:02d}{d:02d}" for m, d in [(1, 1), (1, 2), (1, 3), (1, 8), (1, 9), (1, 10)])
+        # Two full ISO weeks of trading days (Mon-Fri).
+        calendar = tuple(f"2024{m:02d}{d:02d}" for m, d in [
+            (1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
+            (1, 8), (1, 9), (1, 10),
+        ])
         dates = session.scheduled_dates(calendar, "20240102", "20240109")
-        assert all("20240102" <= d <= "20240109" for d in dates)
+        # ISO week-endings: Friday 20240105 in range; 20240110 past eval end.
+        assert dates == ("20240105",)
 
-    def test_session_evaluate_returns_valid_decision(self):
+    def test_session_evaluate_produces_real_decision(self):
+        import numpy as np
         import pandas as pd
+        from backtest.fund_rotation.causal_data import CausalDataView
         from backtest.fund_rotation.contracts import StrategyDecisionContext
 
-        class _View:
-            @property
-            def signal_date(self):
-                return pd.Timestamp("20240105")
-
         strategy = CorrelationAllMembersStrategy()
-        cfg = CorrelationAllMembersConfig()
+        cfg = CorrelationAllMembersConfig(
+            k=2, top_n=1,
+            correlation_lookback_weeks=4, min_training_weeks=4,
+            min_valid_weeks=2, min_pairwise_weeks=2,
+            recluster_interval_weeks=2, momentum_window_weeks=2,
+        )
+        # Eight Mon-Fri weeks for three ETFs.
+        rng = np.random.default_rng(7)
+        start = pd.Timestamp("2024-01-01")  # a Monday
+        dates = [
+            (start + pd.Timedelta(weeks=w, days=d)).strftime("%Y%m%d")
+            for w in range(8) for d in range(5)
+        ]
+        codes = ["510001.SH", "510002.SH", "510003.SH"]
+        rows, adj = [], []
+        prices = {c: 2.0 + rng.random() for c in codes}
+        for d in dates:
+            for c in codes:
+                prices[c] *= 1 + rng.normal(0.001, 0.02)
+                close = round(prices[c], 3)
+                rows.append({
+                    "ts_code": c, "trade_date": d, "open": close,
+                    "close": close, "high": close, "low": close,
+                    "pre_close": close, "vol": 100000,
+                    "amount": close * 1_000_000,
+                })
+                adj.append({"ts_code": c, "trade_date": d, "adj_factor": 1.0})
+        fund_daily = pd.DataFrame(rows)
+        fund_adj = pd.DataFrame(adj)
+        dim_fund = pd.DataFrame([
+            {"ts_code": c, "name": f"测试ETF{i}", "list_date": "20200101"}
+            for i, c in enumerate(codes)
+        ])
+
+        requirements = strategy.resolve_requirements(cfg)
         init = StrategyInitializationContext(run_id="r1", evaluation_calendar=())
         session = strategy.create_session(init, cfg)
-        ctx = StrategyDecisionContext(signal_date="20240105", data_view=_View())
+        # warmup = (4+1)*5 - 1 = 24 -> first signal = dates[24] (week-4 Friday)
+        signal_date = dates[24]
+        view = CausalDataView(
+            fund_daily, fund_adj, dim_fund, requirements,
+            pd.Timestamp(signal_date), frozenset(codes),
+        )
+        ctx = StrategyDecisionContext(signal_date=signal_date, data_view=view)
         decision = session.evaluate(ctx)
-        assert decision.signal_date == "20240105"
-        assert decision.action is DecisionKind.HOLD_TARGETS
-        assert decision.decision_id  # non-empty
+
+        assert decision.signal_date == signal_date
+        assert decision.decision_id
+        assert decision.action is DecisionKind.SET_TARGETS
+        total = decision.cash_weight + sum(decision.target_weights.values())
+        assert abs(total - 1.0) < 1e-9
+        assert set(decision.target_weights).issubset(set(codes))
+        diag = session.finalize()
+        assert any(a.role == "cluster_history" for a in diag.artifacts)
 
 
 class TestLegacyAdapter:

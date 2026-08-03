@@ -19,11 +19,17 @@ from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
 class TestConfigDependentRequirements:
     def test_warmup_scales_with_lookback(self):
         strategy = CorrelationAllMembersStrategy()
+        # warmup = one full window of max(min_training, lookback) weekly
+        # returns; pin min_training so the lookback difference dominates.
         small = strategy.resolve_requirements(
-            CorrelationAllMembersConfig(correlation_lookback_weeks=20)
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=20, min_training_weeks=20,
+            )
         )
         large = strategy.resolve_requirements(
-            CorrelationAllMembersConfig(correlation_lookback_weeks=52)
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=52, min_training_weeks=52,
+            )
         )
         assert large.warmup_trade_days > small.warmup_trade_days
 
