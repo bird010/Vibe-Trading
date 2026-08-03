@@ -219,6 +219,41 @@ def test_hold_after_set_keeps_previous_targets_without_new_events():
     assert len(result.decisions) == 3
 
 
+def test_hold_days_retry_residual_under_original_parent_order():
+    # Capacity-constrained market: ADV permits only ~500 shares/day, so the
+    # 10k-share target fills over several days. HOLD decisions must NOT create,
+    # replace, cancel or recompute orders — the residual keeps its parent id.
+    fund_daily, fund_adj, dim_fund = _market_frames()
+    fund_daily = fund_daily.assign(amount=100.0)  # ADV = 100 * 1000 = 100k
+    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+    session = FakeSession({
+        "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
+                              {"A": 1.0}, cash=0.0),
+    })
+    result = runner.run(
+        strategy=FakeStrategy(session),
+        config=FakeConfig(),
+        snapshot=_snapshot(),
+        evaluation=_evaluation(),
+        execution=ExecutionConfig(
+            initial_capital=100_000, adv_min_observations=3,
+            max_participation_rate=0.05,
+        ),
+        cancellation=CancellationToken(),
+    )
+
+    assert result.status is SubRunStatus.SUCCEEDED
+    buys = [
+        e for e in result.trade_events
+        if e["ts_code"] == "A" and e["action"] == "BUY" and e.get("filled", 0) > 0
+    ]
+    # Partial fills spread across several execution days...
+    assert len({e["trade_date"] for e in buys}) >= 2
+    # ...but every retry belongs to the single original parent order (§7.2).
+    assert len({e["signal_event_id"] for e in buys}) == 1
+    assert list(result.weekly_targets) == ["20240112"]  # HOLDs added no target
+
+
 # ── INVALID ──
 
 def test_invalid_after_warmup_terminates_subrun():
@@ -285,6 +320,40 @@ def test_cancellation_at_decision_checkpoint_cancels_subrun():
 
     assert result.status is SubRunStatus.CANCELED
     assert len(result.decisions) == 1
+
+
+class DelayedToken:
+    """Flips to cancelled after a fixed number of is_cancelled checks."""
+
+    def __init__(self, flip_after: int):
+        self._flip_after = flip_after
+        self._checks = 0
+
+    @property
+    def is_cancelled(self):
+        self._checks += 1
+        return self._checks > self._flip_after
+
+    def cancel(self):
+        self._flip_after = 0
+
+
+def test_cancellation_during_execution_preserves_partial_events():
+    # Check order: 1 start + 3 decision days + 1 pre-execution, then daily.
+    # flip_after=7 therefore stops the loop at the start of execution day 3.
+    token = DelayedToken(flip_after=7)
+    session = FakeSession({
+        "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
+                              {"A": 1.0}, cash=0.0),
+    })
+    result = _run(session, token=token)
+
+    assert result.status is SubRunStatus.CANCELED
+    assert result.error_code == "CANCELED"
+    assert len(result.decisions) == 3
+    assert result.trade_events  # partial evidence preserved
+    assert len(result.executed_equity) == 2  # only completed execution days
+    assert result.executed_equity.index[-1] == "20240116"
 
 
 # ── contract violations and data-access enforcement ──

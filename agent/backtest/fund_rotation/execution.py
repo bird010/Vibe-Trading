@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time as _time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -208,6 +209,7 @@ def run_execution_loop(
     profiler: ExecutionProfiler | None = None,
     execution_targets: dict | None = None,
     evaluation_dates: list[str] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> None:
     """§12 — Run continuous-account execution with daily equity tracking.
 
@@ -217,6 +219,10 @@ def run_execution_loop(
 
     Integrates: ADV20 capacity, participation-rate slippage, OrderManager
     residual orders, daily mark-to-market equity, and fee impacts.
+
+    §26.1: when ``should_cancel`` returns True the loop stops at the next
+    daily checkpoint; events/equity collected so far are preserved and the
+    caller decides the terminal state (legacy callers pass no token).
     """
     targets_map = execution_targets if execution_targets is not None else result.weekly_targets
     # §24: the evaluation calendar (trading days within [start_date, end_date])
@@ -248,7 +254,6 @@ def run_execution_loop(
     bar_lookup = ctx.bar_lookup
     close_lookup = ctx.close_lookup
     adj_lookup = ctx.adj_lookup
-    all_trade_dates = ctx.all_trade_dates
 
     # §24: build the execution schedule via the shared schedule_targets. A
     # pre-evaluation signal maps to the first evaluation trading day, and an
@@ -286,6 +291,9 @@ def run_execution_loop(
     date_ordinal = {date: index for index, date in enumerate(equity_dates)}
 
     for trade_date in equity_dates:
+        # §26.1 — cancellation checkpoint at each execution-day boundary.
+        if should_cancel is not None and should_cancel():
+            break
         # Apply the economic-share convention before today's open execution.
         _t_corp = _time.perf_counter()
         for code, pos in list(executor._positions.items()):

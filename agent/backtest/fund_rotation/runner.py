@@ -85,7 +85,6 @@ class ExecutionConfig(BaseModel):
     adv_min_observations: int = 10
     base_slippage_bps: float = 5.0
     max_slippage_bps: float = 30.0
-    lot_size: int = 100
 
 
 class SubRunStatus(str, Enum):
@@ -283,8 +282,23 @@ class FundRotationBacktestRunner:
         pipeline_result = PipelineResult(weekly_targets=targets_map)
         exec_ctx = build_execution_context(self._fund_daily, self._fund_adj, exec_config)
         run_execution_loop(
-            pipeline_result, exec_config, exec_ctx, evaluation_dates=evaluation_dates,
+            pipeline_result, exec_config, exec_ctx,
+            evaluation_dates=evaluation_dates,
+            should_cancel=lambda: cancellation.is_cancelled,
         )
+        if cancellation.is_cancelled:
+            # §26.1 — canceled during execution: keep collected evidence, never
+            # publish it as a successful run.
+            return FundRotationRunResult(
+                status=SubRunStatus.CANCELED,
+                error_code="CANCELED",
+                decisions=tuple(decisions),
+                weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                executed_equity=pipeline_result.executed_equity,
+                trade_events=pipeline_result.trade_events,
+                orders=pipeline_result.orders,
+                positions_history=pipeline_result.positions_history,
+            )
         strategy_metrics = compute_performance_metrics(
             pipeline_result.executed_equity,
             periods_per_year=244,
