@@ -5,6 +5,7 @@ import type {
   BatchDetail,
   BatchListItem,
   BatchSubmitResponse,
+  ComparisonEquityData,
   EventEnvelope,
   StrategyDetail,
   StrategySummary,
@@ -19,6 +20,7 @@ import {
   cancelBatch,
   connectBatchSSE,
   fetchBatchReports,
+  fetchBatchComparisonEquity,
 } from "./api";
 import type { VariantDraft } from "./StrategyVariantsEditor";
 
@@ -43,6 +45,7 @@ export interface FundRotationState {
   activeBatchId: string | null;
   activeBatch: BatchDetail | null;
   comparison: Awaited<ReturnType<typeof fetchBatchReports>> | null;
+  comparisonEquity: ComparisonEquityData | null;
   loading: boolean;
   error: string | null;
   events: EventEnvelope[];
@@ -72,6 +75,7 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
   activeBatchId: null,
   activeBatch: null,
   comparison: null,
+  comparisonEquity: null,
   loading: false,
   error: null,
   events: [],
@@ -169,6 +173,7 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
       activeBatchId: batchId,
       activeBatch: null,
       comparison: null,
+      comparisonEquity: null,
       events: [],
       error: null,
     });
@@ -181,7 +186,11 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
           detail.state.stage === "PARTIAL_SUCCEEDED"
         ) {
           try {
-            set({ comparison: await fetchBatchReports(batchId) });
+            const reports = await fetchBatchReports(batchId);
+            const comparisonEquity = reports.comparison_available
+              ? await fetchBatchComparisonEquity(batchId)
+              : null;
+            set({ comparison: reports, comparisonEquity });
           } catch (error) {
             set({
               error:
@@ -258,9 +267,8 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
         }
       },
       () => {
-        // Native EventSource reconnects automatically and carries the query
-        // resume sequence. Keep the instance until a terminal event or an
-        // explicit disconnect.
+        // Native EventSource reconnects automatically. The explicit replay
+        // cursor covers fresh connections after page/store transitions.
       },
     );
   },
@@ -277,6 +285,7 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
       activeBatchId: null,
       activeBatch: null,
       comparison: null,
+      comparisonEquity: null,
       loading: false,
       error: null,
       events: [],
