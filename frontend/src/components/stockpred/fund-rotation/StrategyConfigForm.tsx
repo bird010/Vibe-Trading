@@ -1,10 +1,11 @@
-/** Phase 5 Task 2 — render strategy config from Catalog JSON Schema (§18). */
+/** Render a strategy config from the Catalog JSON Schema. */
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { AlertTriangle } from "lucide-react";
 
 export interface SchemaField {
-  name: string;
+  key: string;
+  path: string[];
   type: "string" | "number" | "integer" | "boolean";
   description: string;
   default?: unknown;
@@ -20,65 +21,118 @@ interface Props {
   descriptions: Record<string, string>;
   value: Record<string, unknown>;
   onChange: (value: Record<string, unknown>) => void;
+  onUnsupportedChange?: (unsupported: string[]) => void;
   disabled?: boolean;
 }
+
+const SUPPORTED_TYPES = new Set(["string", "number", "integer", "boolean"]);
 
 function extractFields(
   schema: Record<string, unknown>,
   defaults: Record<string, unknown>,
   descriptions: Record<string, string>,
 ): { fields: SchemaField[]; unsupported: string[] } {
-  const props = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
-  const required = new Set(schema.required as string[] ?? []);
+  const properties = (schema.properties ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const required = new Set((schema.required as string[] | undefined) ?? []);
   const fields: SchemaField[] = [];
   const unsupported: string[] = [];
 
-  for (const [name, prop] of Object.entries(props)) {
-    const type = prop.type as string;
-    if (!["string", "number", "integer", "boolean"].includes(type)) {
-      if (type === "object" && prop.properties) {
-        // Flatten nested objects: field name = parent_child
-        const nested = prop.properties as Record<string, Record<string, unknown>>;
-        for (const [nestedName, nestedProp] of Object.entries(nested)) {
-          const nestedType = nestedProp.type as string;
-          if (!["string", "number", "integer", "boolean"].includes(nestedType)) {
-            unsupported.push(`${name}.${nestedName} (${nestedType})`);
-            continue;
-          }
-          const nestedDefaults = (defaults[name] ?? {}) as Record<string, unknown>;
-          fields.push({
-            name: `${name}_${nestedName}`,
-            type: nestedType as SchemaField["type"],
-            description:
-              descriptions[`${name}_${nestedName}`] ||
-              (nestedProp.description as string) ||
-              `${name} - ${nestedName}`,
-            default: nestedDefaults[nestedName],
-            minimum: nestedProp.minimum as number | undefined,
-            maximum: nestedProp.maximum as number | undefined,
-            enum: nestedProp.enum as (string | number)[] | undefined,
-            required: false,
-          });
-        }
-        continue;
+  const pushField = (
+    path: string[],
+    property: Record<string, unknown>,
+    fieldDefault: unknown,
+    isRequired: boolean,
+  ): void => {
+    const type = property.type as string;
+    const dotted = path.join(".");
+    if (!SUPPORTED_TYPES.has(type)) {
+      unsupported.push(`${dotted} (${type || "unknown"})`);
+      return;
+    }
+    fields.push({
+      key: dotted,
+      path,
+      type: type as SchemaField["type"],
+      description:
+        descriptions[dotted] ||
+        descriptions[path.join("_")] ||
+        (property.description as string) ||
+        dotted,
+      default: fieldDefault,
+      minimum: property.minimum as number | undefined,
+      maximum: property.maximum as number | undefined,
+      enum: property.enum as (string | number)[] | undefined,
+      required: isRequired,
+    });
+  };
+
+  for (const [name, property] of Object.entries(properties)) {
+    if (property.type === "object" && property.properties) {
+      const nestedProperties = property.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const nestedDefaults = (defaults[name] ?? {}) as Record<string, unknown>;
+      const nestedRequired = new Set(
+        (property.required as string[] | undefined) ?? [],
+      );
+      for (const [nestedName, nestedProperty] of Object.entries(
+        nestedProperties,
+      )) {
+        pushField(
+          [name, nestedName],
+          nestedProperty,
+          nestedDefaults[nestedName],
+          required.has(name) && nestedRequired.has(nestedName),
+        );
       }
-      unsupported.push(`${name} (${type})`);
       continue;
     }
-
-    fields.push({
-      name,
-      type: type as SchemaField["type"],
-      description: descriptions[name] || (prop.description as string) || name,
-      default: defaults[name],
-      minimum: prop.minimum as number | undefined,
-      maximum: prop.maximum as number | undefined,
-      enum: prop.enum as (string | number)[] | undefined,
-      required: required.has(name),
-    });
+    pushField([name], property, defaults[name], required.has(name));
   }
-
   return { fields, unsupported };
+}
+
+function getAtPath(
+  source: Record<string, unknown>,
+  path: string[],
+): unknown {
+  let current: unknown = source;
+  for (const segment of path) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function setAtPath(
+  source: Record<string, unknown>,
+  path: string[],
+  value: unknown,
+): Record<string, unknown> {
+  const result = structuredClone(source);
+  if (path.length === 1) {
+    if (value === undefined || value === "") delete result[path[0]];
+    else result[path[0]] = value;
+    return result;
+  }
+  const [parent, child] = path;
+  const nested = {
+    ...((result[parent] ?? {}) as Record<string, unknown>),
+  };
+  if (value === undefined || value === "") delete nested[child];
+  else nested[child] = value;
+  result[parent] = nested;
+  return result;
+}
+
+function castEnumValue(field: SchemaField, raw: string): unknown {
+  if (raw === "") return undefined;
+  const option = field.enum?.find((candidate) => String(candidate) === raw);
+  return option ?? raw;
 }
 
 export function StrategyConfigForm({
@@ -87,6 +141,7 @@ export function StrategyConfigForm({
   descriptions,
   value,
   onChange,
+  onUnsupportedChange,
   disabled = false,
 }: Props) {
   const { fields, unsupported } = useMemo(
@@ -94,46 +149,38 @@ export function StrategyConfigForm({
     [schema, defaults, descriptions],
   );
 
-  const setField = (name: string, val: unknown) => {
-    const next = { ...value };
-    if (name.includes("_") && !(name in (schema.properties as Record<string, unknown> ?? {}))) {
-      // Nested field: parent_child → parent: { child: val }
-      const [parent, child] = name.split("_", 2);
-      next[parent] = { ...((next[parent] ?? {}) as Record<string, unknown>), [child]: val };
-    } else {
-      if (val === "" || val === undefined) {
-        delete next[name];
-      } else {
-        next[name] = val;
-      }
-    }
-    onChange(next);
+  useEffect(() => {
+    onUnsupportedChange?.(unsupported);
+  }, [onUnsupportedChange, unsupported]);
+
+  const fieldValue = (field: SchemaField): unknown => {
+    const current = getAtPath(value, field.path);
+    return current !== undefined ? current : field.default;
   };
 
-  const getFieldValue = (name: string): unknown => {
-    const direct = value[name];
-    if (direct !== undefined) return direct;
-    const field = fields.find((f) => f.name === name);
-    return field?.default;
+  const setField = (field: SchemaField, nextValue: unknown): void => {
+    onChange(setAtPath(value, field.path, nextValue));
   };
 
   const renderInput = (field: SchemaField) => {
-    const val = getFieldValue(field.name);
-    const baseClass =
+    const current = fieldValue(field);
+    const className =
       "w-full rounded border px-2 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed";
 
     if (field.enum) {
       return (
         <select
-          value={String(val ?? "")}
-          onChange={(e) => setField(field.name, e.target.value)}
+          value={String(current ?? "")}
+          onChange={(event) =>
+            setField(field, castEnumValue(field, event.target.value))
+          }
           disabled={disabled}
-          className={baseClass}
+          className={className}
         >
-          <option value="">--</option>
-          {field.enum.map((opt) => (
-            <option key={String(opt)} value={String(opt)}>
-              {String(opt)}
+          <option value="">默认</option>
+          {field.enum.map((option) => (
+            <option key={String(option)} value={String(option)}>
+              {String(option)}
             </option>
           ))}
         </select>
@@ -143,15 +190,14 @@ export function StrategyConfigForm({
     if (field.type === "boolean") {
       return (
         <select
-          value={val === true ? "true" : val === false ? "false" : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "true") setField(field.name, true);
-            else if (v === "false") setField(field.name, false);
-            else setField(field.name, undefined);
+          value={current === true ? "true" : current === false ? "false" : ""}
+          onChange={(event) => {
+            if (event.target.value === "true") setField(field, true);
+            else if (event.target.value === "false") setField(field, false);
+            else setField(field, undefined);
           }}
           disabled={disabled}
-          className={baseClass}
+          className={className}
         >
           <option value="">默认</option>
           <option value="true">true</option>
@@ -160,26 +206,39 @@ export function StrategyConfigForm({
       );
     }
 
-    const step = field.type === "integer" ? 1 : undefined;
+    if (field.type === "string") {
+      return (
+        <input
+          type="text"
+          value={current !== undefined ? String(current) : ""}
+          onChange={(event) => setField(field, event.target.value)}
+          disabled={disabled}
+          placeholder={field.default !== undefined ? String(field.default) : ""}
+          className={className}
+        />
+      );
+    }
+
     return (
       <input
         type="number"
-        value={val !== undefined ? String(val) : ""}
-        onChange={(e) => {
-          const raw = e.target.value;
+        value={current !== undefined ? String(current) : ""}
+        onChange={(event) => {
+          const raw = event.target.value;
           if (raw === "") {
-            setField(field.name, undefined);
+            setField(field, undefined);
             return;
           }
-          const num = field.type === "integer" ? parseInt(raw, 10) : parseFloat(raw);
-          if (!isNaN(num)) setField(field.name, num);
+          const parsed =
+            field.type === "integer" ? Number.parseInt(raw, 10) : Number(raw);
+          if (Number.isFinite(parsed)) setField(field, parsed);
         }}
         min={field.minimum}
         max={field.maximum}
-        step={step}
+        step={field.type === "integer" ? 1 : "any"}
         disabled={disabled}
         placeholder={field.default !== undefined ? String(field.default) : ""}
-        className={baseClass}
+        className={className}
       />
     );
   };
@@ -187,10 +246,7 @@ export function StrategyConfigForm({
   return (
     <div className="space-y-3">
       {fields.map((field) => (
-        <label
-          key={field.name}
-          className="flex flex-col gap-1"
-        >
+        <label key={field.key} className="flex flex-col gap-1">
           <span className="flex items-center gap-1 text-xs text-muted-foreground">
             {field.description}
             {field.required && <span className="text-red-400">*</span>}
@@ -199,10 +255,11 @@ export function StrategyConfigForm({
         </label>
       ))}
       {unsupported.length > 0 && (
-        <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-start gap-2">
+        <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 flex items-start gap-2">
           <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <span>
-            暂不支持以下配置项：{unsupported.join("、")}
+            当前客户端无法安全编辑以下配置项，提交已禁用：
+            {unsupported.join("、")}
           </span>
         </div>
       )}
