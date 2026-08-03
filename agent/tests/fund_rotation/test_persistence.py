@@ -258,6 +258,61 @@ class TestEventEnvelope:
                                 stage="RUNNING_STRATEGIES")
         assert event["seq"] == 3
 
+    def test_half_written_tail_isolated_and_append_survives(self, tmp_path):
+        """§26.1 crash restart: a truncated last line (no newline) must not
+        swallow the next appended event."""
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        log.append(event_type="BATCH_STAGE", scope="BATCH", stage="VALIDATING")
+        # Simulate a crash mid-append of seq 2.
+        with open(tmp_path / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"schema_version": "v2", "seq": 2, "trunca')
+
+        reopened = BatchEventLog(tmp_path, batch_id="b1")
+        event = reopened.append(event_type="BATCH_STAGE", scope="BATCH",
+                                stage="SNAPSHOTTING_DATA")
+        assert event["seq"] == 2  # truncated line carries no usable seq
+
+        lines = (tmp_path / "events.jsonl").read_text(
+            encoding="utf-8").strip().split("\n")
+        assert len(lines) == 3
+        complete = [line for line in lines if line.strip().endswith("}")]
+        parsed = [json.loads(line) for line in complete]
+        # The new event is intact and parseable on its own line.
+        assert parsed[-1]["seq"] == 2
+        assert parsed[-1]["stage"] == "SNAPSHOTTING_DATA"
+
+    def test_non_object_json_lines_do_not_break_recovery(self, tmp_path):
+        with open(tmp_path / "events.jsonl", "w", encoding="utf-8") as fh:
+            fh.write("null\n[1, 2]\n")
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        event = log.append(event_type="BATCH_STAGE", scope="BATCH",
+                           stage="VALIDATING")
+        assert event["seq"] == 1
+
+    def test_ts_is_standard_parseable_iso_offset(self, tmp_path):
+        from datetime import datetime
+
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        event = log.append(event_type="BATCH_STAGE", scope="BATCH",
+                           stage="VALIDATING")
+        # ISO-8601 with colon-separated UTC offset (§30.1 example form).
+        parsed = datetime.fromisoformat(event["ts"])
+        assert parsed.utcoffset() is not None
+        assert event["ts"][-6] in "+-" and event["ts"][-3] == ":"
+
+    def test_stage_must_use_public_enums(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        with pytest.raises(EventValidationError):
+            log.append(event_type="BATCH_STAGE", scope="BATCH",
+                       stage="NOT_A_STAGE")
+        with pytest.raises(EventValidationError):
+            # Child-only stage is not a valid BATCH-stage event stage.
+            log.append(event_type="BATCH_STAGE", scope="BATCH",
+                       stage="GENERATING_SIGNALS")
+        # TERMINAL may omit stage entirely.
+        event = log.append(event_type="TERMINAL", scope="BATCH")
+        assert event["stage"] is None
+
 
 class TestProgressValidation:
     def _append_progress(self, log, completed, total, unit="decision_dates"):

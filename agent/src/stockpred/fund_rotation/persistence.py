@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 import threading
-import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +132,16 @@ VALID_EVENT_TYPES = {
 }
 VALID_EVENT_SCOPES = {"BATCH", "VARIANT"}
 
+# stage must use the public batch/child enums (§30.1); imported lazily-safe
+# here because state_machine has no dependency on this module.
+from src.stockpred.fund_rotation.state_machine import (  # noqa: E402
+    BatchStage,
+    ChildStage,
+)
+
+_BATCH_STAGE_NAMES = {s.value for s in BatchStage}
+_VARIANT_STAGE_NAMES = {s.value for s in ChildStage} | {s.value for s in BatchStage}
+
 
 class EventValidationError(ValueError):
     """Raised when an event envelope or its progress violates §30.1."""
@@ -176,9 +186,19 @@ class BatchEventLog:
         self.batch_id = batch_id
         self.path = self.batch_dir / "events.jsonl"
         self._lock = threading.Lock()
+        self._isolate_half_written_tail()
         self._next_seq = self._recover_next_seq()
         # (run_id, unit) -> last completed; same-unit progress must not regress.
         self._last_completed: dict[tuple[str, str], int] = {}
+
+    def _isolate_half_written_tail(self) -> None:
+        """A crash mid-append leaves a truncated last line without a newline;
+        terminate it so later appends never merge into the half-written row."""
+        if self.path.exists() and self.path.stat().st_size > 0:
+            with open(self.path, "rb+") as fh:
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
 
     def _recover_next_seq(self) -> int:
         if not self.path.exists():
@@ -190,8 +210,10 @@ class BatchEventLog:
                 if not line:
                     continue
                 try:
-                    max_seq = max(max_seq, int(json.loads(line).get("seq", 0)))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                    record = json.loads(line)
+                    max_seq = max(max_seq, int(record.get("seq", 0)))
+                except (json.JSONDecodeError, TypeError, ValueError,
+                        AttributeError):
                     continue
         return max_seq + 1
 
@@ -219,6 +241,16 @@ class BatchEventLog:
             raise EventValidationError(
                 "VARIANT events require run_id, variant_key and strategy_id"
             )
+        # §30.1: stage uses the public batch/child enums (TERMINAL/ERROR may
+        # omit it; strategy_substage is the free-form display string).
+        if stage is not None:
+            allowed = (
+                _VARIANT_STAGE_NAMES if scope == "VARIANT" else _BATCH_STAGE_NAMES
+            )
+            if stage not in allowed:
+                raise EventValidationError(
+                    f"stage {stage!r} is not a public batch/child stage"
+                )
 
         validated_progress = None
         if progress is not None:
@@ -239,9 +271,7 @@ class BatchEventLog:
                 "seq": seq,
                 "event_type": event_type,
                 "scope": scope,
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime(
-                    "%Y-%m-%dT%H:%M:%S"
-                ),
+                "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "batch_id": self.batch_id,
                 "run_id": run_id,
                 "variant_key": variant_key,
