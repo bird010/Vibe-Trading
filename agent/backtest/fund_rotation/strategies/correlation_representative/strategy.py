@@ -470,6 +470,10 @@ class CorrelationRepresentativeStrategy:
 
     descriptor = DESCRIPTOR
     config_model = CorrelationRepresentativeConfig
+    # Strategy-specific diagnostic artifact roles published via finalize (§12).
+    artifact_roles: tuple[str, ...] = (
+        "cluster_history", "gates", "representatives", "exclusions", "decisions",
+    )
 
     def resolve_requirements(self, config: BaseModel) -> StrategyDataRequirements:
         """Config-derived data needs (pure function of validated config).

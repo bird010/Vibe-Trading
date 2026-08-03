@@ -262,6 +262,8 @@ class CorrelationAllMembersStrategy:
 
     descriptor = DESCRIPTOR
     config_model = CorrelationAllMembersConfig
+    # Strategy-specific diagnostic artifact roles published via finalize (§12).
+    artifact_roles: tuple[str, ...] = ("cluster_history", "exclusions")
 
     def resolve_requirements(self, config: BaseModel) -> StrategyDataRequirements:
         """Config-derived data needs (pure function of validated config).

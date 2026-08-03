@@ -5,13 +5,23 @@ Mounted by api_server.py via register_fund_rotation_routes(app, ...).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from backtest.fund_rotation.catalog import CatalogError, FundRotationStrategyCatalog
+from backtest.fund_rotation.strategies.registry import (
+    default_fund_rotation_strategies,
+)
+from src.stockpred.fund_rotation.api_models import (
+    StrategyDetail,
+    StrategyListResponse,
+    StrategySummary,
+)
 from src.stockpred.fund_rotation.service import FundRotationBacktestService, StructuredError
 
 
@@ -25,6 +35,26 @@ def register_fund_rotation_routes(
     """Register fund rotation routes on the FastAPI app."""
 
     service = FundRotationBacktestService(runs_dir, stockpred_root)
+
+    # Build the strategy catalog once at registration time. A corrupted
+    # whitelist (duplicate id / incompatible interface) fails here — before
+    # any background task can be created — never serving a half-built list
+    # (§16.3).
+    catalog = FundRotationStrategyCatalog(list(default_fund_rotation_strategies()))
+    catalog_version = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "strategy_id": e.strategy_id,
+                    "interface_version": e.interface_version,
+                    "implementation_hash": e.implementation_hash,
+                }
+                for e in catalog.list()
+            ],
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
     def _published_manifest(run_id: str) -> tuple[Path, dict[str, Any]]:
         """Fail closed unless state and the uniquely-bound manifest agree."""
@@ -61,6 +91,75 @@ def register_fund_rotation_routes(
 
     # Recover interrupted runs on startup
     service.recover_interrupted()
+
+    # ── Strategy catalog read endpoints (§16/§18) ──
+
+    @app.get("/stockpred/fund-rotation/strategies", dependencies=[Depends(require_auth)])
+    def list_strategies() -> dict[str, Any]:
+        strategies: list[StrategySummary] = []
+        for entry in catalog.list():
+            binding = catalog.resolve(entry.strategy_id, {})
+            requirements = binding.spec.resolved_requirements
+            strategies.append(StrategySummary(
+                strategy_id=entry.strategy_id,
+                name=entry.name,
+                description=entry.description,
+                interface_version=entry.interface_version,
+                implementation_hash=entry.implementation_hash,
+                supported_universe=entry.supported_universe,
+                warmup_trade_days=requirements.warmup_trade_days,
+                required_datasets=tuple(requirements.required_datasets),
+                required_fields=tuple(requirements.required_fields),
+                frequency=requirements.frequency,
+            ))
+        return StrategyListResponse(
+            catalog_version=catalog_version, strategies=strategies,
+        ).model_dump(mode="json")
+
+    @app.get(
+        "/stockpred/fund-rotation/strategies/{strategy_id}",
+        dependencies=[Depends(require_auth)],
+    )
+    def strategy_detail(strategy_id: str, response: Response) -> dict[str, Any]:
+        try:
+            binding = catalog.resolve(strategy_id, {})
+        except CatalogError as exc:
+            status = 404 if exc.code == "FUND_ROTATION_STRATEGY_NOT_FOUND" else 422
+            raise HTTPException(
+                status_code=status,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+        entry = catalog.require(strategy_id)
+        spec = binding.spec
+        schema = binding.registered.config_model.model_json_schema()
+        descriptions = {
+            name: str(prop.get("description", ""))
+            for name, prop in schema.get("properties", {}).items()
+        }
+        detail = StrategyDetail(
+            strategy_id=strategy_id,
+            name=entry.descriptor.name,
+            description=entry.descriptor.description,
+            interface_version=entry.descriptor.interface_version,
+            implementation_hash=entry.implementation_snapshot.implementation_hash,
+            supported_universe=entry.descriptor.supported_universe,
+            warmup_trade_days=spec.resolved_requirements.warmup_trade_days,
+            required_datasets=tuple(spec.resolved_requirements.required_datasets),
+            required_fields=tuple(spec.resolved_requirements.required_fields),
+            frequency=spec.resolved_requirements.frequency,
+            config_schema=schema,
+            config_schema_version=spec.config_schema_version,
+            config_schema_hash=spec.config_schema_hash,
+            default_config=dict(spec.resolved_config),
+            parameter_descriptions=descriptions,
+            artifact_roles=list(
+                getattr(binding.strategy, "artifact_roles", ())
+            ),
+        )
+        # Schema content hash for frontend caching.
+        response.headers["ETag"] = spec.config_schema_hash
+        return detail.model_dump(mode="json")
 
     @app.get("/stockpred/fund-rotation/defaults", dependencies=[Depends(require_auth)])
     def get_defaults() -> dict[str, Any]:
