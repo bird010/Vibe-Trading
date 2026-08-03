@@ -205,8 +205,8 @@ class _VersionedStateMachine:
     terminal_stages: set = set()
     running_stages: set = set()
 
-    def __init__(self) -> None:
-        self._stage = next(iter(self.transitions))
+    def __init__(self, initial=None) -> None:
+        self._stage = initial if initial is not None else next(iter(self.transitions))
         self._event_seq = 0
 
     @property

@@ -112,7 +112,7 @@ def test_manifest_write_fault_never_exposes_success_manifest(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_sse_synthesizes_done_when_success_event_append_was_lost(tmp_path):
+async def test_child_sse_never_synthesizes_a_missing_terminal_event(tmp_path):
     run_id = "run-sse"
     run_dir = tmp_path / "fund_rotation" / run_id
     run_dir.mkdir(parents=True)
@@ -140,14 +140,95 @@ async def test_sse_synthesizes_done_when_success_event_append_was_lost(tmp_path)
     class RequestStub:
         headers = {}
 
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    response = await endpoint(run_id, RequestStub())
+    with pytest.raises(StopAsyncIteration):
+        await anext(response.body_iterator)
+
+
+@pytest.mark.asyncio
+async def test_child_sse_emits_persisted_terminal_once_as_done(tmp_path):
+    run_id = "run-terminal"
+    run_dir = tmp_path / "fund_rotation" / run_id
+    run_dir.mkdir(parents=True)
+    state = {"stage": "SUCCEEDED", "run_id": run_id, "params_fingerprint": "fp"}
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text(json.dumps({
+        "seq": 7, "event_type": "TERMINAL", "scope": "VARIANT",
+        "stage": "SUCCEEDED",
+    }) + "\n", encoding="utf-8")
+    artifacts.publish_manifest(
+        run_dir,
+        {
+            "schema_version": "v1", "status": "SUCCEEDED",
+            "publication_id": "pub-1", "files": [], "file_details": {},
+        },
+        run_id=run_id,
+        params_fingerprint="fp",
+        terminal_event_seq=7,
+    )
+    app = FastAPI()
+    register_fund_rotation_routes(app, tmp_path, lambda: None, lambda: None)
+    endpoint = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", "").endswith("/{run_id}/events")
+    )
+
+    class RequestStub:
+        headers = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    response = await endpoint(run_id, RequestStub())
+    first = await anext(response.body_iterator)
+    assert "event: done" in first
+    assert "event: progress" not in first
+    with pytest.raises(StopAsyncIteration):
+        await anext(response.body_iterator)
+
+
+@pytest.mark.asyncio
+async def test_child_sse_emits_persisted_canceled_terminal_as_done(tmp_path):
+    run_id = "run-canceled"
+    run_dir = tmp_path / "fund_rotation" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(
+        json.dumps({"stage": "CANCELED", "run_id": run_id}), encoding="utf-8",
+    )
+    (run_dir / "events.jsonl").write_text(json.dumps({
+        "seq": 8, "event_type": "TERMINAL", "scope": "VARIANT",
+        "stage": "CANCELED",
+    }) + "\n", encoding="utf-8")
+    app = FastAPI()
+    register_fund_rotation_routes(app, tmp_path, lambda: None, lambda: None)
+    endpoint = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", "").endswith("/{run_id}/events")
+    )
+
+    class RequestStub:
+        headers = {}
+
         async def is_disconnected(self):
             return False
 
     response = await endpoint(run_id, RequestStub())
-    chunk = await anext(response.body_iterator)
-    assert "event: done" in chunk
-    assert '"stage": "SUCCEEDED"' in chunk
-    assert '"source": "state_manifest"' in chunk
+    first = await anext(response.body_iterator)
+    assert "event: done" in first
+    assert "event: progress" not in first
+    with pytest.raises(StopAsyncIteration):
+        await anext(response.body_iterator)
 
 
 

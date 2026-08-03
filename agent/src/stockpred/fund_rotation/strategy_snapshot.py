@@ -30,9 +30,12 @@ from pathlib import Path
 FRAMEWORK_SOURCE_FILES: tuple[str, ...] = (
     "backtest/fund_rotation/contracts.py",
     "backtest/fund_rotation/catalog.py",
+    "backtest/fund_rotation/causal_data.py",
     "backtest/fund_rotation/evaluation.py",
     "backtest/fund_rotation/pipeline.py",
+    "backtest/fund_rotation/runner.py",
     "backtest/fund_rotation/executor.py",
+    "backtest/fund_rotation/execution.py",
     "backtest/fund_rotation/etf_rules.py",
     "backtest/fund_rotation/capacity.py",
     "backtest/fund_rotation/orders.py",
@@ -41,6 +44,7 @@ FRAMEWORK_SOURCE_FILES: tuple[str, ...] = (
     "backtest/fund_rotation/benchmarks.py",
     "backtest/fund_rotation/universe.py",
     "backtest/fund_rotation/ideal_executor.py",
+    "src/stockpred/fund_rotation/artifact_publisher.py",
 )
 
 

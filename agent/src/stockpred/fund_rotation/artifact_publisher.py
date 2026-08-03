@@ -21,6 +21,7 @@ import json
 import re
 import time
 from pathlib import Path
+from typing import Collection
 
 import pandas as pd
 
@@ -246,3 +247,51 @@ class ArtifactPublisher:
         atomic_write_json(manifest_path, manifest)
         self._finalized = True
         return manifest
+
+
+def read_valid_manifest(
+    run_dir: Path,
+    *,
+    identity_field: str,
+    expected_identity: str,
+    allowed_statuses: Collection[str],
+) -> dict | None:
+    """Return a fully checksum-validated publication, otherwise ``None``.
+
+    ``manifest.json`` is the visibility boundary. A terminal state without a
+    valid manifest remains an unpublished candidate and must not be exposed as
+    success by readers or recovery code.
+    """
+    run_dir = Path(run_dir)
+    state_path = run_dir / "state.json"
+    manifest_path = run_dir / "manifest.json"
+    if not state_path.is_file() or not manifest_path.is_file():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    status = manifest.get("status")
+    if (
+        status not in set(allowed_statuses)
+        or state.get("stage") != status
+        or manifest.get(identity_field) != expected_identity
+    ):
+        return None
+
+    from src.stockpred.fund_rotation.artifacts import compute_file_checksum
+
+    for name in manifest.get("files", []):
+        if name == "manifest.json":
+            continue
+        path = run_dir / str(name)
+        expected = manifest.get("file_details", {}).get(name, {}).get("checksum")
+        if not path.is_file() or not expected:
+            return None
+        if compute_file_checksum(path) != expected:
+            return None
+    state_checksum = manifest.get("state_checksum")
+    if state_checksum and compute_file_checksum(state_path) != state_checksum:
+        return None
+    return manifest

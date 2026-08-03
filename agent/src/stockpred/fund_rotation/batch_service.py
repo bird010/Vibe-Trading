@@ -17,7 +17,6 @@ no comparison manifest. JSON/CSV persistence only — no resume promise.
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import os
 import uuid
@@ -28,10 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backtest.fund_rotation.catalog import CatalogError
-from backtest.fund_rotation.contracts import (
-    StrategyArtifact,
-    StrategyInitializationContext,
-)
+from backtest.fund_rotation.contracts import StrategyInitializationContext
 from backtest.fund_rotation.evaluation import EvaluationContext
 from backtest.fund_rotation.runner import (
     CancellationToken,
@@ -46,7 +42,8 @@ from src.stockpred.fund_rotation.batch_models import (
     StrategyBatchRequest,
     canonical_payload_hash,
 )
-from src.stockpred.fund_rotation.artifact_publisher import ArtifactPublisher
+from src.stockpred.fund_rotation.artifact_publisher import read_valid_manifest
+from src.stockpred.fund_rotation.batch_child_runtime import BatchChildRuntime
 from src.stockpred.fund_rotation.comparison import (
     VariantComparisonInput,
     build_comparison,
@@ -64,10 +61,10 @@ from src.stockpred.fund_rotation.state_machine import (
     BatchStage,
     ChildStage,
     BATCH_TERMINAL_STAGES,
-    CHILD_TERMINAL_STAGES,
     detect_interrupted_state,
     mark_state_interrupted,
 )
+from src.stockpred.fund_rotation.strategy_snapshot import snapshot_framework
 
 
 class BatchPlanningError(Exception):
@@ -93,17 +90,6 @@ def catalog_identity_hash(catalog) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def framework_implementation_hash() -> str:
-    """Identity of the common runner/execution framework sources."""
-    import backtest.fund_rotation.execution as execution_mod
-    import backtest.fund_rotation.runner as runner_mod
-
-    hasher = hashlib.sha256()
-    for module in (runner_mod, execution_mod):
-        hasher.update(inspect.getsource(module).encode("utf-8"))
-    return hasher.hexdigest()
-
-
 class BatchService:
     """Bounded sequential batch orchestrator (single-user local service)."""
 
@@ -127,6 +113,12 @@ class BatchService:
         )
         self.catalog = catalog or FundRotationStrategyCatalog(
             list(default_fund_rotation_strategies())
+        )
+        self.framework_implementation_hash = snapshot_framework(
+            Path(__file__).resolve().parents[3],
+        )
+        self.child_runtime = BatchChildRuntime(
+            self.runs_root, self.catalog, self.framework_implementation_hash,
         )
         self.metadata_loader = metadata_loader
         self.frames_loader = frames_loader
@@ -198,7 +190,7 @@ class BatchService:
             "schema_version": request.schema_version,
             "mode": request.mode,
             "catalog_version": catalog_identity_hash(self.catalog),
-            "framework_implementation_hash": framework_implementation_hash(),
+            "framework_implementation_hash": self.framework_implementation_hash,
             "variants": [
                 {
                     **identity.__dict__,
@@ -215,7 +207,9 @@ class BatchService:
         self.persistence.write_batch_request(
             batch_id,
             request_payload=request.model_dump(mode="json"),
-            identity=_resolved_identity(batch_id, request, identities),
+            identity=_resolved_identity(
+                batch_id, request, identities, self.framework_implementation_hash,
+            ),
         )
         # The extended resolved document (statuses/plan/executed_order) owns
         # resolved_batch.json from here on.
@@ -522,7 +516,7 @@ class BatchService:
                         strategy_id=identity.strategy_id, stage=child_stage.value,
                     )
                 try:
-                    self._publish_child_result(
+                    self.child_runtime.publish_result(
                         batch_id=batch_id,
                         request=request,
                         plan=plan,
@@ -538,10 +532,12 @@ class BatchService:
                         strategy_id=identity.strategy_id,
                         error=f"child publication failed: {exc}",
                     )
-                    self._record_child_stage(
-                        batch_id=batch_id, request=request, identity=identity,
-                        run_id=run_id, snapshot=snapshot,
-                        stage=ChildStage.FAILED.value,
+                    self.child_runtime.fail_publication_if_running(
+                        batch_id=batch_id,
+                        request=request,
+                        identity=identity,
+                        run_id=run_id,
+                        snapshot=snapshot,
                         error=f"child publication failed: {exc}",
                     )
             else:
@@ -597,7 +593,7 @@ class BatchService:
             outcome = build_comparison(
                 comparison_inputs,
                 evaluation_calendar=eval_dates,
-                framework_implementation_hash=framework_implementation_hash(),
+                framework_implementation_hash=self.framework_implementation_hash,
                 data_snapshot_fingerprint=snapshot.fingerprint,
             )
 
@@ -673,7 +669,7 @@ class BatchService:
                 "status": final_stage,
                 "mode": request.mode,
                 "catalog_version": catalog_identity_hash(self.catalog),
-                "framework_implementation_hash": framework_implementation_hash(),
+                "framework_implementation_hash": self.framework_implementation_hash,
                 "data_snapshot_fingerprint": snapshot.fingerprint,
                 "variants": [
                     {
@@ -706,198 +702,17 @@ class BatchService:
         error: str | None = None,
         quality_status: str | None = None,
     ) -> None:
-        """Persist child state before appending the corresponding local event."""
-        run_dir = self.runs_root / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        state = {
-            "schema_version": "2",
-            "stage": stage,
-            "batch_id": batch_id,
-            "run_id": run_id,
-            "variant_key": identity.variant_key,
-            "strategy_id": identity.strategy_id,
-            "mode": request.mode,
-            "params_fingerprint": identity.resolved_config_hash,
-            "data_snapshot_fingerprint": snapshot.fingerprint,
-            "quality_status": quality_status,
-        }
-        if message is not None:
-            state["message"] = message
-        if error is not None:
-            state["error"] = error
-        atomic_write_json(run_dir / "state.json", state)
-
-        self._append_child_event(
-            run_dir,
-            state,
+        self.child_runtime.record_stage(
+            batch_id=batch_id,
+            request=request,
+            identity=identity,
+            run_id=run_id,
+            snapshot=snapshot,
             stage=stage,
             message=message,
             error=error,
+            quality_status=quality_status,
         )
-
-    def _publish_child_result(
-        self,
-        *,
-        batch_id: str,
-        request: StrategyBatchRequest,
-        plan: dict[str, Any],
-        snapshot,
-        evaluation: EvaluationContext,
-        result,
-    ) -> None:
-        """Publish one successful child through the common ArtifactPublisher."""
-        import pandas as pd
-
-        from src.stockpred.fund_rotation.artifacts import compute_file_checksum
-
-        identity = plan["identity"]
-        run_id = plan["run_id"]
-        run_dir = self.runs_root / run_id
-        publisher = ArtifactPublisher(run_dir)
-
-        registered = self.catalog.require(identity.strategy_id)
-        resolved_spec = {
-            **identity.__dict__,
-            "batch_id": batch_id,
-            "run_id": run_id,
-            "schema_version": request.schema_version,
-            "mode": request.mode,
-            "simulation_start_date": plan["simulation_start"],
-            "evaluation_start_date": request.evaluation_start_date,
-            "evaluation_end_date": request.evaluation_end_date,
-            "execution": dict(request.execution),
-            "framework_implementation_hash": framework_implementation_hash(),
-            "data_snapshot_fingerprint": snapshot.fingerprint,
-        }
-        strategy_snapshot = {
-            "strategy_id": identity.strategy_id,
-            "implementation_hash": identity.implementation_hash,
-            "source_files": list(registered.implementation_snapshot.source_files),
-            "descriptor": asdict(registered.descriptor),
-        }
-        publisher.publish(StrategyArtifact(
-            role="resolved_spec", media_type="application/json",
-            payload=resolved_spec,
-        ))
-        publisher.publish(StrategyArtifact(
-            role="strategy_snapshot", media_type="application/json",
-            payload=strategy_snapshot,
-        ))
-        publisher.publish(StrategyArtifact(
-            role="data_snapshot", media_type="application/json",
-            payload=asdict(snapshot),
-        ))
-        publisher.publish(StrategyArtifact(
-            role="evaluation_calendar", media_type="application/json",
-            payload=[date.strftime("%Y%m%d") for date in evaluation.trading_dates],
-        ))
-
-        decision_rows = [
-            {
-                "decision_id": decision.decision_id,
-                "signal_date": decision.signal_date,
-                "action": decision.action.value,
-                "target_weights": json.dumps(
-                    dict(decision.target_weights), sort_keys=True,
-                    ensure_ascii=False,
-                ),
-                "cash_weight": decision.cash_weight,
-                "reason_code": decision.reason_code,
-                "quality_status": decision.quality_status.value,
-                "diagnostics": json.dumps(
-                    dict(decision.diagnostics), sort_keys=True,
-                    ensure_ascii=False, default=str,
-                ),
-            }
-            for decision in result.decisions
-        ]
-        decisions = pd.DataFrame(decision_rows, columns=[
-            "decision_id", "signal_date", "action", "target_weights",
-            "cash_weight", "reason_code", "quality_status", "diagnostics",
-        ])
-        target_rows = [
-            {"week_ending": date, "ts_code": code, "weight": weight}
-            for date, targets in sorted(result.weekly_targets.items())
-            for code, weight in sorted(targets.items())
-        ]
-        targets = pd.DataFrame(
-            target_rows, columns=["week_ending", "ts_code", "weight"],
-        )
-        orders = pd.DataFrame(result.orders)
-        if orders.empty:
-            orders = pd.DataFrame(columns=["order_id", "ts_code", "status"])
-        fills = pd.DataFrame(result.trade_events)
-        if fills.empty:
-            fills = pd.DataFrame(columns=["trade_date", "ts_code", "quantity"])
-        positions = pd.DataFrame(_flatten_positions(result.positions_history))
-        if positions.empty:
-            positions = pd.DataFrame(columns=[
-                "trade_date", "ts_code", "quantity", "market_value", "cash",
-            ])
-        equity = result.executed_equity.rename("strategy")
-        metrics = {
-            "strategy": dict(result.strategy_metrics),
-            "quality_status": result.quality_status,
-        }
-        summary = {
-            "mode": request.mode,
-            "run_id": run_id,
-            "strategy_id": identity.strategy_id,
-            "variant_key": identity.variant_key,
-            "quality_status": result.quality_status,
-            "annual_return": result.strategy_metrics.get("annual_return", 0.0),
-            "max_drawdown": result.strategy_metrics.get("max_drawdown", 0.0),
-            "sharpe": result.strategy_metrics.get("sharpe", 0.0),
-            "total_return": result.strategy_metrics.get("total_return", 0.0),
-        }
-
-        for role, media_type, payload in (
-            ("target_decisions", "text/csv", decisions),
-            ("targets", "text/csv", targets),
-            ("orders", "text/csv", orders),
-            ("fills", "text/csv", fills),
-            ("positions", "text/csv", positions),
-            ("equity", "text/csv", equity),
-            ("metrics", "application/json", metrics),
-            ("summary", "application/json", summary),
-        ):
-            publisher.publish(StrategyArtifact(
-                role=role, media_type=media_type, payload=payload,
-            ))
-        if result.diagnostics is not None:
-            for artifact in result.diagnostics.artifacts:
-                publisher.publish(artifact, producer=identity.strategy_id)
-
-        # Publication boundary: terminal state and terminal event become
-        # immutable before the publisher indexes their checksums.
-        self._record_child_stage(
-            batch_id=batch_id, request=request, identity=identity,
-            run_id=run_id, snapshot=snapshot, stage=ChildStage.SUCCEEDED.value,
-            quality_status=result.quality_status,
-        )
-        publisher.index_external("state")
-        publisher.index_external("events")
-        artifact_index = publisher.artifact_index()
-        file_details = {
-            entry["file"]: {
-                key: value
-                for key, value in entry.items()
-                if key in {"checksum", "rows", "schema_version", "encoding", "columns"}
-            }
-            for entry in artifact_index.values()
-        }
-        publisher.finalize(identity={
-            "run_id": run_id,
-            "batch_id": batch_id,
-            "variant_key": identity.variant_key,
-            "strategy_id": identity.strategy_id,
-            "mode": request.mode,
-            "quality_status": result.quality_status,
-            "params_fingerprint": identity.resolved_config_hash,
-            "data_snapshot_fingerprint": snapshot.fingerprint,
-            "state_checksum": compute_file_checksum(run_dir / "state.json"),
-            "file_details": file_details,
-        })
 
     # ── recovery (§26.1) ──
 
@@ -908,16 +723,34 @@ class BatchService:
         """
         recovered: list[str] = []
         root = self.persistence.batches_dir
-        if not root.exists():
-            return recovered
-        for batch_dir in sorted(root.iterdir()):
-            if batch_dir.name == "idempotency" or not batch_dir.is_dir():
-                continue
-            state_path = batch_dir / "state.json"
-            if state_path.exists() and not (batch_dir / "manifest.json").exists():
+        if root.exists():
+            for batch_dir in sorted(root.iterdir()):
+                if batch_dir.name == "idempotency" or not batch_dir.is_dir():
+                    continue
+                state_path = batch_dir / "state.json"
+                if not state_path.exists():
+                    continue
                 state = json.loads(state_path.read_text(encoding="utf-8"))
-                if detect_interrupted_state(state):
-                    atomic_write_json(state_path, mark_state_interrupted(state))
+                manifest = read_valid_manifest(
+                    batch_dir,
+                    identity_field="batch_id",
+                    expected_identity=batch_dir.name,
+                    allowed_statuses={
+                        BatchStage.SUCCEEDED.value,
+                        BatchStage.PARTIAL_SUCCEEDED.value,
+                    },
+                )
+                if manifest is not None:
+                    continue
+                if (
+                    detect_interrupted_state(state)
+                    or state.get("stage") in {
+                        BatchStage.SUCCEEDED.value,
+                        BatchStage.PARTIAL_SUCCEEDED.value,
+                    }
+                ):
+                    interrupted = mark_state_interrupted(state)
+                    atomic_write_json(state_path, interrupted)
                     BatchEventLog(batch_dir, batch_id=batch_dir.name).append(
                         event_type="TERMINAL",
                         scope="BATCH",
@@ -926,26 +759,7 @@ class BatchService:
                     )
                     recovered.append(batch_dir.name)
 
-        if not self.runs_root.exists():
-            return recovered
-        for child_dir in sorted(self.runs_root.iterdir()):
-            child_state_path = child_dir / "state.json"
-            if (
-                not child_dir.is_dir()
-                or not child_state_path.exists()
-                or (child_dir / "manifest.json").exists()
-            ):
-                continue
-            child_state = json.loads(child_state_path.read_text(encoding="utf-8"))
-            if not detect_interrupted_state(child_state):
-                continue
-            interrupted = mark_state_interrupted(child_state)
-            atomic_write_json(child_state_path, interrupted)
-            self._append_child_event(
-                child_dir,
-                interrupted,
-                stage=ChildStage.FAILED_INTERRUPTED.value,
-            )
+        self.child_runtime.recover_interrupted()
         return recovered
 
     # ── helpers ──
@@ -1007,32 +821,6 @@ class BatchService:
             message=BatchStage.FAILED.value,
         )
 
-    @staticmethod
-    def _append_child_event(
-        child_dir: Path,
-        state: dict[str, Any],
-        *,
-        stage: str,
-        message: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        BatchEventLog(
-            child_dir, batch_id=str(state["batch_id"]),
-        ).append(
-            event_type=(
-                "TERMINAL"
-                if ChildStage(stage) in CHILD_TERMINAL_STAGES
-                else "VARIANT_STAGE"
-            ),
-            scope="VARIANT",
-            run_id=str(state.get("run_id", child_dir.name)),
-            variant_key=str(state["variant_key"]),
-            strategy_id=str(state["strategy_id"]),
-            stage=stage,
-            message=message or stage,
-            error=error,
-        )
-
     def _write_resolved(self, batch_dir: Path, resolved: dict) -> None:
         atomic_write_json(batch_dir / "resolved_batch.json", resolved)
 
@@ -1043,7 +831,7 @@ class BatchService:
         return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _resolved_identity(batch_id, request, identities):
+def _resolved_identity(batch_id, request, identities, framework_hash):
     from src.stockpred.fund_rotation.batch_persistence import ResolvedBatchIdentity
 
     return ResolvedBatchIdentity(
@@ -1051,7 +839,7 @@ def _resolved_identity(batch_id, request, identities):
         schema_version=request.schema_version,
         mode=request.mode,
         catalog_version=catalog_identity_hash_from_identities(identities),
-        framework_implementation_hash=framework_implementation_hash(),
+        framework_implementation_hash=framework_hash,
         variants=tuple(identities),
     )
 
@@ -1069,16 +857,3 @@ def catalog_identity_hash_from_identities(identities) -> str:
         ensure_ascii=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _flatten_positions(history: list[dict]) -> list[dict]:
-    rows: list[dict] = []
-    for snapshot in history:
-        trade_date = snapshot.get("trade_date", "")
-        for holding in snapshot.get("holdings", []):
-            rows.append({
-                "trade_date": trade_date,
-                **holding,
-                "cash": snapshot.get("cash", 0.0),
-            })
-    return rows

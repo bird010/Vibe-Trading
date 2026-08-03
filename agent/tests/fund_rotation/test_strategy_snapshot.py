@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from src.stockpred.fund_rotation.strategy_snapshot import (
+    FRAMEWORK_SOURCE_FILES,
     compute_run_identity_hash,
     record_runtime_versions,
     snapshot_framework,
@@ -83,6 +84,20 @@ class TestStrategyPackageSnapshot:
 
 
 class TestFrameworkSnapshot:
+    def test_covers_every_design_required_framework_component(self):
+        assert {
+            "backtest/fund_rotation/runner.py",
+            "backtest/fund_rotation/contracts.py",
+            "backtest/fund_rotation/causal_data.py",
+            "backtest/fund_rotation/universe.py",
+            "backtest/fund_rotation/returns.py",
+            "backtest/fund_rotation/execution.py",
+            "backtest/fund_rotation/etf_rules.py",
+            "backtest/fund_rotation/benchmarks.py",
+            "backtest/fund_rotation/metrics.py",
+            "src/stockpred/fund_rotation/artifact_publisher.py",
+        } <= set(FRAMEWORK_SOURCE_FILES)
+
     def test_sensitive_to_framework_change(self, tmp_path: Path):
         agent_root = tmp_path / "agent"
         (agent_root / "backtest" / "fund_rotation").mkdir(parents=True)

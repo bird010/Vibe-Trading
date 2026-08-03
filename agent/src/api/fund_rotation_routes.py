@@ -63,22 +63,36 @@ def register_fund_rotation_routes(
     def _published_manifest(run_id: str) -> tuple[Path, dict[str, Any]]:
         """Fail closed unless state and the uniquely-bound manifest agree."""
         run_dir = runs_dir / "fund_rotation" / run_id
-        state_path = run_dir / "state.json"
-        manifest_path = run_dir / "manifest.json"
-        if not state_path.exists() or not manifest_path.exists():
+        from src.stockpred.fund_rotation.artifact_publisher import (
+            read_valid_manifest,
+        )
+
+        manifest = read_valid_manifest(
+            run_dir,
+            identity_field="run_id",
+            expected_identity=run_id,
+            allowed_statuses={"SUCCEEDED"},
+        )
+        if manifest is None:
             raise HTTPException(status_code=404, detail="Run has no published result")
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        from src.stockpred.fund_rotation.artifacts import compute_file_checksum
-        if (
-            state.get("stage") != "SUCCEEDED"
-            or manifest.get("status") != "SUCCEEDED"
-            or manifest.get("run_id") != run_id
-            or manifest.get("params_fingerprint") != state.get("params_fingerprint")
-            or manifest.get("state_checksum") != compute_file_checksum(state_path)
-        ):
-            raise HTTPException(status_code=409, detail="Run publication is inconsistent")
         return run_dir, manifest
+
+    def _published_batch_manifest(batch_dir: Path, batch_id: str) -> dict[str, Any]:
+        from src.stockpred.fund_rotation.artifact_publisher import (
+            read_valid_manifest,
+        )
+
+        manifest = read_valid_manifest(
+            batch_dir,
+            identity_field="batch_id",
+            expected_identity=batch_id,
+            allowed_statuses={"SUCCEEDED", "PARTIAL_SUCCEEDED"},
+        )
+        if manifest is None:
+            raise HTTPException(
+                status_code=409, detail="Batch publication is inconsistent",
+            )
+        return manifest
 
     def _validated_artifact(run_dir: Path, manifest: dict[str, Any], name: str) -> Path | None:
         """Return one checksum-verified declared artifact, or None if absent."""
@@ -265,6 +279,11 @@ def register_fund_rotation_routes(
             if not state_path.exists():
                 continue
             state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("stage") in {"SUCCEEDED", "PARTIAL_SUCCEEDED"}:
+                try:
+                    _published_batch_manifest(d, d.name)
+                except HTTPException:
+                    state = {**state, "stage": "WRITING_RESULTS"}
             resolved = {}
             resolved_path = d / "resolved_batch.json"
             if resolved_path.exists():
@@ -297,6 +316,11 @@ def register_fund_rotation_routes(
         if not state_path.exists():
             raise HTTPException(status_code=404, detail="Batch has no state")
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        if state.get("stage") in {"SUCCEEDED", "PARTIAL_SUCCEEDED"}:
+            try:
+                _published_batch_manifest(batch_dir, batch_id)
+            except HTTPException:
+                state = {**state, "stage": "WRITING_RESULTS"}
         resolved = {}
         if resolved_path.exists():
             resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
@@ -378,14 +402,22 @@ def register_fund_rotation_routes(
                             continue
                         seq = event.get("seq", 0)
                         if seq > last_seq:
-                            last_seq = seq
                             etype = event.get("event_type", "")
                             if etype == "TERMINAL" and event.get("scope") == "BATCH":
                                 msg = event.get("message", "")
-                                if msg in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED",
-                                           "CANCELED", "FAILED_INTERRUPTED"):
+                                if msg in ("SUCCEEDED", "PARTIAL_SUCCEEDED"):
+                                    try:
+                                        _published_batch_manifest(batch_dir, batch_id)
+                                    except HTTPException:
+                                        continue
+                                    last_seq = seq
                                     yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                                     return
+                                if msg in ("FAILED", "CANCELED", "FAILED_INTERRUPTED"):
+                                    last_seq = seq
+                                    yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                                    return
+                            last_seq = seq
                             yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 # A terminal state closes the stream but never authorizes a
                 # synthetic event; only events.jsonl rows are emitted.
@@ -409,10 +441,9 @@ def register_fund_rotation_routes(
         if batch_service is None:
             raise HTTPException(status_code=503, detail="Batch service not available")
         batch_dir = batch_service.persistence.batch_dir(batch_id)
-        manifest_path = batch_dir / "manifest.json"
-        if not manifest_path.exists():
+        if not (batch_dir / "manifest.json").exists():
             raise HTTPException(status_code=404, detail="Batch has no published manifest")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = _published_batch_manifest(batch_dir, batch_id)
         allowed = set(manifest.get("files", []))
         if artifact_id not in allowed:
             raise HTTPException(
@@ -422,8 +453,6 @@ def register_fund_rotation_routes(
         artifact_path = (batch_dir / artifact_id).resolve()
         if not str(artifact_path).startswith(str(batch_dir.resolve())):
             raise HTTPException(status_code=403, detail="Path traversal detected")
-        if not artifact_path.is_file():
-            raise HTTPException(status_code=404, detail="Artifact file missing")
         from fastapi.responses import FileResponse
 
         return FileResponse(artifact_path)
@@ -469,33 +498,28 @@ def register_fund_rotation_routes(
                         event = json.loads(line)
                         seq = event.get("seq", 0)
                         if seq > last_seq:
-                            last_seq = seq
-                            yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                            # Check if terminal
                             stage = event.get("stage", "")
                             if stage == "SUCCEEDED":
                                 try:
                                     _published_manifest(run_id)
                                 except HTTPException:
-                                    continue
+                                    return
+                                last_seq = seq
                                 yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                                 return
-                            if stage in ("FAILED", "FAILED_INTERRUPTED"):
+                            if stage in ("FAILED", "FAILED_INTERRUPTED", "CANCELED"):
+                                last_seq = seq
                                 yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                                 return
-                # A successful publication remains terminal even when the
-                # best-effort events.jsonl append failed after manifest publish.
-                try:
-                    _, manifest = _published_manifest(run_id)
-                except HTTPException:
-                    manifest = None
-                if manifest is not None:
-                    seq = int(manifest.get("terminal_event_seq") or (last_seq + 1))
-                    terminal = {
-                        "seq": seq, "stage": "SUCCEEDED", "source": "state_manifest",
-                    }
-                    yield f"id: {seq}\nevent: done\ndata: {json.dumps(terminal, ensure_ascii=False)}\n\n"
-                    return
+                            last_seq = seq
+                            yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                state_path = run_dir / "state.json"
+                if state_path.exists():
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if state.get("stage") in (
+                        "SUCCEEDED", "FAILED", "FAILED_INTERRUPTED", "CANCELED",
+                    ):
+                        return
                 import asyncio
                 await asyncio.sleep(0.5)
 
@@ -556,10 +580,17 @@ def register_fund_rotation_routes(
             try:
                 with open(snapshot_path, encoding="utf-8") as f:
                     snapshot = json.load(f)
-                fund_meta = snapshot.get("datasets", {}).get("fund.lance", {})
-                fund_lance_path = fund_meta.get("path")
-                fund_version = fund_meta.get("version")
-                if fund_lance_path and fund_version:
+                if "fund_version" in snapshot:
+                    fund_lance_path = str(
+                        stockpred_root / "data" / "lance" / "market_core"
+                        / "fund.lance"
+                    )
+                    fund_version = snapshot.get("fund_version")
+                else:
+                    fund_meta = snapshot.get("datasets", {}).get("fund.lance", {})
+                    fund_lance_path = fund_meta.get("path")
+                    fund_version = fund_meta.get("version")
+                if fund_lance_path and fund_version is not None:
                     import lance
                     ds = lance.dataset(fund_lance_path, version=fund_version)
                     import pandas as pd
