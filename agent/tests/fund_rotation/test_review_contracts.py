@@ -128,8 +128,6 @@ async def test_child_sse_never_synthesizes_a_missing_terminal_event(tmp_path):
         params_fingerprint="fp",
         terminal_event_seq=7,
     )
-    # Deliberately no SUCCEEDED record in events.jsonl: this is the injected
-    # append failure after successful manifest publication.
     app = FastAPI()
     register_fund_rotation_routes(app, tmp_path, lambda: None, lambda: None)
     endpoint = next(
@@ -139,6 +137,7 @@ async def test_child_sse_never_synthesizes_a_missing_terminal_event(tmp_path):
 
     class RequestStub:
         headers = {}
+        query_params = {}
 
         def __init__(self):
             self.calls = 0
@@ -182,6 +181,7 @@ async def test_child_sse_emits_persisted_terminal_once_as_done(tmp_path):
 
     class RequestStub:
         headers = {}
+        query_params = {}
 
         def __init__(self):
             self.calls = 0
@@ -219,6 +219,7 @@ async def test_child_sse_emits_persisted_canceled_terminal_as_done(tmp_path):
 
     class RequestStub:
         headers = {}
+        query_params = {}
 
         async def is_disconnected(self):
             return False
@@ -231,11 +232,7 @@ async def test_child_sse_emits_persisted_canceled_terminal_as_done(tmp_path):
         await anext(response.body_iterator)
 
 
-
-
 def test_only_one_etf_capacity_execution_implementation_exists():
-    # Phase 2 Task 2 (§12/§32.3): the single implementation lives in the
-    # common execution module; the legacy pipeline only delegates to it.
     from backtest.fund_rotation import execution
 
     assert inspect.getsource(execution).count("def execute_with_capacity(") == 1
@@ -244,18 +241,13 @@ def test_only_one_etf_capacity_execution_implementation_exists():
 
 
 def test_pipeline_contains_no_matching_valuation_or_strategy_algorithm():
-    """Phase 2 Task 6 (§13.1/§32.3): the shrunk pipeline is a Runner adapter —
-    it must never regain order matching, valuation, or strategy-algorithm
-    implementations (only imports/delegation)."""
     source = inspect.getsource(pipeline)
-    # Strategy algorithm implementations live in the strategy package.
     for banned in (
         "def compute_correlation_distance", "def iterative_exclude",
         "def hierarchical_cluster", "def compute_cluster_momentum",
         "def select_top_clusters", "def build_target_weights",
     ):
         assert banned not in source, f"pipeline must not define {banned!r}"
-    # Order matching / valuation live in the common execution module.
     for banned in (
         "def mark_to_market(", "def _mark_to_market(",
         "def run_execution_loop(", "def _run_execution_loop(",
@@ -265,7 +257,6 @@ def test_pipeline_contains_no_matching_valuation_or_strategy_algorithm():
 
 
 def _spy_pct_change(monkeypatch):
-    """Record fill_method kwarg of every Series/DataFrame pct_change call."""
     calls: list = []
     orig_series = pd.Series.pct_change
     orig_df = pd.DataFrame.pct_change
@@ -284,7 +275,6 @@ def _spy_pct_change(monkeypatch):
 
 
 def test_metrics_pct_change_uses_fill_method_none(monkeypatch):
-    """§6/§32.1 — metrics must not forward-fill missing values before differencing."""
     calls = _spy_pct_change(monkeypatch)
     cumulative = pd.Series(
         [1.0, 1.01, 1.02, 1.015, 1.03, 1.04],
@@ -297,11 +287,7 @@ def test_metrics_pct_change_uses_fill_method_none(monkeypatch):
     )
 
 
-# ── Phase 1 architecture guards (§15.1/§16: no clustering in public layer) ──
-
 def test_public_contracts_do_not_import_clustering_or_strategy_internals():
-    """Public contracts/catalog must not import clustering, correlation,
-    momentum, or any concrete strategy-internal module."""
     from backtest.fund_rotation import catalog, contracts
 
     forbidden_import_fragments = (
@@ -325,9 +311,6 @@ def test_public_contracts_do_not_import_clustering_or_strategy_internals():
 
 
 def test_decision_context_exposes_no_lance_path_or_mutable_config():
-    """§6 — StrategyDecisionContext exposes only signal_date, a controlled
-    data view and read-only previous weights; no raw Lance path/dataset handle
-    and no mutable pipeline config."""
     from backtest.fund_rotation.contracts import StrategyDecisionContext
 
     fields = set(StrategyDecisionContext.__dataclass_fields__)
