@@ -75,10 +75,25 @@ def _canonical_hash(value: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_evaluation_calendar(calendar: Sequence[str]) -> tuple[str, ...]:
+    """Return the semantic calendar independent of caller ordering.
+
+    The formal evaluation calendar is a set of unique trading dates whose
+    chronological order is derived from the dates themselves. Accepting an
+    arbitrary input order must not create a different comparison identity.
+    Duplicate dates remain invalid because they would make equity alignment
+    ambiguous.
+    """
+    dates = tuple(str(date) for date in calendar)
+    if len(dates) != len(set(dates)):
+        raise ValueError("evaluation calendar contains duplicate dates")
+    return tuple(sorted(dates))
+
+
 def evaluation_calendar_hash(calendar: Sequence[str]) -> str:
-    """Hash the exact ordered evaluation calendar."""
+    """Hash the unique chronological evaluation calendar."""
     canonical = json.dumps(
-        [str(date) for date in calendar],
+        list(_canonical_evaluation_calendar(calendar)),
         ensure_ascii=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -125,14 +140,15 @@ def build_comparison(
     execution_contract: Mapping[str, object] | None = None,
     initial_nav: float = 1.0,
 ) -> ComparisonOutcome:
+    canonical_calendar = _canonical_evaluation_calendar(evaluation_calendar)
     components, fingerprint = comparison_contract_fingerprint(
         framework_implementation_hash=framework_implementation_hash,
         data_snapshot_fingerprint=data_snapshot_fingerprint,
-        evaluation_calendar=evaluation_calendar,
+        evaluation_calendar=canonical_calendar,
         execution_contract=execution_contract,
     )
 
-    calendar_index = pd.Index(list(evaluation_calendar))
+    calendar_index = pd.Index(canonical_calendar)
     ranked_entries: list[dict[str, Any]] = []
     metrics: dict[str, dict[str, float]] = {}
     excluded: list[dict[str, str]] = []
