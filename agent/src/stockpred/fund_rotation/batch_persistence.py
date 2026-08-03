@@ -81,22 +81,32 @@ def build_variant_identities(
                 f"same resolved config appears more than once ({variant_key})"
             )
         seen_configs.add(identity_pair)
-        identities.append(VariantIdentity(
-            variant_key=variant_key,
-            strategy_id=variant.strategy_id,
-            label=variant.label,
-            resolved_config_hash=spec.resolved_config_hash,
-            resolved_requirements_hash=spec.resolved_requirements_hash,
-            implementation_hash=spec.implementation_hash,
-            resolved_config=dict(spec.resolved_config),
-            resolved_requirements={
-                "required_datasets": list(spec.resolved_requirements.required_datasets),
-                "required_fields": list(spec.resolved_requirements.required_fields),
-                "warmup_trade_days": spec.resolved_requirements.warmup_trade_days,
-                "frequency": spec.resolved_requirements.frequency,
-                "needs_benchmark": spec.resolved_requirements.needs_benchmark,
-            },
-        ))
+        identities.append(
+            VariantIdentity(
+                variant_key=variant_key,
+                strategy_id=variant.strategy_id,
+                label=variant.label,
+                resolved_config_hash=spec.resolved_config_hash,
+                resolved_requirements_hash=spec.resolved_requirements_hash,
+                implementation_hash=spec.implementation_hash,
+                resolved_config=dict(spec.resolved_config),
+                resolved_requirements={
+                    "required_datasets": list(
+                        spec.resolved_requirements.required_datasets
+                    ),
+                    "required_fields": list(
+                        spec.resolved_requirements.required_fields
+                    ),
+                    "warmup_trade_days": (
+                        spec.resolved_requirements.warmup_trade_days
+                    ),
+                    "frequency": spec.resolved_requirements.frequency,
+                    "needs_benchmark": (
+                        spec.resolved_requirements.needs_benchmark
+                    ),
+                },
+            )
+        )
     return tuple(identities)
 
 
@@ -107,8 +117,6 @@ class BatchPersistence:
         self.batches_dir = Path(batches_dir)
         self.idempotency_dir = self.batches_dir / "idempotency"
 
-    # ── idempotency ──
-
     def _slot_dir(self, idempotency_key: str) -> Path:
         digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
         return self.idempotency_dir / digest
@@ -118,16 +126,7 @@ class BatchPersistence:
         idempotency_key: str,
         payload_hash: str,
     ) -> tuple[dict[str, Any], bool]:
-        """Atomically bind key → (payload_hash, batch_id).
-
-        Returns ``(record, created)``. Same key + same payload returns the
-        existing record (``created=False``, no new task may be started);
-        same key + different payload raises ``IDEMPOTENCY_CONFLICT``.
-
-        The owner is decided by ``mkdir(exist_ok=False)``. Losers wait for the
-        winner's record; a half-created zombie slot (crash between mkdir and
-        write) is reclaimed and the ownership race is retried once.
-        """
+        """Atomically bind key to payload hash, batch id and creation time."""
         for _attempt in range(2):
             slot = self._slot_dir(idempotency_key)
             try:
@@ -142,9 +141,6 @@ class BatchPersistence:
                             "bound to a different normalized request",
                         )
                     return record, False
-                # Zombie slot: created but never written (crash between mkdir
-                # and record write). Clear leftovers (empty dir only), then
-                # re-enter the race once.
                 try:
                     for leftover in slot.iterdir():
                         if leftover.is_file():
@@ -167,8 +163,6 @@ class BatchPersistence:
             try:
                 atomic_write_json(slot / "record.json", record)
             except Exception:
-                # Do not leave a zombie slot behind when the write itself
-                # fails (clears any half-written tmp); the key stays retryable.
                 try:
                     for leftover in slot.iterdir():
                         if leftover.is_file():
@@ -195,7 +189,21 @@ class BatchPersistence:
                 time.sleep(0.02)
         return None
 
-    # ── batch directory ──
+    def _record_for_batch(self, batch_id: str) -> dict[str, Any] | None:
+        """Recover the immutable idempotency record for one batch id."""
+        if not self.idempotency_dir.exists():
+            return None
+        for slot in self.idempotency_dir.iterdir():
+            record_path = slot / "record.json"
+            if not record_path.is_file():
+                continue
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if record.get("batch_id") == batch_id:
+                return record
+        return None
 
     def batch_dir(self, batch_id: str) -> Path:
         return self.batches_dir / batch_id
@@ -207,15 +215,18 @@ class BatchPersistence:
         request_payload: dict[str, Any],
         identity: ResolvedBatchIdentity,
     ) -> Path:
-        """Persist the client request and the resolved identity (§22).
+        """Persist client request and resolved reproduction identity.
 
-        The two hashes are kept as separate artifacts: ``request.json`` is the
-        canonical client payload; ``resolved_batch.json`` is the reproduction
-        identity. Atomic temp-file-replace writes only.
+        ``created_at`` originates in the atomic idempotency record and is copied
+        into ``resolved_batch.json`` so list/read APIs never infer submission
+        time from evaluation dates or mutable filesystem timestamps.
         """
         batch_dir = self.batch_dir(batch_id)
         batch_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(batch_dir / "request.json", request_payload)
         resolved = asdict(identity)
+        record = self._record_for_batch(batch_id)
+        if record and record.get("created_at"):
+            resolved["created_at"] = str(record["created_at"])
         atomic_write_json(batch_dir / "resolved_batch.json", resolved)
         return batch_dir
