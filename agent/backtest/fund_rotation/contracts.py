@@ -1,14 +1,4 @@
-"""Complete fund-rotation strategy contracts and value objects — Phase 1 Task 1.
-
-The complete ``FundRotationStrategy`` is the only public plug-in unit (design
-§15.1). Clustering, quality gates and representative selectors are internal to a
-strategy and never appear here. A strategy declares its data needs, produces a
-per-run session, and emits ``TargetWeightDecision`` s that the common Runner
-validates and executes.
-
-Design references: §5 (strategy/session contract), §7 (decision semantics),
-§9/§27 (research quality status), §12 (strategy-declared artifacts).
-"""
+"""Complete fund-rotation strategy contracts and immutable value objects."""
 
 from __future__ import annotations
 
@@ -21,31 +11,21 @@ import pandas as pd
 from pydantic import BaseModel
 
 
-# ── Enumerations ──
-
 class DecisionKind(str, Enum):
-    """§7 — the three target-weight decision actions."""
-
     SET_TARGETS = "SET_TARGETS"
     HOLD_TARGETS = "HOLD_TARGETS"
     INVALID = "INVALID"
 
 
 class QualityStatus(str, Enum):
-    """§9/§27 — research quality of a decision/run (distinct from task state)."""
-
     VALID = "VALID"
     DEGRADED = "DEGRADED"
     INVALID = "INVALID"
     FAILED = "FAILED"
 
 
-# ── Immutable value objects ──
-
 @dataclass(frozen=True)
 class FundRotationStrategyDescriptor:
-    """§5 — static, parameter-independent capability description of a strategy."""
-
     id: str
     name: str
     description: str
@@ -56,8 +36,6 @@ class FundRotationStrategyDescriptor:
 
 @dataclass(frozen=True)
 class StrategyDataRequirements:
-    """§5/§23 — config-derived data needs (pure function of validated config)."""
-
     required_datasets: tuple[str, ...]
     required_fields: tuple[str, ...]
     warmup_trade_days: int
@@ -67,16 +45,12 @@ class StrategyDataRequirements:
 
 @dataclass(frozen=True)
 class StrategyInitializationContext:
-    """Context handed to ``create_session`` to start one isolated sub-run."""
-
     run_id: str
     evaluation_calendar: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class StrategyArtifact:
-    """§12 — a strategy-declared logical diagnostic artifact."""
-
     role: str
     media_type: str
     payload: object
@@ -84,35 +58,17 @@ class StrategyArtifact:
 
 @dataclass(frozen=True)
 class StrategyDiagnostics:
-    """Output of ``finalize`` — strategy-declared diagnostic artifacts."""
-
     artifacts: tuple[StrategyArtifact, ...] = ()
 
 
 @runtime_checkable
 class CausalDataView(Protocol):
-    """§6 — controlled causal data access (full implementation in Phase 2).
-
-    The concrete query surface (daily bars, returns, causal ADV, eligible
-    universe, trading calendar) is provided by ``causal_data.py`` in Phase 2;
-    this minimal contract lets the decision context reference it without a
-    circular import.
-    """
-
     @property
     def signal_date(self) -> pd.Timestamp: ...
 
 
 @dataclass(frozen=True)
 class StrategyDecisionContext:
-    """§6 — everything a strategy sees at one decision date.
-
-    Provides the signal date, a controlled ``CausalDataView`` and the read-only
-    previous target weights. It deliberately exposes NO actual fills, cash,
-    outstanding orders or slippage, so market signals do not feed back on
-    execution.
-    """
-
     signal_date: str
     data_view: CausalDataView
     previous_target_weights: Mapping[str, float] = field(default_factory=dict)
@@ -120,8 +76,6 @@ class StrategyDecisionContext:
 
 @dataclass(frozen=True)
 class TargetWeightDecision:
-    """§7 — one target-weight decision emitted by a strategy session."""
-
     decision_id: str
     signal_date: str
     action: DecisionKind
@@ -132,32 +86,32 @@ class TargetWeightDecision:
     diagnostics: Mapping[str, object] = field(default_factory=dict)
 
 
-# ── Strategy / session protocols ──
-
 @runtime_checkable
 class FundRotationStrategySession(Protocol):
-    """§5 — one isolated sub-run session (holds all per-run state)."""
-
     def scheduled_dates(
         self,
         calendar: tuple[str, ...],
-        simulation_start_date: str,
+        decision_start_date: str,
         evaluation_end_date: str,
     ) -> tuple[str, ...]: ...
 
-    def evaluate(self, context: StrategyDecisionContext) -> TargetWeightDecision: ...
+    def evaluate(
+        self,
+        context: StrategyDecisionContext,
+    ) -> TargetWeightDecision: ...
 
     def finalize(self) -> StrategyDiagnostics: ...
 
 
 @runtime_checkable
 class FundRotationStrategy(Protocol):
-    """§5 — the complete strategy plug-in unit."""
-
     descriptor: FundRotationStrategyDescriptor
     config_model: type[BaseModel]
 
-    def resolve_requirements(self, config: BaseModel) -> StrategyDataRequirements: ...
+    def resolve_requirements(
+        self,
+        config: BaseModel,
+    ) -> StrategyDataRequirements: ...
 
     def create_session(
         self,
@@ -166,12 +120,7 @@ class FundRotationStrategy(Protocol):
     ) -> FundRotationStrategySession: ...
 
 
-# ── Runner contract validation ──
-
 class StrategyContractViolation(Exception):
-    """§7 — raised when a decision violates the Runner contract; terminates the
-    sub-run with code ``STRATEGY_CONTRACT_VIOLATION``."""
-
     code = "STRATEGY_CONTRACT_VIOLATION"
 
 
@@ -180,16 +129,6 @@ def validate_target_decision(
     eligible_codes: AbstractSet[str],
     seen_decision_ids: AbstractSet[str],
 ) -> None:
-    """§7 — validate one decision against the Runner contract.
-
-    Checks: decision_id uniqueness; HOLD carries no weights; INVALID carries a
-    stable reason code; SET_TARGETS weights are finite, non-negative, sum
-    (with cash_weight) to 1.0, and reference only eligible codes. Validation is
-    independent of the iteration order of ``target_weights``.
-
-    Raises:
-        StrategyContractViolation: on any violation.
-    """
     if not isinstance(decision, TargetWeightDecision):
         raise StrategyContractViolation(
             "strategy must return a TargetWeightDecision instance"
@@ -217,10 +156,10 @@ def validate_target_decision(
             )
         return
 
-    # SET_TARGETS
     if not math.isfinite(decision.cash_weight) or decision.cash_weight < 0:
         raise StrategyContractViolation(
-            f"cash_weight must be finite and non-negative, got {decision.cash_weight}"
+            "cash_weight must be finite and non-negative, "
+            f"got {decision.cash_weight}"
         )
     total = decision.cash_weight
     for code, weight in decision.target_weights.items():
@@ -242,12 +181,11 @@ def validate_target_decision(
 def merge_requirements(
     requirements: Sequence[StrategyDataRequirements],
 ) -> StrategyDataRequirements:
-    """§23 — merge several strategies' data requirements into one.
+    """Merge common data needs without constraining strategy cadence.
 
-    Datasets and fields are unioned; warmup is the maximum; needs_benchmark is
-    the logical OR; the frequency must be consistent across all requirements
-    (conflicting frequencies fail explicitly). No clustering-gate parameter is
-    part of the common requirements object.
+    A batch may contain daily, weekly and monthly strategies. Each session owns
+    its own schedule; the merged object exists only to size the common data
+    snapshot. ``frequency`` is therefore ``MIXED`` when cadences differ.
     """
     if not requirements:
         raise ValueError("no requirements to merge")
@@ -256,18 +194,21 @@ def merge_requirements(
     warmup = 0
     needs_benchmark = False
     frequencies: set[str] = set()
-    for req in requirements:
-        datasets.update(req.required_datasets)
-        fields.update(req.required_fields)
-        warmup = max(warmup, req.warmup_trade_days)
-        needs_benchmark = needs_benchmark or req.needs_benchmark
-        frequencies.add(req.frequency)
-    if len(frequencies) > 1:
-        raise ValueError(f"conflicting rebalance frequencies: {sorted(frequencies)}")
+    for requirement in requirements:
+        datasets.update(requirement.required_datasets)
+        fields.update(requirement.required_fields)
+        warmup = max(warmup, requirement.warmup_trade_days)
+        needs_benchmark = needs_benchmark or requirement.needs_benchmark
+        frequencies.add(str(requirement.frequency))
+    frequency = (
+        next(iter(frequencies))
+        if len(frequencies) == 1
+        else "MIXED"
+    )
     return StrategyDataRequirements(
         required_datasets=tuple(sorted(datasets)),
         required_fields=tuple(sorted(fields)),
         warmup_trade_days=warmup,
-        frequency=next(iter(frequencies)),
+        frequency=frequency,
         needs_benchmark=needs_benchmark,
     )
