@@ -1,18 +1,59 @@
 {
-  "note": "Approved golden divergences introduced by Phase 0 correctness fixes (design spec \u00a732.1). Each approved_prefix whitelists diff lines (by prefix) that are expected consequences of an approved fix. Task 8 finalizes and reviews this list against the full post-fix golden. Prefixes are intentionally scoped per fix category so unintended changes elsewhere (orders, equity curves, cluster labels, integer shares) still fail the golden test.",
+  "note": "Approved golden divergences introduced by Phase 0 correctness fixes (design spec §32.1). Every prefix names one concrete metric field; namespace-wide prefixes and glob patterns are forbidden so unrelated metric regressions remain visible.",
   "approved_prefixes": [
-    "strategy_metrics.",
-    "benchmark_metrics.",
+    "strategy_metrics.annual_return:",
+    "strategy_metrics.annual_volatility:",
+    "strategy_metrics.calmar:",
+    "strategy_metrics.max_drawdown:",
+    "strategy_metrics.max_drawdown_recovery_periods:",
+    "strategy_metrics.num_periods:",
+    "strategy_metrics.sharpe:",
+    "strategy_metrics.sortino:",
+    "strategy_metrics.total_return:",
+    "strategy_metrics.worst_period:",
+    "benchmark_metrics.buy_hold_510300.annual_return:",
+    "benchmark_metrics.buy_hold_510300.annual_volatility:",
+    "benchmark_metrics.buy_hold_510300.calmar:",
+    "benchmark_metrics.buy_hold_510300.max_drawdown:",
+    "benchmark_metrics.buy_hold_510300.max_drawdown_recovery_periods:",
+    "benchmark_metrics.buy_hold_510300.num_periods:",
+    "benchmark_metrics.buy_hold_510300.sharpe:",
+    "benchmark_metrics.buy_hold_510300.sortino:",
+    "benchmark_metrics.buy_hold_510300.total_return:",
+    "benchmark_metrics.buy_hold_510300.worst_period:",
+    "benchmark_metrics.cash.annual_return:",
+    "benchmark_metrics.cash.annual_volatility:",
+    "benchmark_metrics.cash.calmar:",
+    "benchmark_metrics.cash.max_drawdown:",
+    "benchmark_metrics.cash.max_drawdown_recovery_periods:",
+    "benchmark_metrics.cash.num_periods:",
+    "benchmark_metrics.cash.sharpe:",
+    "benchmark_metrics.cash.sortino:",
+    "benchmark_metrics.cash.total_return:",
+    "benchmark_metrics.cash.worst_period:",
+    "benchmark_metrics.equal_weight.annual_return:",
+    "benchmark_metrics.equal_weight.annual_volatility:",
+    "benchmark_metrics.equal_weight.calmar:",
+    "benchmark_metrics.equal_weight.max_drawdown:",
+    "benchmark_metrics.equal_weight.max_drawdown_recovery_periods:",
+    "benchmark_metrics.equal_weight.num_periods:",
+    "benchmark_metrics.equal_weight.sharpe:",
+    "benchmark_metrics.equal_weight.sortino:",
+    "benchmark_metrics.equal_weight.total_return:",
+    "benchmark_metrics.equal_weight.worst_period:",
     "positions_summary: length differs"
   ],
   "categories": {
     "首期收益/指标 (Task 5: initial_nav anchor, design §32.1)": {
-      "prefixes": ["strategy_metrics.", "benchmark_metrics."],
-      "explanation": "compute_performance_metrics now prepends a dateless initial_nav=1.0 anchor: the first evaluation day's return is measured against 1.0 (not dropped), num_periods increases by 1, and total_return is measured from the anchor. Equity curves, orders, fills, positions, rebalance weeks and cluster labels are unchanged."
+      "prefixes": [
+        "strategy_metrics.<exact-field>:",
+        "benchmark_metrics.<benchmark>.<exact-field>:"
+      ],
+      "explanation": "compute_performance_metrics prepends the initial_nav=1.0 anchor. Only the explicitly listed metric fields may differ; key-set changes and all unrelated artifacts remain blocked."
     },
     "完整评价区间覆盖 (Task 7: full-interval equity, design §24/§32.1)": {
       "prefixes": ["positions_summary: length differs"],
-      "explanation": "Daily equity/positions now span the full evaluation calendar [start_date, end_date]; days before the first execution hold cash (initial NAV). positions_summary therefore grows from the first-execution-onward length to the full evaluation-calendar length (cash rows prepended); only the length-difference line is whitelisted so any row-level regression in the overlapping execution period still fails. The executed_equity curve (equity_curves) is still reindexed to the common comparison interval and remains verified unchanged."
+      "explanation": "Daily positions now span the full evaluation calendar. Only the length-difference line is approved; overlapping row content remains compared exactly."
     }
   }
 }
