@@ -222,6 +222,42 @@ class TestPlanning:
         # Shared data start is the earliest across variants.
         assert resolved["plan"]["data_start"] == CALENDAR[55]  # D0000095 - 40
 
+    def test_no_pre_evaluation_decision_reports_insufficient(self, tmp_path):
+        """§23 step 3: when no decision date precedes the evaluation start,
+        the variant fails before launch (no silent first-day-cash fallback)."""
+        service = _service(tmp_path)
+        # provisional start = CALENDAR[30]; the first scheduled decision IS
+        # the evaluation start -> no pre-evaluation decision exists.
+        request = _request(
+            [{"strategy_id": "fake_batch", "params": {"lookback_days": 30}}],
+            start=CALENDAR[30], end=CALENDAR[200],
+        )
+        with pytest.raises(BatchPlanningError) as exc_info:
+            service.submit_batch(request)
+        assert exc_info.value.code == "FUND_ROTATION_INSUFFICIENT_HISTORY"
+
+    def test_duplicate_variants_fail_structurally_and_keep_idempotent(self, tmp_path):
+        """Validation failure after the idempotency binding must leave a real
+        FAILED batch behind — replay returns it, never a ghost."""
+        service = _service(tmp_path)
+        request = _request([
+            {"strategy_id": "fake_batch", "params": {"lookback_days": 30}},
+            {"strategy_id": "fake_batch", "params": {"lookback_days": 30}},
+        ])
+        with pytest.raises(BatchPlanningError) as exc_info:
+            service.submit_batch(request)
+        assert exc_info.value.code == "FUND_ROTATION_BATCH_INVALID"
+
+        # The key is bound to a real FAILED batch on disk.
+        from src.stockpred.fund_rotation.batch_models import canonical_payload_hash
+
+        record, created = service.persistence.submit(
+            request.idempotency_key, canonical_payload_hash(request),
+        )
+        assert created is False
+        state = _state(service, record["batch_id"])
+        assert state["stage"] == "FAILED"
+
     def test_no_scheduled_decision_reports_insufficient_history(self, tmp_path):
         service = _service(tmp_path)
         # warmup exceeds the whole calendar -> no decision date possible.

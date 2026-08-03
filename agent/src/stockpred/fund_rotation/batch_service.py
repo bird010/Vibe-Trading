@@ -146,6 +146,14 @@ class BatchService:
         except BatchPlanningError as exc:
             self._fail_batch(batch_id, stage="VALIDATING", error=f"{exc.code}: {exc.message}")
             raise
+        except Exception as exc:
+            # Any validation failure after the idempotency binding must leave a
+            # real FAILED batch behind — never a ghost EXISTING key (§21.1).
+            self._fail_batch(
+                batch_id, stage="VALIDATING",
+                error=f"variant validation failed: {exc}",
+            )
+            raise BatchPlanningError("FUND_ROTATION_BATCH_INVALID", str(exc)) from exc
 
         token = CancellationToken()
         self._tokens[batch_id] = token
@@ -237,7 +245,15 @@ class BatchService:
                     f"[{provisional_start}, {eval_end}]",
                 )
             pre_evaluation = [d for d in scheduled if d < eval_start]
-            anchor = max(pre_evaluation) if pre_evaluation else scheduled[0]
+            if not pre_evaluation:
+                # §23 step 3: without a decision date before the evaluation
+                # start there is no first-day target — fail before launch.
+                raise BatchPlanningError(
+                    "FUND_ROTATION_INSUFFICIENT_HISTORY",
+                    f"variant {identity.variant_key}: no pre-evaluation "
+                    f"decision date before {eval_start}",
+                )
+            anchor = max(pre_evaluation)
             position = calendar.index(anchor)
             if position < warmup:
                 raise BatchPlanningError(
@@ -398,10 +414,8 @@ class BatchService:
                     cancellation=token,
                 )
                 status = result.status.value
-                if token.is_cancelled and status == SubRunStatus.SUCCEEDED.value:
-                    # A run that finished exactly as cancellation arrived
-                    # stays read-only SUCCEEDED (§26.1).
-                    status = SubRunStatus.SUCCEEDED.value
+                # §26.1: a run that finished SUCCEEDED before cancellation
+                # landed stays read-only SUCCEEDED — no rewrite needed.
             except Exception as exc:
                 status = SubRunStatus.FAILED.value
                 events.append(
