@@ -6,6 +6,7 @@ import type {
   BatchListItem,
   BatchSubmitResponse,
   CatalogListResponse,
+  ComparisonEquityData,
   ComparisonReports,
   StrategyBatchRequest,
   StrategyDetail,
@@ -41,9 +42,7 @@ export async function fetchStrategyDetail(
   const res = await fetch(withAuthQuery(`${BASE}/strategies/${strategyId}`), {
     headers,
   });
-  if (res.status === 304) {
-    return { data: null, etag: etag ?? null };
-  }
+  if (res.status === 304) return { data: null, etag: etag ?? null };
   if (!res.ok) throw await responseError(res, "fetchStrategyDetail");
   return {
     data: await res.json(),
@@ -106,7 +105,7 @@ export function connectBatchSSE(
       const data = JSON.parse(event.data) as Record<string, unknown>;
       onEvent(data);
     } catch {
-      // Malformed server events are ignored; persisted seq recovery remains intact.
+      // Persisted sequence recovery remains intact after malformed rows.
     }
   };
 
@@ -130,6 +129,59 @@ export async function fetchBatchReports(batchId: string): Promise<ComparisonRepo
   });
   if (!res.ok) throw await responseError(res, "fetchBatchReports");
   return res.json();
+}
+
+function parseCsvRow(row: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < row.length; index += 1) {
+    const char = row[index];
+    if (char === '"') {
+      if (quoted && row[index + 1] === '"') {
+        current += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === "," && !quoted) {
+      values.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  values.push(current);
+  return values;
+}
+
+export async function fetchBatchComparisonEquity(
+  batchId: string,
+): Promise<ComparisonEquityData | null> {
+  const res = await fetch(batchArtifactUrl(batchId, "comparison_equity.csv"), {
+    headers: authHeaders(),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await responseError(res, "fetchBatchComparisonEquity");
+  const rows = (await res.text())
+    .split(/\r?\n/)
+    .filter((row) => row.trim().length > 0)
+    .map(parseCsvRow);
+  if (rows.length < 2 || rows[0].length < 2) return null;
+
+  const names = rows[0].slice(1);
+  const dates: string[] = [];
+  const series = Object.fromEntries(names.map((name) => [name, [] as number[]]));
+  for (const row of rows.slice(1)) {
+    if (row.length === 0 || !row[0]) continue;
+    const values = row.slice(1).map(Number);
+    if (values.length !== names.length || values.some((value) => !Number.isFinite(value))) {
+      continue;
+    }
+    dates.push(row[0]);
+    names.forEach((name, index) => series[name].push(values[index]));
+  }
+  return dates.length > 0 ? { dates, series } : null;
 }
 
 export async function fetchBacktestDetail(
