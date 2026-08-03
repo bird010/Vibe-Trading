@@ -21,6 +21,7 @@ import {
   connectBatchSSE,
   fetchBatchReports,
   fetchBatchComparisonEquity,
+  fetchBacktestEquity,
 } from "./api";
 import type { VariantDraft } from "./StrategyVariantsEditor";
 
@@ -34,6 +35,33 @@ const TERMINAL_STAGES = new Set([
   "CANCELED",
   "FAILED_INTERRUPTED",
 ]);
+
+function mergeComparisonAndBenchmarks(
+  comparison: ComparisonEquityData | null,
+  childEquity: ComparisonEquityData | null,
+): ComparisonEquityData | null {
+  if (!comparison) return null;
+  if (!childEquity) return comparison;
+  if (
+    comparison.dates.length !== childEquity.dates.length ||
+    comparison.dates.some((date, index) => date !== childEquity.dates[index])
+  ) {
+    return comparison;
+  }
+
+  const benchmarkSeries = Object.fromEntries(
+    Object.entries(childEquity.series)
+      .filter(([name]) => name !== "strategy")
+      .map(([name, values]) => [`benchmark:${name}`, values]),
+  );
+  return {
+    dates: comparison.dates,
+    series: {
+      ...comparison.series,
+      ...benchmarkSeries,
+    },
+  };
+}
 
 export interface FundRotationState {
   catalogVersion: string;
@@ -187,9 +215,24 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
         ) {
           try {
             const reports = await fetchBatchReports(batchId);
-            const comparisonEquity = reports.comparison_available
-              ? await fetchBatchComparisonEquity(batchId)
-              : null;
+            let comparisonEquity: ComparisonEquityData | null = null;
+            if (reports.comparison_available) {
+              const parentEquity = await fetchBatchComparisonEquity(batchId);
+              let childEquity: ComparisonEquityData | null = null;
+              const referenceRunId = reports.ranking[0]?.run_id;
+              if (referenceRunId) {
+                try {
+                  childEquity = await fetchBacktestEquity(referenceRunId);
+                } catch {
+                  // Benchmarks are optional display enrichment; parent strategy
+                  // comparison remains valid if the child artifact is missing.
+                }
+              }
+              comparisonEquity = mergeComparisonAndBenchmarks(
+                parentEquity,
+                childEquity,
+              );
+            }
             set({ comparison: reports, comparisonEquity });
           } catch (error) {
             set({
