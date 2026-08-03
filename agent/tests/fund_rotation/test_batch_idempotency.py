@@ -1,10 +1,8 @@
 """Phase 4 Task 2 — batch request normalization and idempotency tests.
 
 Covers §21/§21.1: required fields and RESEARCH_ONLY enforcement, canonical
-client-payload hashing (JSON types + sorted keys only — no re-resolved
-defaults, no server-generated fields), variant_key identity
-(``strategy_id@resolved_config_hash[:12]``), duplicate-variant rejection,
-atomic key binding that survives restarts, and conflict semantics.
+client-payload hashing, variant identity, duplicate rejection, atomic key
+binding and conflict semantics.
 """
 
 from __future__ import annotations
@@ -52,8 +50,6 @@ def _catalog() -> FundRotationStrategyCatalog:
     return FundRotationStrategyCatalog(list(default_fund_rotation_strategies()))
 
 
-# ── request model validation ──
-
 class TestRequestValidation:
     def test_valid_request_parses(self):
         request = StrategyBatchRequest(**_payload())
@@ -73,8 +69,6 @@ class TestRequestValidation:
             StrategyBatchRequest(**payload)
 
     def test_mode_must_be_exactly_research_only(self):
-        # Missing, lowercase variants and any non-RESEARCH_ONLY value are all
-        # rejected BEFORE any background task can be created.
         payload = _payload()
         payload.pop("mode")
         with pytest.raises(ValidationError):
@@ -98,16 +92,18 @@ class TestRequestValidation:
             StrategyBatchRequest(**_payload(not_a_field=1))
 
 
-# ── canonical payload hash ──
-
 class TestCanonicalPayloadHash:
     def test_object_key_order_does_not_change_hash(self):
         reordered = _payload()
-        reordered["variants"] = [{"params": {"top_n": 2, "k": 4},
-                                  "strategy_id": "correlation_all_members"}]
+        reordered["variants"] = [{
+            "params": {"top_n": 2, "k": 4},
+            "strategy_id": "correlation_all_members",
+        }]
         original = _payload()
-        original["variants"] = [{"params": {"k": 4, "top_n": 2},
-                                 "strategy_id": "correlation_all_members"}]
+        original["variants"] = [{
+            "params": {"k": 4, "top_n": 2},
+            "strategy_id": "correlation_all_members",
+        }]
         b = StrategyBatchRequest(**reordered)
         c = StrategyBatchRequest(**original)
         assert canonical_payload_hash(b) == canonical_payload_hash(c)
@@ -117,13 +113,11 @@ class TestCanonicalPayloadHash:
         b = StrategyBatchRequest(**_payload(idempotency_key="key-2"))
         assert canonical_payload_hash(a) != canonical_payload_hash(b)
 
-    def test_schema_version_participates_in_hash(self):
-        a = StrategyBatchRequest(**_payload())
-        b = StrategyBatchRequest(**_payload(schema_version="2"))
-        assert canonical_payload_hash(a) != canonical_payload_hash(b)
+    def test_unsupported_schema_version_rejected_before_hashing(self):
+        with pytest.raises(ValidationError, match="schema_version"):
+            StrategyBatchRequest(**_payload(schema_version="2"))
 
     def test_label_does_not_participate_in_identity(self):
-        """Display labels never enter run identity (§21)."""
         catalog = _catalog()
         a = build_variant_identities(
             catalog, StrategyBatchRequest(**_payload()).variants,
@@ -135,8 +129,6 @@ class TestCanonicalPayloadHash:
         )
         assert a[0].variant_key == b[0].variant_key
 
-
-# ── variant identity ──
 
 class TestVariantIdentity:
     def test_variant_key_format(self):
@@ -155,8 +147,11 @@ class TestVariantIdentity:
         catalog = _catalog()
         payload = _payload(variants=[
             {"strategy_id": "correlation_all_members", "params": {"k": 4}},
-            {"strategy_id": "correlation_all_members", "label": "again",
-             "params": {"k": 4}},
+            {
+                "strategy_id": "correlation_all_members",
+                "label": "again",
+                "params": {"k": 4},
+            },
         ])
         request = StrategyBatchRequest(**payload)
         with pytest.raises(ValueError, match="variant"):
@@ -173,8 +168,6 @@ class TestVariantIdentity:
         assert identities[0].variant_key != identities[1].variant_key
 
     def test_explicit_default_params_share_variant_key_with_empty_params(self):
-        """Resolved config identity: omitting params and spelling out every
-        default must resolve to the SAME variant_key."""
         from backtest.fund_rotation.strategies.correlation_all_members.config import (
             CorrelationAllMembersConfig,
         )
@@ -185,8 +178,10 @@ class TestVariantIdentity:
             {"strategy_id": "correlation_all_members", "params": {}},
         ])
         explicit_payload = _payload(variants=[
-            {"strategy_id": "correlation_all_members",
-             "params": explicit_defaults},
+            {
+                "strategy_id": "correlation_all_members",
+                "params": explicit_defaults,
+            },
         ])
         omitted = build_variant_identities(
             catalog, StrategyBatchRequest(**payload).variants,
@@ -204,11 +199,13 @@ class TestVariantIdentity:
         ])
         request = StrategyBatchRequest(**payload)
         identities = build_variant_identities(catalog, request.variants)
-        assert len({i.variant_key for i in identities}) == 2
+        assert len({identity.variant_key for identity in identities}) == 2
 
     def test_unknown_strategy_is_structured(self):
         catalog = _catalog()
-        payload = _payload(variants=[{"strategy_id": "nope", "params": {}}])
+        payload = _payload(variants=[
+            {"strategy_id": "nope", "params": {}},
+        ])
         request = StrategyBatchRequest(**payload)
         with pytest.raises(Exception) as exc_info:
             build_variant_identities(catalog, request.variants)
@@ -216,8 +213,6 @@ class TestVariantIdentity:
             "FUND_ROTATION_STRATEGY_NOT_FOUND"
         )
 
-
-# ── idempotent persistence ──
 
 class TestIdempotency:
     def test_first_submission_creates_and_replay_returns_original(self, tmp_path):
@@ -230,7 +225,6 @@ class TestIdempotency:
         assert record["batch_id"]
         assert record["payload_hash"] == payload_hash
 
-        # Same key + same payload -> same batch, no new creation.
         again, created_again = store.submit("key-1", payload_hash)
         assert created_again is False
         assert again["batch_id"] == record["batch_id"]
@@ -255,9 +249,6 @@ class TestIdempotency:
         assert second["batch_id"] != first["batch_id"]
 
     def test_binding_survives_restart(self, tmp_path):
-        """A fresh persistence instance (service restart) still returns the
-        original batch for the same key/payload — and never 'continues' a
-        failed batch: the binding is state-agnostic by design."""
         request = StrategyBatchRequest(**_payload())
         payload_hash = canonical_payload_hash(request)
         first, _ = BatchPersistence(tmp_path).submit("key-1", payload_hash)
@@ -265,7 +256,6 @@ class TestIdempotency:
         record, created = reopened.submit("key-1", payload_hash)
         assert created is False
         assert record["batch_id"] == first["batch_id"]
-        # The persisted key record is plain readable JSON.
         reopened.submit("key-1", payload_hash)
         index_files = list((tmp_path / "idempotency").rglob("record.json"))
         assert index_files
@@ -273,9 +263,6 @@ class TestIdempotency:
         assert stored["batch_id"] == first["batch_id"]
 
     def test_concurrent_same_key_single_winner(self, tmp_path):
-        """§21.1 — truly concurrent submissions of the same key must produce
-        exactly one created batch; every other thread observes the same
-        batch_id without unstructured errors."""
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
@@ -321,7 +308,8 @@ class TestIdempotency:
             ),
         )
         batch_dir = store.write_batch_request(
-            batch_id, request_payload=request.model_dump(mode="json"),
+            batch_id,
+            request_payload=request.model_dump(mode="json"),
             identity=identity,
         )
         stored_request = json.loads(
@@ -335,6 +323,5 @@ class TestIdempotency:
         assert stored_identity["variants"][0]["variant_key"] == (
             "correlation_all_members@abc123abc123"
         )
-        # The idempotency hash and the resolved identity hashes are distinct
-        # artifacts — never one shared hash (§21.1).
+        assert stored_identity["created_at"] == record["created_at"]
         assert "idempotency_key" not in json.dumps(stored_identity)
