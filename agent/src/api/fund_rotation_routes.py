@@ -22,7 +22,7 @@ from src.stockpred.fund_rotation.api_models import (
     StrategyListResponse,
     StrategySummary,
 )
-from src.stockpred.fund_rotation.service import FundRotationBacktestService, StructuredError
+from src.stockpred.fund_rotation.service import FundRotationBacktestService
 
 
 def register_fund_rotation_routes(
@@ -420,34 +420,7 @@ def register_fund_rotation_routes(
 
         return FileResponse(artifact_path)
 
-    @app.get("/stockpred/fund-rotation/defaults", dependencies=[Depends(require_auth)])
-    def get_defaults() -> dict[str, Any]:
-        return service.get_defaults()
-
-    @app.post("/stockpred/fund-rotation/backtests", status_code=202, dependencies=[Depends(require_auth)])
-    async def create_backtest(request: Request) -> Any:
-        try:
-            body = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-        params = body.get("params", {})
-        idempotency_key = body.get("idempotency_key", "")
-        if not idempotency_key:
-            raise HTTPException(status_code=400, detail="idempotency_key required")
-
-        try:
-            run_id, status_code = service.submit_backtest(params, idempotency_key)
-        except StructuredError as e:
-            raise HTTPException(status_code=422, detail=e.to_dict())
-        except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=status_code,
-            content={"run_id": run_id, "status": "QUEUED" if status_code == 202 else "EXISTING"},
-        )
+    # ── Legacy v1 read-only backtest endpoints (kept for historical access) ──
 
     @app.get("/stockpred/fund-rotation/backtests", dependencies=[Depends(require_auth)])
     def list_backtests(limit: int = 20) -> list[dict]:

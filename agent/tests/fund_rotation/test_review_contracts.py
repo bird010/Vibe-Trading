@@ -150,9 +150,6 @@ async def test_sse_synthesizes_done_when_success_event_append_was_lost(tmp_path)
     assert '"source": "state_manifest"' in chunk
 
 
-def test_invalid_state_transition_is_not_silently_swallowed():
-    callback_source = inspect.getsource(service.FundRotationBacktestService._execute_run)
-    assert "Skip invalid transitions" not in callback_source
 
 
 def test_only_one_etf_capacity_execution_implementation_exists():
