@@ -134,12 +134,29 @@ class TestSyntheticEndToEnd:
 
     def test_holdings_never_exceed_selected_clusters(self, synthetic_run):
         result, config, _ = synthetic_run
+        # Per-day upper bound = the target count of the latest decision whose
+        # signal strictly precedes that day (execution happens after signals).
+        decisions = sorted(result.decisions, key=lambda d: d.signal_date)
+        bounds: list[tuple[str, int]] = [
+            (d.signal_date, len(d.target_weights)) for d in decisions
+        ]
+
+        def bound_for(trade_date: str) -> int:
+            limit = 0
+            for signal_date, count in bounds:
+                if signal_date < trade_date:
+                    limit = count
+                else:
+                    break
+            return limit
+
         for snapshot in result.positions_history:
             holdings = {
                 code: qty for code, qty in snapshot["positions"].items() if qty > 0
             }
-            assert len(holdings) <= config.top_n, (
-                f"{snapshot['trade_date']}: {len(holdings)} holdings > top_n"
+            assert len(holdings) <= bound_for(snapshot["trade_date"]), (
+                f"{snapshot['trade_date']}: {len(holdings)} holdings exceed "
+                "the selected-cluster count of the latest decision"
             )
 
     def test_at_most_one_etf_per_cluster(self, synthetic_run):
@@ -180,7 +197,10 @@ class TestSyntheticEndToEnd:
 
 # ── read-only research smoke on the local pinned snapshot ──
 
-SNAPSHOT_RUN_DIR = Path("runs/fund_rotation/bac86bdddcf85601")
+SNAPSHOT_RUN_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "runs" / "fund_rotation" / "bac86bdddcf85601"
+)
 
 
 def _load_snapshot_frames():
@@ -209,7 +229,16 @@ def _load_snapshot_frames():
             pytest.skip(f"lance dataset unavailable: {path}")
         try:
             dataset = lance.dataset(str(path), version=int(info["version"]))
-        except Exception:
+        except Exception as exc:
+            # Pinned version unreachable (e.g. compacted): fall back to the
+            # current version, but make the identity drift visible.
+            import warnings
+
+            warnings.warn(
+                f"pinned version {info['version']} of {key} unreachable "
+                f"({exc}); smoke uses the current dataset version instead",
+                stacklevel=2,
+            )
             dataset = lance.dataset(str(path))
         date_filter = None
         if key != "dim_fund.lance":
@@ -288,8 +317,13 @@ class TestResearchSmoke:
         base_metrics = baseline.strategy_metrics
         assert set(rep_metrics) == set(base_metrics)
         # Diagnostic summary (visible under pytest -s); no return assertion.
+        reason_counts: dict[str, int] = {}
+        for decision in representative.decisions:
+            key = decision.reason_code or decision.action.value
+            reason_counts[key] = reason_counts.get(key, 0) + 1
         print(
             "\n[research smoke] representative annual_return="
             f"{rep_metrics.get('annual_return')} vs baseline "
-            f"{base_metrics.get('annual_return')} (diagnostic only)"
+            f"{base_metrics.get('annual_return')} (diagnostic only); "
+            f"decision reasons={reason_counts}"
         )
