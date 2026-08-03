@@ -19,6 +19,7 @@ from backtest.fund_rotation.strategies.correlation_representative.representative
     candidate_neighborhood,
     compute_medoid,
     leave_one_out_cluster_index,
+    maintain_representative_lock,
     select_representative,
 )
 
@@ -289,3 +290,101 @@ class TestSelectRepresentative:
         assert selection.selected is None
         assert selection.exclusion_reason == "SINGLE_MEMBER_CLUSTER"
         assert selection.candidates == ()  # nothing scored, nothing fabricated
+
+
+# ── lock & fallback (§8.2, Task 4) ──
+
+def _abc_distance() -> pd.DataFrame:
+    return _distance({
+        "A": {"A": 0.0, "B": 0.1, "C": 0.12},
+        "B": {"B": 0.0, "A": 0.1, "C": 0.11},
+        "C": {"C": 0.0, "A": 0.12, "B": 0.11},
+    })
+
+
+class TestLockAndFallback:
+    def test_lock_maintained_despite_adv_overtaking(self):
+        """§8.2 — ADV rank changes alone never trigger a switch."""
+        window = _correlated_window()
+        selection = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={"A": 1_000.0, "B": 2_000.0, "C": 9_000.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C"}),
+            current="B",
+        )
+        assert selection.selected == "B"  # locked, not C despite 9k ADV
+        assert selection.lock_maintained is True
+        assert selection.exclusion_reason == ""
+
+    def test_small_adv_fluctuation_does_not_churn(self):
+        window = _correlated_window()
+        first = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={"A": 1_000.0, "B": 2_000.0, "C": 1_999.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C"}),
+            current=None,
+        )
+        assert first.selected == "B"
+        # Next period: C narrowly overtakes B -> lock still holds B.
+        second = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={"A": 1_000.0, "B": 1_998.0, "C": 2_001.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C"}),
+            current=first.selected,
+        )
+        assert second.selected == "B"
+        assert second.lock_maintained is True
+
+    def test_suspension_falls_back_along_saved_candidate_order(self):
+        window = _correlated_window()
+        selection = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={"A": 1_000.0, "B": 2_000.0, "C": 3_000.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "C"}),  # B suspended / not tradable
+            current="B",
+        )
+        # Neighborhood order is [B(medoid), A, C]; the fallback follows the
+        # pre-saved order (§8.2), not a fresh ADV ranking -> A, not C.
+        assert selection.selected == "A"
+        assert selection.lock_maintained is False
+        b_record = next(c for c in selection.candidates if c.code == "B")
+        assert b_record.excluded_reason == "NOT_TRADABLE"
+
+    def test_data_failure_falls_back_along_saved_order(self):
+        window = _correlated_window()
+        selection = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={"A": 1_000.0, "C": 3_000.0},  # B lost its ADV history
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C"}),
+            current="B",
+        )
+        assert selection.selected == "A"  # saved-order fallback, not C
+        assert selection.lock_maintained is False
+        b_record = next(c for c in selection.candidates if c.code == "B")
+        assert b_record.excluded_reason == "NO_ADV"
+
+    def test_no_remaining_candidate_keeps_cash_slot(self):
+        """§8.2 — hard failure with no fallback: the slot stays cash; never
+        redistributed to other clusters nor escalated to decision INVALID."""
+        window = _correlated_window()
+        selection = maintain_representative_lock(
+            distance=_abc_distance(), weekly_window=window,
+            members=["A", "B", "C"],
+            adv20={},  # everyone lost liquidity
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C"}),
+            current="B",
+        )
+        assert selection.selected is None
+        assert selection.lock_maintained is False
+        assert selection.exclusion_reason == "NO_ELIGIBLE_REPRESENTATIVE"

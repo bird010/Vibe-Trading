@@ -49,12 +49,17 @@ class CandidateRecord:
 
 @dataclass(frozen=True)
 class RepresentativeSelection:
-    """Outcome for one cluster: medoid, scored candidates, final pick."""
+    """Outcome for one cluster: medoid, scored candidates, final pick.
+
+    ``lock_maintained`` is True when a previously locked representative stayed
+    qualified and was kept despite ADV rank changes (§8.2).
+    """
 
     medoid: str
     candidates: tuple[CandidateRecord, ...]
     selected: str | None
     exclusion_reason: str  # "" on success
+    lock_maintained: bool = False
 
 
 def compute_medoid(distance: pd.DataFrame, members: Sequence[str]) -> str:
@@ -187,4 +192,75 @@ def select_representative(
         candidates=tuple(records),
         selected=best.code,
         exclusion_reason="",
+    )
+
+
+def maintain_representative_lock(
+    *,
+    distance: pd.DataFrame,
+    weekly_window: pd.DataFrame,
+    members: Sequence[str],
+    adv20: Mapping[str, float],
+    candidate_count: int,
+    min_cluster_corr: float,
+    eligible: AbstractSet[str],
+    current: str | None,
+) -> RepresentativeSelection:
+    """§8.2 — lock maintenance and hard-failure fallback.
+
+    A locked representative is kept as long as it stays qualified: ADV rank
+    changes alone never trigger a switch. Only a hard failure (untradable,
+    data/adj invalidation, lost liquidity) demotes it, falling back along the
+    pre-saved candidate (neighborhood) order — NOT by re-ranking ADV. When no
+    candidate survives, the cluster slot stays cash (the caller keeps the
+    slot's weight as cash; it is never redistributed to other clusters nor
+    escalated to the decision action INVALID).
+
+    ``current=None`` performs the fresh (reclustering) selection.
+    """
+    base = select_representative(
+        distance=distance,
+        weekly_window=weekly_window,
+        members=members,
+        adv20=adv20,
+        candidate_count=candidate_count,
+        min_cluster_corr=min_cluster_corr,
+        eligible=eligible,
+    )
+    if base.exclusion_reason == SINGLE_MEMBER_CLUSTER:
+        return base
+    if current is None:
+        return base
+
+    current_record = next(
+        (r for r in base.candidates if r.code == current), None,
+    )
+    if current_record is not None and not current_record.excluded_reason:
+        # Still qualified: keep the lock regardless of ADV movements.
+        return RepresentativeSelection(
+            medoid=base.medoid,
+            candidates=base.candidates,
+            selected=current,
+            exclusion_reason="",
+            lock_maintained=True,
+        )
+
+    # Hard failure: demote along the pre-saved candidate order.
+    fallback = next(
+        (r for r in base.candidates if not r.excluded_reason), None,
+    )
+    if fallback is None:
+        return RepresentativeSelection(
+            medoid=base.medoid,
+            candidates=base.candidates,
+            selected=None,
+            exclusion_reason=NO_ELIGIBLE_REPRESENTATIVE,
+            lock_maintained=False,
+        )
+    return RepresentativeSelection(
+        medoid=base.medoid,
+        candidates=base.candidates,
+        selected=fallback.code,
+        exclusion_reason="",
+        lock_maintained=False,
     )
