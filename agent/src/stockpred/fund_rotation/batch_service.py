@@ -41,6 +41,10 @@ from src.stockpred.fund_rotation.batch_models import (
     StrategyBatchRequest,
     canonical_payload_hash,
 )
+from src.stockpred.fund_rotation.comparison import (
+    VariantComparisonInput,
+    build_comparison,
+)
 from src.stockpred.fund_rotation.batch_persistence import (
     BatchPersistence,
     build_variant_identities,
@@ -381,12 +385,15 @@ class BatchService:
         ordered = sorted(plans, key=lambda p: p["identity"].variant_key)
         statuses: dict[str, str] = {}
         executed_order: list[dict[str, Any]] = []
+        run_results: dict[str, object] = {}
+        run_ids: dict[str, str] = {}
         runs_dir = batch_dir / "runs"
 
         for plan in ordered:
             identity = plan["identity"]
             variant_key = identity.variant_key
             run_id = uuid.uuid4().hex[:12]
+            run_ids[variant_key] = run_id
             if token.is_cancelled:
                 # §26.1 — unstarted variants never launch.
                 statuses[variant_key] = "CANCELED"
@@ -414,6 +421,7 @@ class BatchService:
                     cancellation=token,
                 )
                 status = result.status.value
+                run_results[variant_key] = result
                 # §26.1: a run that finished SUCCEEDED before cancellation
                 # landed stays read-only SUCCEEDED — no rewrite needed.
             except Exception as exc:
@@ -445,6 +453,73 @@ class BatchService:
 
         if not token.is_cancelled:
             advance(BatchStage.COMPARING)
+
+            # §27 — strict common-calendar comparison: only sub-runs whose
+            # equity index EXACTLY equals the evaluation calendar participate.
+            eval_dates = [
+                d for d in calendar
+                if request.evaluation_start_date <= d <= request.evaluation_end_date
+            ]
+            comparison_inputs: list[VariantComparisonInput] = []
+            for plan in ordered:
+                identity = plan["identity"]
+                vk = identity.variant_key
+                result = run_results.get(vk)
+                if result is None:
+                    continue
+                has_invalid = any(
+                    d.action.value == "INVALID" for d in result.decisions
+                )
+                comparison_inputs.append(VariantComparisonInput(
+                    variant_key=vk,
+                    strategy_id=identity.strategy_id,
+                    run_id=run_ids.get(vk, ""),
+                    status=statuses.get(vk, "UNKNOWN"),
+                    equity=result.executed_equity,
+                    decision_quality="VALID",
+                    has_invalid_action=has_invalid,
+                ))
+
+            outcome = build_comparison(
+                comparison_inputs,
+                evaluation_calendar=eval_dates,
+                framework_implementation_hash=framework_implementation_hash(),
+                data_snapshot_fingerprint=metadata["fingerprint"],
+            )
+
+            # Write comparison artifacts to the parent batch directory.
+            reports = {
+                "contract": {
+                    "fingerprint": outcome.contract_fingerprint,
+                    "components": outcome.contract_components,
+                },
+                "ranking": outcome.ranking,
+                "excluded": outcome.excluded,
+                "quality_warnings": outcome.quality_warnings,
+            }
+            atomic_write_json(batch_dir / "reports.json", reports)
+
+            if not outcome.equity_frame.empty:
+                import pandas as _pd
+
+                outcome.equity_frame.to_csv(
+                    batch_dir / "comparison_equity.csv",
+                )
+            if outcome.metrics:
+                import pandas as _pd
+
+                _pd.DataFrame(outcome.metrics).T.to_csv(
+                    batch_dir / "comparison_metrics.csv",
+                )
+            atomic_write_json(batch_dir / "data_snapshot.json", {
+                "fingerprint": metadata["fingerprint"],
+                "universe_size": len(snapshot.universe_codes),
+                "trading_dates_count": len(snapshot.trading_dates),
+                "evaluation_start": request.evaluation_start_date,
+                "evaluation_end": request.evaluation_end_date,
+                "evaluation_dates": len(eval_dates),
+            })
+
             advance(BatchStage.WRITING_RESULTS)
 
         # §26 parent aggregation.
@@ -463,6 +538,7 @@ class BatchService:
         resolved = self._read_resolved(batch_dir)
         for variant in resolved.get("variants", []):
             variant["status"] = statuses.get(variant["variant_key"], "CANCELED")
+            variant["run_id"] = run_ids.get(variant["variant_key"])
         resolved["executed_order"] = executed_order
         self._write_resolved(batch_dir, resolved)
 
