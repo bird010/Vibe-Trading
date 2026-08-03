@@ -371,7 +371,8 @@ def register_fund_rotation_routes(
                             etype = event.get("event_type", "")
                             if etype == "TERMINAL" and event.get("scope") == "BATCH":
                                 msg = event.get("message", "")
-                                if msg in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED"):
+                                if msg in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED",
+                                           "CANCELED", "FAILED_INTERRUPTED"):
                                     yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                                     return
                 # Check if manifest signals completion

@@ -477,7 +477,7 @@ class BatchService:
                     run_id=run_ids.get(vk, ""),
                     status=statuses.get(vk, "UNKNOWN"),
                     equity=result.executed_equity,
-                    decision_quality="VALID",
+                    decision_quality=result.quality_status,
                     has_invalid_action=has_invalid,
                 ))
 

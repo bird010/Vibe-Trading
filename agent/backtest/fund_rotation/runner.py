@@ -114,6 +114,7 @@ class FundRotationRunResult:
     positions_history: list[dict] = field(default_factory=list)
     strategy_metrics: dict[str, float] = field(default_factory=dict)
     diagnostics: StrategyDiagnostics | None = None
+    quality_status: str = "VALID"  # worst across all decisions (§9/§27)
 
 
 class FundRotationBacktestRunner:
@@ -321,6 +322,9 @@ class FundRotationBacktestRunner:
             initial_nav=evaluation.initial_nav,
         )
 
+        # §9/§27 — aggregate worst research quality across all decisions.
+        overall_quality = _worst_quality_status(decisions)
+
         # Finalize failure fails the sub-run but preserves all prior evidence.
         try:
             diagnostics = session.finalize()
@@ -336,6 +340,7 @@ class FundRotationBacktestRunner:
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
                 strategy_metrics=strategy_metrics,
+                quality_status=overall_quality,
             )
 
         return FundRotationRunResult(
@@ -348,6 +353,7 @@ class FundRotationBacktestRunner:
             positions_history=pipeline_result.positions_history,
             strategy_metrics=strategy_metrics,
             diagnostics=diagnostics,
+            quality_status=overall_quality,
         )
 
     # ── internal helpers ──
@@ -383,3 +389,21 @@ class FundRotationBacktestRunner:
                     f"scheduled decision dates must be strictly increasing at {date!r}"
                 )
             previous = date
+
+
+_QUALITY_ORDER = {"VALID": 0, "DEGRADED": 1, "INVALID": 2, "FAILED": 3}
+
+
+def _worst_quality_status(decisions: list) -> str:
+    """Return the worst research quality across all decisions (§9/§27)."""
+    if not decisions:
+        return "VALID"
+    worst = max(
+        decisions,
+        key=lambda d: _QUALITY_ORDER.get(
+            str(d.quality_status.value) if hasattr(d.quality_status, "value") else str(d.quality_status),
+            0,
+        ),
+    )
+    val = worst.quality_status
+    return str(val.value) if hasattr(val, "value") else str(val)
