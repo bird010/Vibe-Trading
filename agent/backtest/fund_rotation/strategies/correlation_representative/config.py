@@ -23,7 +23,7 @@ class CorrelationRepresentativeConfig(BaseModel):
     correlation_lookback_weeks: int = Field(52, ge=1, description="相关性回看周数")
     momentum_window_weeks: int = Field(4, ge=1, description="动量回看周数")
     recluster_interval_weeks: int = Field(26, ge=1, description="重聚类间隔周数")
-    min_valid_weeks: int = Field(20, ge=0, description="最小有效周数")
+    min_valid_weeks: int = Field(20, ge=1, description="最小有效周数")
     min_pairwise_weeks: int = Field(20, ge=1, description="最小成对周数")
 
     # ── Representative ETF selection (§8.1/§8.2) ──
@@ -69,6 +69,12 @@ class CorrelationRepresentativeConfig(BaseModel):
         if self.min_pairwise_weeks > self.correlation_lookback_weeks:
             raise ValueError(
                 f"min_pairwise_weeks ({self.min_pairwise_weeks}) must be <= "
+                f"correlation_lookback_weeks ({self.correlation_lookback_weeks})"
+            )
+        if self.min_valid_weeks > self.correlation_lookback_weeks:
+            # An unsatisfiable gate (valid weeks can never exceed the window).
+            raise ValueError(
+                f"min_valid_weeks ({self.min_valid_weeks}) must be <= "
                 f"correlation_lookback_weeks ({self.correlation_lookback_weeks})"
             )
         if (

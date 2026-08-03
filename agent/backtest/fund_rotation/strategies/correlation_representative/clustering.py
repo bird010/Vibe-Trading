@@ -61,6 +61,11 @@ def correlation_cluster(
     Incomplete pairs are iteratively excluded (each exclusion recorded) until
     the remaining distance matrix is complete; raises ValueError when fewer
     than ``k`` codes survive.
+
+    Codes absent from ``window_returns`` are dropped silently here: they are
+    the upstream caller's responsibility (eligibility / min_valid_weeks gates
+    record them before this function is invoked, mirroring the legacy
+    pipeline).
     """
     window = window_returns[[c for c in codes if c in window_returns.columns]]
     distance = compute_correlation_distance(window, min_pairwise_weeks=min_pairwise_weeks)

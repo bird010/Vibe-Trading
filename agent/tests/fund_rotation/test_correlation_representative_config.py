@@ -90,6 +90,14 @@ class TestSchemaAndValidation:
                 correlation_lookback_weeks=20, min_pairwise_weeks=30,
             )
 
+    def test_min_valid_weeks_must_not_exceed_lookback(self):
+        with pytest.raises(ValidationError, match="min_valid_weeks"):
+            CorrelationRepresentativeConfig(
+                correlation_lookback_weeks=20, min_valid_weeks=30,
+            )
+        with pytest.raises(ValidationError):
+            CorrelationRepresentativeConfig(min_valid_weeks=0)
+
     def test_momentum_window_must_be_subset_of_lookback(self):
         with pytest.raises(ValidationError, match="momentum_window_weeks"):
             CorrelationRepresentativeConfig(

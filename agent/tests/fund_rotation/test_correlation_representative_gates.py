@@ -181,7 +181,10 @@ class TestGates:
             (r for r in evaluation.results if r.code == "EFFECTIVE_CLUSTER_COUNT")
         )
         assert eff.status is GateStatus.WARN
-        assert eff.actual == pytest.approx(2.56, abs=0.05)
+        expected_eff = math.exp(
+            -(0.7 * math.log(0.7) + 3 * 0.1 * math.log(0.1))
+        )
+        assert eff.actual == pytest.approx(expected_eff)
         assert evaluation.overall is GateStatus.WARN
 
     def test_thresholds_come_from_config_not_hidden_constants(self):
