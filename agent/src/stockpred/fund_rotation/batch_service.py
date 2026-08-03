@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -500,17 +501,15 @@ class BatchService:
             atomic_write_json(batch_dir / "reports.json", reports)
 
             if not outcome.equity_frame.empty:
-                import pandas as _pd
-
-                outcome.equity_frame.to_csv(
-                    batch_dir / "comparison_equity.csv",
-                )
+                tmp = batch_dir / "comparison_equity.csv.tmp"
+                outcome.equity_frame.to_csv(tmp)
+                os.replace(str(tmp), str(batch_dir / "comparison_equity.csv"))
             if outcome.metrics:
                 import pandas as _pd
 
-                _pd.DataFrame(outcome.metrics).T.to_csv(
-                    batch_dir / "comparison_metrics.csv",
-                )
+                tmp = batch_dir / "comparison_metrics.csv.tmp"
+                _pd.DataFrame(outcome.metrics).T.to_csv(tmp)
+                os.replace(str(tmp), str(batch_dir / "comparison_metrics.csv"))
             atomic_write_json(batch_dir / "data_snapshot.json", {
                 "fingerprint": metadata["fingerprint"],
                 "universe_size": len(snapshot.universe_codes),

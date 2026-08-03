@@ -262,4 +262,6 @@ class TestBatchComparisonIntegration:
         batch_dir = service.persistence.batch_dir(batch_id)
         assert not (batch_dir / "reports.json").exists()
         assert not (batch_dir / "comparison_equity.csv").exists()
+        assert not (batch_dir / "comparison_metrics.csv").exists()
+        assert not (batch_dir / "data_snapshot.json").exists()
         assert not (batch_dir / "manifest.json").exists()
