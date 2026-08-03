@@ -155,15 +155,8 @@ function parseCsvRow(row: string): string[] {
   return values;
 }
 
-export async function fetchBatchComparisonEquity(
-  batchId: string,
-): Promise<ComparisonEquityData | null> {
-  const res = await fetch(batchArtifactUrl(batchId, "comparison_equity.csv"), {
-    headers: authHeaders(),
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw await responseError(res, "fetchBatchComparisonEquity");
-  const rows = (await res.text())
+function parseEquityCsv(csv: string): ComparisonEquityData | null {
+  const rows = csv
     .split(/\r?\n/)
     .filter((row) => row.trim().length > 0)
     .map(parseCsvRow);
@@ -175,13 +168,27 @@ export async function fetchBatchComparisonEquity(
   for (const row of rows.slice(1)) {
     if (row.length === 0 || !row[0]) continue;
     const values = row.slice(1).map(Number);
-    if (values.length !== names.length || values.some((value) => !Number.isFinite(value))) {
+    if (
+      values.length !== names.length ||
+      values.some((value) => !Number.isFinite(value))
+    ) {
       continue;
     }
     dates.push(row[0]);
     names.forEach((name, index) => series[name].push(values[index]));
   }
   return dates.length > 0 ? { dates, series } : null;
+}
+
+export async function fetchBatchComparisonEquity(
+  batchId: string,
+): Promise<ComparisonEquityData | null> {
+  const res = await fetch(batchArtifactUrl(batchId, "comparison_equity.csv"), {
+    headers: authHeaders(),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await responseError(res, "fetchBatchComparisonEquity");
+  return parseEquityCsv(await res.text());
 }
 
 export async function fetchBacktestDetail(
@@ -196,6 +203,17 @@ export async function fetchBacktestDetail(
 
 export function backtestArtifactUrl(runId: string, artifactName: string): string {
   return withAuthQuery(`${BASE}/backtests/${runId}/artifacts/${artifactName}`);
+}
+
+export async function fetchBacktestEquity(
+  runId: string,
+): Promise<ComparisonEquityData | null> {
+  const res = await fetch(backtestArtifactUrl(runId, "equity.csv"), {
+    headers: authHeaders(),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await responseError(res, "fetchBacktestEquity");
+  return parseEquityCsv(await res.text());
 }
 
 export function backtestChartUrl(
