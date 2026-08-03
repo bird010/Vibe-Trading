@@ -96,6 +96,45 @@ def register_fund_rotation_routes(
     # Recover interrupted runs on startup
     service.recover_interrupted()
 
+    # ── Batch service (§21/Phase 4) ──
+    batches_dir = runs_dir / "fund_rotation_batches"
+    batch_service = None
+    if stockpred_root is not None:
+        from src.stockpred.fund_rotation.batch_service import BatchService
+
+        lance_dir = stockpred_root / "data" / "lance" / "market_core"
+
+        def _batch_metadata_loader() -> dict[str, Any]:
+            from src.stockpred.fund_rotation.data_snapshot import (
+                resolve_pinned_snapshot,
+            )
+            snap = resolve_pinned_snapshot(lance_dir)
+            return {
+                "trading_dates": list(snap.trading_dates),
+                "fingerprint": snap.fingerprint,
+            }
+
+        def _batch_frames_loader(
+            data_start: str, data_end: str,
+        ) -> tuple:
+            from src.stockpred.fund_rotation.data_snapshot import (
+                load_pinned_frames,
+                resolve_pinned_snapshot,
+            )
+            snap = resolve_pinned_snapshot(lance_dir)
+            return load_pinned_frames(
+                snap, lance_dir, data_start=data_start, data_end=data_end,
+            )
+
+        batch_service = BatchService(
+            batches_dir,
+            catalog=catalog,
+            metadata_loader=_batch_metadata_loader,
+            frames_loader=_batch_frames_loader,
+            auto_start=True,
+        )
+        batch_service.recover_interrupted()
+
     # ── Strategy catalog read endpoints (§16/§18) ──
 
     @app.get("/stockpred/fund-rotation/strategies", dependencies=[Depends(require_auth)])
@@ -168,6 +207,218 @@ def register_fund_rotation_routes(
         # Schema content hash for frontend caching.
         response.headers["ETag"] = etag
         return detail.model_dump(mode="json")
+
+    # ── Strategy batch endpoints (Phase 4 Task 6, §21) ──
+
+    POST_BATCH_PATH = "/stockpred/fund-rotation/strategy-batches"
+
+    @app.post(POST_BATCH_PATH, status_code=202, dependencies=[Depends(require_auth)])
+    async def submit_strategy_batch(request: Request) -> Any:
+        # Validate request body before checking backend availability.
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        from src.stockpred.fund_rotation.batch_models import StrategyBatchRequest
+
+        try:
+            batch_request = StrategyBatchRequest.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "FUND_ROTATION_BATCH_INVALID", "message": str(exc)},
+            ) from exc
+
+        if batch_service is None:
+            raise HTTPException(status_code=503, detail="Batch service not available")
+
+        from src.stockpred.fund_rotation.batch_service import BatchPlanningError
+
+        try:
+            result = batch_service.submit_batch(batch_request)
+        except BatchPlanningError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=202, content=result)
+
+    @app.get(POST_BATCH_PATH, dependencies=[Depends(require_auth)])
+    def list_strategy_batches(limit: int = 50) -> list[dict[str, Any]]:
+        if batch_service is None:
+            return []
+        batches_dir = batch_service.persistence.batches_dir
+        if not batches_dir.exists():
+            return []
+        results: list[dict[str, Any]] = []
+        for d in sorted(batches_dir.iterdir(), reverse=True):
+            if d.name == "idempotency" or not d.is_dir():
+                continue
+            state_path = d / "state.json"
+            if not state_path.exists():
+                continue
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            resolved = {}
+            resolved_path = d / "resolved_batch.json"
+            if resolved_path.exists():
+                resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+            results.append({
+                "batch_id": d.name,
+                "status": state.get("stage", "UNKNOWN"),
+                "mode": state.get("mode", "RESEARCH_ONLY"),
+                "variant_count": len(resolved.get("variants", [])),
+                "created_at": resolved.get("plan", {}).get(
+                    "evaluation_start_date", "",
+                ),
+            })
+            if len(results) >= limit:
+                break
+        return results
+
+    @app.get(
+        POST_BATCH_PATH + "/{batch_id}",
+        dependencies=[Depends(require_auth)],
+    )
+    def get_strategy_batch(batch_id: str) -> dict[str, Any]:
+        if batch_service is None:
+            raise HTTPException(status_code=503, detail="Batch service not available")
+        batch_dir = batch_service.persistence.batch_dir(batch_id)
+        if not batch_dir.exists():
+            raise HTTPException(status_code=404, detail="Batch not found")
+        state_path = batch_dir / "state.json"
+        resolved_path = batch_dir / "resolved_batch.json"
+        if not state_path.exists():
+            raise HTTPException(status_code=404, detail="Batch has no state")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        resolved = {}
+        if resolved_path.exists():
+            resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+        # Collect child run states
+        runs_dir = batch_dir / "runs"
+        child_runs: list[dict[str, Any]] = []
+        if runs_dir.exists():
+            for child in sorted(runs_dir.iterdir()):
+                child_state_path = child / "state.json"
+                if child_state_path.exists():
+                    child_runs.append(
+                        json.loads(child_state_path.read_text(encoding="utf-8")),
+                    )
+        return {
+            "batch_id": batch_id,
+            "state": state,
+            "resolved": resolved,
+            "child_runs": child_runs,
+            "mode": "RESEARCH_ONLY",
+        }
+
+    @app.post(
+        POST_BATCH_PATH + "/{batch_id}/cancel",
+        dependencies=[Depends(require_auth)],
+    )
+    def cancel_strategy_batch(batch_id: str) -> dict[str, Any]:
+        if batch_service is None:
+            raise HTTPException(status_code=503, detail="Batch service not available")
+        cancelled = batch_service.cancel_batch(batch_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "BATCH_NOT_FOUND", "message": f"Batch {batch_id} not found or not cancellable"},
+            )
+        return {"batch_id": batch_id, "cancelled": True}
+
+    @app.get(
+        POST_BATCH_PATH + "/{batch_id}/events",
+        dependencies=[Depends(require_event_stream_auth)],
+    )
+    async def stream_batch_events(batch_id: str, request: Request) -> StreamingResponse:
+        if batch_service is None:
+            raise HTTPException(status_code=503, detail="Batch service not available")
+        batch_dir = batch_service.persistence.batch_dir(batch_id)
+        events_path = batch_dir / "events.jsonl"
+        if not batch_dir.exists():
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        async def event_generator():
+            last_seq = 0
+            last_event_id = request.headers.get("Last-Event-ID")
+            if last_event_id:
+                try:
+                    last_seq = int(last_event_id)
+                except ValueError:
+                    pass
+            import asyncio
+
+            while True:
+                if await request.is_disconnected():
+                    return
+                if events_path.exists():
+                    lines = events_path.read_text(encoding="utf-8").strip().split("\n")
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        seq = event.get("seq", 0)
+                        if seq > last_seq:
+                            last_seq = seq
+                            yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                            etype = event.get("event_type", "")
+                            if etype == "TERMINAL" and event.get("scope") == "BATCH":
+                                msg = event.get("message", "")
+                                if msg in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED"):
+                                    yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                                    return
+                # Check if manifest signals completion
+                manifest_path = batch_dir / "manifest.json"
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    status = manifest.get("status", "")
+                    if status in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED"):
+                        terminal = {
+                            "seq": last_seq + 1,
+                            "event_type": "TERMINAL",
+                            "scope": "BATCH",
+                            "message": status,
+                            "source": "manifest",
+                        }
+                        yield f"id: {last_seq + 1}\nevent: done\ndata: {json.dumps(terminal, ensure_ascii=False)}\n\n"
+                        return
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    @app.get(
+        POST_BATCH_PATH + "/{batch_id}/artifacts/{artifact_id:path}",
+        dependencies=[Depends(require_auth)],
+    )
+    def get_batch_artifact(batch_id: str, artifact_id: str) -> Any:
+        if batch_service is None:
+            raise HTTPException(status_code=503, detail="Batch service not available")
+        batch_dir = batch_service.persistence.batch_dir(batch_id)
+        manifest_path = batch_dir / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="Batch has no published manifest")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        allowed = set(manifest.get("files", []))
+        if artifact_id not in allowed:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Artifact '{artifact_id}' not in manifest",
+            )
+        artifact_path = (batch_dir / artifact_id).resolve()
+        if not str(artifact_path).startswith(str(batch_dir.resolve())):
+            raise HTTPException(status_code=403, detail="Path traversal detected")
+        if not artifact_path.is_file():
+            raise HTTPException(status_code=404, detail="Artifact file missing")
+        from fastapi.responses import FileResponse
+
+        return FileResponse(artifact_path)
 
     @app.get("/stockpred/fund-rotation/defaults", dependencies=[Depends(require_auth)])
     def get_defaults() -> dict[str, Any]:

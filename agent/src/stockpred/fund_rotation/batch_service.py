@@ -541,6 +541,49 @@ class BatchService:
         resolved["executed_order"] = executed_order
         self._write_resolved(batch_dir, resolved)
 
+        # §27 — manifest.json is the sole atomic publish point; only written
+        # for non-cancelled batches that completed comparison.
+        if not token.is_cancelled and final_stage in ("SUCCEEDED", "PARTIAL_SUCCEEDED"):
+            from datetime import datetime, timezone
+
+            from src.stockpred.fund_rotation.artifacts import compute_file_checksum
+
+            artifact_names = [
+                "request.json", "resolved_batch.json", "state.json",
+                "events.jsonl", "data_snapshot.json", "reports.json",
+                "comparison_equity.csv", "comparison_metrics.csv",
+            ]
+            files = []
+            file_details = {}
+            for name in artifact_names:
+                path = batch_dir / name
+                if path.exists():
+                    files.append(name)
+                    file_details[name] = {
+                        "checksum": compute_file_checksum(path),
+                    }
+            manifest = {
+                "batch_id": batch_id,
+                "status": final_stage,
+                "mode": request.mode,
+                "catalog_version": catalog_identity_hash(self.catalog),
+                "framework_implementation_hash": framework_implementation_hash(),
+                "data_snapshot_fingerprint": metadata["fingerprint"],
+                "variants": [
+                    {
+                        "variant_key": v["variant_key"],
+                        "strategy_id": v.get("strategy_id", ""),
+                        "run_id": v.get("run_id"),
+                        "status": v.get("status"),
+                    }
+                    for v in resolved.get("variants", [])
+                ],
+                "files": files,
+                "file_details": file_details,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            atomic_write_json(batch_dir / "manifest.json", manifest)
+
         events.append(
             event_type="TERMINAL", scope="BATCH", stage=None,
             message=final_stage,
