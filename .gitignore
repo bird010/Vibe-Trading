@@ -51,7 +51,6 @@ data/parquet/
 data/backup/
 
 # Internal docs (plans, specs)
-docs/
 !wiki/docs/
 !wiki/docs/**
 docs/screenshots/agent-run.png
