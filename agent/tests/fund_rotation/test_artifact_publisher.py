@@ -30,6 +30,39 @@ def test_common_roles_are_the_fixed_set():
         "manifest", "evaluation_calendar", "targets", "orders",
         "fills", "equity", "metrics", "events",
     }
+    # fills keeps the legacy file name; events aligns with the append-based
+    # run event log (§29/§30.1).
+    assert COMMON_ROLES["fills"] == "trade_events.csv"
+    assert COMMON_ROLES["events"] == "events.jsonl"
+
+
+def test_events_role_indexes_external_jsonl_without_rewriting(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    events_path = run_dir / "events.jsonl"
+    content = '{"stage": "RUNNING"}\n{"stage": "SUCCEEDED"}\n'
+    events_path.write_text(content, encoding="utf-8")
+
+    pub = _publisher(tmp_path)
+    path = pub.index_external("events")
+
+    assert path == events_path
+    assert events_path.read_text(encoding="utf-8") == content  # untouched
+    entry = pub.artifact_index()["events"]
+    assert entry["file"] == "events.jsonl"
+    assert entry["media_type"] == "application/x-ndjson"
+    assert entry["rows"] == 2
+
+    manifest = pub.finalize()
+    assert manifest["artifacts"]["events"]["file"] == "events.jsonl"
+
+
+def test_index_external_requires_existing_file(tmp_path):
+    pub = _publisher(tmp_path)
+    with pytest.raises(ArtifactPublicationError, match="does not exist"):
+        pub.index_external("events")
+    with pytest.raises(ArtifactPublicationError, match="not a common role"):
+        pub.index_external("clusters")
 
 
 def test_publish_common_roles_writes_files_and_index(tmp_path):
@@ -174,3 +207,13 @@ def test_finalize_writes_manifest_index_and_blocks_reuse(tmp_path):
         ))
     with pytest.raises(ArtifactPublicationError):
         pub.finalize()
+
+
+def test_finalize_identity_cannot_override_reserved_keys(tmp_path):
+    pub = _publisher(tmp_path)
+    pub.publish(StrategyArtifact(
+        role="metrics", media_type="application/json", payload={},
+    ))
+    with pytest.raises(ArtifactPublicationError, match="reserved"):
+        pub.finalize(identity={"status": "FAILED"})
+    assert not (tmp_path / "run" / "manifest.json").exists()

@@ -37,11 +37,12 @@ COMMON_ROLES: dict[str, str] = {
     "fills": "trade_events.csv",
     "equity": "equity.csv",
     "metrics": "metrics.json",
-    "events": "events.json",
+    "events": "events.jsonl",
 }
 
 _MEDIA_JSON = "application/json"
 _MEDIA_CSV = "text/csv"
+_MEDIA_JSONL = "application/x-ndjson"
 
 # Safe role names: alnum start, then alnum/_/- only (no dots, no separators),
 # which makes path traversal structurally impossible.
@@ -68,8 +69,11 @@ class ArtifactPublisher:
     def publish(self, artifact: StrategyArtifact, *, producer: str = "common") -> Path:
         """Serialize and write one declared artifact; index it by role.
 
-        Raises ArtifactPublicationError (and poisons the publication) on any
-        safety or serialization failure.
+        Safety rejections (reserved/duplicate/unsafe roles, common-role
+        override) fail BEFORE any write and do not poison the publication —
+        nothing was written, so the manifest invariant is intact. Failures
+        during serialization/write poison it: ``finalize`` can then never
+        produce a success manifest.
         """
         if self._finalized:
             raise ArtifactPublicationError("publication is closed after finalize()")
@@ -151,6 +155,38 @@ class ArtifactPublisher:
 
     # ── manifest ──
 
+    def index_external(self, role: str) -> Path:
+        """Index a common artifact written by an existing external mechanism.
+
+        The run event log (``events.jsonl``) is append-persisted by the state
+        machine before SSE emission (§29/§30.1); the publisher must index it
+        without ever rewriting it.
+        """
+        if self._finalized:
+            raise ArtifactPublicationError("publication is closed after finalize()")
+        if role not in COMMON_ROLES:
+            raise ArtifactPublicationError(f"{role!r} is not a common role")
+        if role in self._index:
+            raise ArtifactPublicationError(f"role {role!r} already published")
+        filename = COMMON_ROLES[role]
+        path = self._run_dir / filename
+        if not path.exists():
+            raise ArtifactPublicationError(
+                f"external artifact {filename!r} does not exist; nothing to index"
+            )
+        entry = describe_file(path)
+        if path.suffix == ".jsonl":
+            with open(path, encoding="utf-8") as handle:
+                entry["rows"] = sum(1 for _ in handle)
+        entry.update({
+            "file": filename,
+            "role": role,
+            "media_type": _MEDIA_JSONL if path.suffix == ".jsonl" else _MEDIA_JSON,
+            "producer": "common",
+        })
+        self._index[role] = entry
+        return path
+
     def artifact_index(self) -> dict[str, dict]:
         return {role: dict(entry) for role, entry in self._index.items()}
 
@@ -182,6 +218,12 @@ class ArtifactPublisher:
             "files": sorted(entry["file"] for entry in artifacts.values()),
         }
         if identity:
+            reserved = {"schema_version", "status", "completed_at", "artifacts", "files"}
+            conflict = reserved & set(identity)
+            if conflict:
+                raise ArtifactPublicationError(
+                    f"identity must not override reserved manifest keys: {sorted(conflict)}"
+                )
             manifest.update(identity)
         self._run_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = self._run_dir / "manifest.json"
