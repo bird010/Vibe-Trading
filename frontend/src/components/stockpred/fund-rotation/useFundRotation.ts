@@ -1,14 +1,14 @@
-/** Phase 5 Task 4 — hook migrated to batch SSE and strategy catalog. */
+/** Zustand store for the fund-rotation catalog and strategy batches. */
 
 import { create } from "zustand";
 import type {
   BatchDetail,
   BatchListItem,
   BatchSubmitResponse,
-  ComparisonReports,
   EventEnvelope,
   StrategyDetail,
   StrategySummary,
+  StrategyBatchRequest,
 } from "./types";
 import {
   fetchStrategies,
@@ -21,28 +21,31 @@ import {
   fetchBatchReports,
 } from "./api";
 import type { VariantDraft } from "./StrategyVariantsEditor";
-import type { StrategyBatchRequest } from "./types";
 
 let eventSource: EventSource | null = null;
+let connectedBatchId: string | null = null;
+
+const TERMINAL_STAGES = new Set([
+  "SUCCEEDED",
+  "PARTIAL_SUCCEEDED",
+  "FAILED",
+  "CANCELED",
+  "FAILED_INTERRUPTED",
+]);
 
 export interface FundRotationState {
-  // Catalog
   catalogVersion: string;
   strategies: StrategySummary[];
   strategyDetails: Map<string, StrategyDetail>;
   catalogLoading: boolean;
   catalogError: string | null;
-
-  // Batch
   batches: BatchListItem[];
   activeBatchId: string | null;
   activeBatch: BatchDetail | null;
-  comparison: ComparisonReports | null;
+  comparison: Awaited<ReturnType<typeof fetchBatchReports>> | null;
   loading: boolean;
   error: string | null;
   events: EventEnvelope[];
-
-  // Actions
   fetchCatalog: () => Promise<void>;
   fetchBatches: () => Promise<void>;
   submitStrategyBatch: (
@@ -65,7 +68,6 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
   strategyDetails: new Map(),
   catalogLoading: false,
   catalogError: null,
-
   batches: [],
   activeBatchId: null,
   activeBatch: null,
@@ -79,23 +81,36 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
     try {
       const list = await fetchStrategies();
       const details = new Map<string, StrategyDetail>();
-      for (const s of list.strategies) {
-        try {
-          const { data } = await fetchStrategyDetail(s.strategy_id);
-          details.set(s.strategy_id, data);
-        } catch {
-          // skip detail if unavailable; summary still shows
-        }
-      }
+      const failures: string[] = [];
+      await Promise.all(
+        list.strategies.map(async (strategy) => {
+          try {
+            const result = await fetchStrategyDetail(strategy.strategy_id);
+            if (result.data) details.set(strategy.strategy_id, result.data);
+            else failures.push(`${strategy.strategy_id}: empty detail`);
+          } catch (error) {
+            failures.push(
+              `${strategy.strategy_id}: ${
+                error instanceof Error ? error.message : "detail load failed"
+              }`,
+            );
+          }
+        }),
+      );
       set({
         catalogVersion: list.catalog_version,
         strategies: list.strategies,
         strategyDetails: details,
         catalogLoading: false,
+        catalogError:
+          failures.length > 0
+            ? `以下策略定义加载失败，已禁用：${failures.join("；")}`
+            : null,
       });
-    } catch (e) {
+    } catch (error) {
       set({
-        catalogError: e instanceof Error ? e.message : "Failed to load catalog",
+        catalogError:
+          error instanceof Error ? error.message : "Failed to load catalog",
         catalogLoading: false,
       });
     }
@@ -103,14 +118,22 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
 
   fetchBatches: async () => {
     try {
-      const batches = await fetchBatches();
-      set({ batches, error: null });
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to load batches" });
+      set({ batches: await fetchBatches(), error: null });
+    } catch (error) {
+      set({
+        error:
+          error instanceof Error ? error.message : "Failed to load batches",
+      });
     }
   },
 
-  submitStrategyBatch: async (variants, evaluationStart, evaluationEnd, execution, idempotencyKey) => {
+  submitStrategyBatch: async (
+    variants,
+    evaluationStart,
+    evaluationEnd,
+    execution,
+    idempotencyKey,
+  ) => {
     set({ loading: true, error: null });
     try {
       const request: StrategyBatchRequest = {
@@ -120,102 +143,136 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
         evaluation_start_date: evaluationStart,
         evaluation_end_date: evaluationEnd,
         execution,
-        variants: variants.map((v) => ({
-          strategy_id: v.strategyId,
-          label: v.label || undefined,
-          params: v.params,
+        variants: variants.map((variant) => ({
+          strategy_id: variant.strategyId,
+          label: variant.label || undefined,
+          params: variant.params,
         })),
       };
       const result = await submitBatch(request);
       set({ loading: false });
       await get().fetchBatches();
       return result;
-    } catch (e) {
+    } catch (error) {
       set({
         loading: false,
-        error: e instanceof Error ? e.message : "Submission failed",
+        error:
+          error instanceof Error ? error.message : "Submission failed",
       });
-      throw e;
+      throw error;
     }
   },
 
   selectBatch: async (batchId: string) => {
-    set({ activeBatchId: batchId, activeBatch: null, comparison: null, events: [], error: null });
+    get().disconnectSSE();
+    set({
+      activeBatchId: batchId,
+      activeBatch: null,
+      comparison: null,
+      events: [],
+      error: null,
+    });
     try {
       const detail = await fetchBatchDetail(batchId);
       set({ activeBatch: detail });
-      // Load comparison if batch succeeded
-      if (
-        detail.state.stage === "SUCCEEDED" ||
-        detail.state.stage === "PARTIAL_SUCCEEDED"
-      ) {
-        try {
-          const reports = await fetchBatchReports(batchId);
-          set({ comparison: reports });
-        } catch {
-          // comparison optional
+      if (TERMINAL_STAGES.has(detail.state.stage)) {
+        if (
+          detail.state.stage === "SUCCEEDED" ||
+          detail.state.stage === "PARTIAL_SUCCEEDED"
+        ) {
+          try {
+            set({ comparison: await fetchBatchReports(batchId) });
+          } catch (error) {
+            set({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Failed to load comparison reports",
+            });
+          }
         }
+      } else {
+        get().connectBatchSSE(batchId);
       }
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to load batch" });
+    } catch (error) {
+      set({
+        error:
+          error instanceof Error ? error.message : "Failed to load batch",
+      });
     }
   },
 
   cancelActiveBatch: async () => {
-    const { activeBatchId } = get();
-    if (!activeBatchId) return false;
+    const batchId = get().activeBatchId;
+    if (!batchId) return false;
     try {
-      const result = await cancelBatch(activeBatchId);
+      const result = await cancelBatch(batchId);
       return result.cancelled;
-    } catch {
+    } catch (error) {
+      set({
+        error:
+          error instanceof Error ? error.message : "Failed to cancel batch",
+      });
       return false;
     }
   },
 
   connectBatchSSE: (batchId: string) => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
-    const lastSeq = get().events.length > 0
-      ? get().events[get().events.length - 1].seq
-      : null;
-
+    if (eventSource && connectedBatchId === batchId) return;
+    get().disconnectSSE();
+    const existingEvents = get().events;
+    const lastSequence =
+      existingEvents.length > 0
+        ? existingEvents[existingEvents.length - 1].seq
+        : null;
+    connectedBatchId = batchId;
     eventSource = connectBatchSSE(
       batchId,
-      lastSeq,
-      (event) => {
+      lastSequence,
+      (rawEvent) => {
+        const event = rawEvent as unknown as EventEnvelope;
         set((state) => {
-          const exists = state.events.some((e) => e.seq === event.seq);
-          if (exists) return {};
-          return { events: [...state.events, event as unknown as EventEnvelope] };
+          if (state.activeBatchId !== batchId) return {};
+          const exists = state.events.some((item) => item.seq === event.seq);
+          const events = exists ? state.events : [...state.events, event];
+          let activeBatch = state.activeBatch;
+          if (
+            activeBatch &&
+            event.scope === "BATCH" &&
+            typeof event.stage === "string"
+          ) {
+            activeBatch = {
+              ...activeBatch,
+              state: { ...activeBatch.state, stage: event.stage },
+            };
+          }
+          return { events, activeBatch };
         });
       },
       () => {
         eventSource = null;
-        get().fetchBatches();
-        if (get().activeBatchId) {
-          get().selectBatch(get().activeBatchId!);
+        connectedBatchId = null;
+        void get().fetchBatches();
+        if (get().activeBatchId === batchId) {
+          void get().selectBatch(batchId);
         }
       },
       () => {
-        eventSource = null;
+        // Native EventSource reconnects automatically and carries the query
+        // resume sequence. Keep the instance until a terminal event or an
+        // explicit disconnect.
       },
     );
   },
 
   disconnectSSE: () => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
+    eventSource?.close();
+    eventSource = null;
+    connectedBatchId = null;
   },
 
   reset: () => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
+    get().disconnectSSE();
     set({
       activeBatchId: null,
       activeBatch: null,
