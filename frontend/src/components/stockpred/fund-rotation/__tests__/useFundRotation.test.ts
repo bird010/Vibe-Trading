@@ -15,9 +15,10 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../api", () => api);
 
+import type { BatchDetail, EventEnvelope } from "../types";
 import { useFundRotation } from "../useFundRotation";
 
-const RUNNING_DETAIL = {
+const RUNNING_DETAIL: BatchDetail = {
   batch_id: "batch-running",
   state: {
     schema_version: "2",
@@ -43,7 +44,7 @@ const RUNNING_DETAIL = {
   },
   child_runs: [],
   mode: "RESEARCH_ONLY",
-} as const;
+};
 
 type SseCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -109,20 +110,19 @@ describe("useFundRotation SSE recovery", () => {
   });
 
   it("passes the last persisted sequence when reconnecting", () => {
+    const existingEvent: EventEnvelope = {
+      schema_version: "v2",
+      seq: 17,
+      ts: "2026-08-04T07:00:00+08:00",
+      event_type: "BATCH_STAGE",
+      scope: "BATCH",
+      batch_id: "batch-running",
+      stage: "RUNNING_STRATEGIES",
+    };
     useFundRotation.setState({
       activeBatchId: "batch-running",
       activeBatch: RUNNING_DETAIL,
-      events: [
-        {
-          schema_version: "v2",
-          seq: 17,
-          ts: "2026-08-04T07:00:00+08:00",
-          event_type: "BATCH_STAGE",
-          scope: "BATCH",
-          batch_id: "batch-running",
-          stage: "RUNNING_STRATEGIES",
-        },
-      ],
+      events: [existingEvent],
     });
 
     useFundRotation.getState().connectBatchSSE("batch-running");
@@ -140,7 +140,7 @@ describe("useFundRotation SSE recovery", () => {
     await useFundRotation.getState().selectBatch("batch-running");
     expect(callbacks).not.toBeNull();
 
-    const event = {
+    const event: EventEnvelope = {
       schema_version: "v2",
       seq: 18,
       ts: "2026-08-04T07:01:00+08:00",
@@ -149,8 +149,8 @@ describe("useFundRotation SSE recovery", () => {
       batch_id: "batch-running",
       stage: "COMPARING",
     };
-    callbacks?.onEvent(event);
-    callbacks?.onEvent(event);
+    callbacks?.onEvent(event as unknown as Record<string, unknown>);
+    callbacks?.onEvent(event as unknown as Record<string, unknown>);
 
     const state = useFundRotation.getState();
     expect(state.events).toHaveLength(1);
@@ -163,7 +163,7 @@ describe("useFundRotation SSE recovery", () => {
     const staleCallback = callbacks?.onEvent;
     useFundRotation.setState({ activeBatchId: "another-batch" });
 
-    staleCallback?.({
+    const staleEvent: EventEnvelope = {
       schema_version: "v2",
       seq: 19,
       ts: "2026-08-04T07:02:00+08:00",
@@ -171,7 +171,8 @@ describe("useFundRotation SSE recovery", () => {
       scope: "BATCH",
       batch_id: "batch-running",
       stage: "SUCCEEDED",
-    });
+    };
+    staleCallback?.(staleEvent as unknown as Record<string, unknown>);
 
     expect(useFundRotation.getState().events).toHaveLength(0);
   });
