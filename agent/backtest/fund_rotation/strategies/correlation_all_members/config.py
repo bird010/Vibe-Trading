@@ -7,6 +7,8 @@ this model and from its JSON Schema and resolved-config hash.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -76,11 +78,27 @@ class CorrelationAllMembersConfig(BaseModel):
 
     @classmethod
     def from_legacy(cls, legacy) -> "CorrelationAllMembersConfig":
-        """One-way adapter that copies only strategy-owned legacy fields."""
-        return cls(
-            **{
-                field_name: getattr(legacy, field_name)
-                for field_name in cls.model_fields
-                if hasattr(legacy, field_name)
-            }
-        )
+        """Copy strategy-owned fields from a legacy object or mapping.
+
+        The adapter is intentionally one-way: execution and date fields are
+        ignored even when present. A small explicit alias map handles older
+        callers that used ``rebalance_frequency`` before the legacy dataclass
+        standardized on ``rebalance_freq``.
+        """
+        aliases = {"rebalance_freq": ("rebalance_freq", "rebalance_frequency")}
+
+        def read(name: str):
+            candidates = aliases.get(name, (name,))
+            for candidate in candidates:
+                if isinstance(legacy, Mapping) and candidate in legacy:
+                    return True, legacy[candidate]
+                if hasattr(legacy, candidate):
+                    return True, getattr(legacy, candidate)
+            return False, None
+
+        strategy_values: dict[str, object] = {}
+        for field_name in cls.model_fields:
+            found, value = read(field_name)
+            if found:
+                strategy_values[field_name] = value
+        return cls(**strategy_values)
