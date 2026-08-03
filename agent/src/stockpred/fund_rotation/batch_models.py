@@ -18,7 +18,25 @@ from pydantic import (
 RESEARCH_ONLY = "RESEARCH_ONLY"
 SUPPORTED_SCHEMA_VERSION = "1"
 MAX_VARIANTS_PER_BATCH = 50
+MAX_VARIANT_PARAMS_BYTES = 64 * 1024
+MAX_BATCH_PAYLOAD_BYTES = 1024 * 1024
 _DECLARED_ALIASES: dict[str, str] = {}
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        text = json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "batch payload must contain finite JSON-serializable values"
+        ) from exc
+    return text.encode("utf-8")
 
 
 class BatchVariantRequest(BaseModel):
@@ -27,6 +45,16 @@ class BatchVariantRequest(BaseModel):
     strategy_id: str = Field(min_length=1, max_length=128)
     label: str | None = Field(default=None, max_length=128)
     params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _bounded_json_params(self) -> "BatchVariantRequest":
+        encoded = _canonical_json_bytes(self.params)
+        if len(encoded) > MAX_VARIANT_PARAMS_BYTES:
+            raise ValueError(
+                "variant params exceed the maximum canonical JSON size "
+                f"of {MAX_VARIANT_PARAMS_BYTES} bytes"
+            )
+        return self
 
 
 class BatchExecutionRequest(BaseModel):
@@ -104,10 +132,16 @@ class StrategyBatchRequest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _date_order(self) -> "StrategyBatchRequest":
+    def _request_constraints(self) -> "StrategyBatchRequest":
         if self.evaluation_start_date > self.evaluation_end_date:
             raise ValueError(
                 "evaluation_start_date must be <= evaluation_end_date"
+            )
+        encoded = _canonical_json_bytes(self.model_dump(mode="json"))
+        if len(encoded) > MAX_BATCH_PAYLOAD_BYTES:
+            raise ValueError(
+                "batch request exceeds the maximum canonical JSON size "
+                f"of {MAX_BATCH_PAYLOAD_BYTES} bytes"
             )
         return self
 
@@ -131,5 +165,4 @@ def canonical_payload_hash(request: StrategyBatchRequest) -> str:
     for old_name, new_name in _DECLARED_ALIASES.items():
         if old_name in payload:
             payload.setdefault(new_name, payload.pop(old_name))
-    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
