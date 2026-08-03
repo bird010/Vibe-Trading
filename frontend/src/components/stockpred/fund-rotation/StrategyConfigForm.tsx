@@ -1,6 +1,6 @@
 /** Render a strategy config from the Catalog JSON Schema. */
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 
 export interface SchemaField {
@@ -148,10 +148,18 @@ export function StrategyConfigForm({
     () => extractFields(schema, defaults, descriptions),
     [schema, defaults, descriptions],
   );
+  const unsupportedSignature = unsupported.join("\u0000");
+  const unsupportedCallbackRef = useRef(onUnsupportedChange);
 
   useEffect(() => {
-    onUnsupportedChange?.(unsupported);
-  }, [onUnsupportedChange, unsupported]);
+    unsupportedCallbackRef.current = onUnsupportedChange;
+  }, [onUnsupportedChange]);
+
+  useEffect(() => {
+    unsupportedCallbackRef.current?.(unsupported);
+    // Callback identity must not retrigger parent updates; only a changed
+    // unsupported-field set is semantically relevant.
+  }, [unsupportedSignature]);
 
   const fieldValue = (field: SchemaField): unknown => {
     const current = getAtPath(value, field.path);
