@@ -79,12 +79,15 @@ def build_slot_weights(
     selected_cluster_ids: list[int],
     representatives: Mapping[int, str | None],
     top_n: int,
-) -> tuple[dict[str, float], list[int], list[int]]:
+) -> tuple[dict[str, float], list[int], list[int], float]:
     """§8.3 — fixed ``1/top_n`` per selected slot.
 
     A slot whose cluster has no eligible representative stays cash; its weight
     is NEVER redistributed to the other slots. Returns
-    ``(weights, filled_slots, vacant_slots)``.
+    ``(weights, filled_slots, vacant_slots, cash_weight)``. ``cash_weight`` is
+    clamped at 0.0 because the sequential float sum of ``top_n * (1/top_n)``
+    overshoots 1.0 for some ``top_n`` (e.g. 9, 11, 18) and the Runner
+    contract requires ``cash_weight >= 0``.
     """
     slot_weight = 1.0 / top_n
     weights: dict[str, float] = {}
@@ -97,7 +100,8 @@ def build_slot_weights(
             filled.append(cid)
         else:
             vacant.append(cid)
-    return weights, filled, vacant
+    cash_weight = max(0.0, 1.0 - sum(weights.values()))
+    return weights, filled, vacant, cash_weight
 
 
 class CorrelationRepresentativeSession:
@@ -192,7 +196,7 @@ class CorrelationRepresentativeSession:
             momentum, top_n=cfg.top_n, threshold=0.0,
             cluster_members=self._frozen_members,
         )
-        weights, filled, vacant = build_slot_weights(
+        weights, filled, vacant, cash_weight = build_slot_weights(
             selected, self._representatives, cfg.top_n,
         )
         quality = (
@@ -205,7 +209,7 @@ class CorrelationRepresentativeSession:
             signal_date=signal_date,
             action=DecisionKind.SET_TARGETS,
             target_weights=dict(weights),
-            cash_weight=1.0 - sum(weights.values()),
+            cash_weight=cash_weight,
             quality_status=quality,
             diagnostics={
                 "filled_slots": filled,

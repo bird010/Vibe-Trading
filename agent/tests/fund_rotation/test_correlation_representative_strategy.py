@@ -168,27 +168,54 @@ class TestStrategyContract:
 
 class TestSlotWeights:
     def test_each_slot_fixed_one_over_top_n_without_amplification(self):
-        weights, filled, vacant = build_slot_weights(
+        weights, filled, vacant, cash = build_slot_weights(
             [1, 2], {1: "E1", 2: None}, top_n=3,
         )
         # Only one filled slot: 1/3 invested, 2/3 cash — never amplified.
         assert weights == {"E1": pytest.approx(1.0 / 3.0)}
         assert filled == [1]
         assert vacant == [2]
+        assert cash == pytest.approx(2.0 / 3.0)
 
     def test_all_slots_filled(self):
-        weights, filled, vacant = build_slot_weights(
+        weights, filled, vacant, cash = build_slot_weights(
             [1, 2], {1: "E1", 2: "E4"}, top_n=2,
         )
         assert weights == {"E1": pytest.approx(0.5), "E4": pytest.approx(0.5)}
         assert filled == [1, 2]
         assert vacant == []
+        assert cash == pytest.approx(0.0)
 
     def test_no_selected_clusters_is_all_cash(self):
-        weights, filled, vacant = build_slot_weights([], {}, top_n=3)
+        weights, filled, vacant, cash = build_slot_weights([], {}, top_n=3)
         assert weights == {}
         assert filled == []
         assert vacant == []
+        assert cash == pytest.approx(1.0)
+
+    def test_float_bad_top_n_full_slots_still_satisfy_runner_contract(self):
+        """The sequential float sum of top_n * (1/top_n) overshoots 1.0 for
+        top_n like 9/11/18; the produced decision must still pass the Runner
+        contract validation (cash_weight >= 0, weights sum + cash == 1)."""
+        from backtest.fund_rotation.contracts import (
+            DecisionKind,
+            TargetWeightDecision,
+            validate_target_decision,
+        )
+        for top_n in (9, 11, 18):
+            reps = {cid: f"E{cid}" for cid in range(1, top_n + 1)}
+            weights, filled, vacant, cash = build_slot_weights(
+                list(reps), reps, top_n,
+            )
+            assert len(filled) == top_n and vacant == []
+            decision = TargetWeightDecision(
+                decision_id=f"d-{top_n}", signal_date="20240105",
+                action=DecisionKind.SET_TARGETS,
+                target_weights=weights, cash_weight=cash,
+            )
+            # Must not raise: the decision is contract-valid for every top_n.
+            validate_target_decision(decision, set(weights), set())
+            assert cash >= 0.0
 
 
 # ── session decision flow ──

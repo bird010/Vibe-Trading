@@ -227,7 +227,9 @@ class CorrelationAllMembersSession:
             signal_date=signal_date,
             action=DecisionKind.SET_TARGETS,
             target_weights=dict(targets),
-            cash_weight=1.0 - sum(targets.values()),
+            # max(0.0, ...) guards float overshoot of the slot-weight sum for
+            # some top_n values (Runner contract requires cash_weight >= 0).
+            cash_weight=max(0.0, 1.0 - sum(targets.values())),
             quality_status=QualityStatus.VALID,
             diagnostics={
                 "num_clusters": len(self._clusters),
