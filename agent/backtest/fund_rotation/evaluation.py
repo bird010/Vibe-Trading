@@ -87,6 +87,25 @@ def _day_range(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
     return [start + pd.Timedelta(days=i) for i in range((end - start).days + 1)]
 
 
+def iso_week_endings(calendar) -> list[str]:
+    """Last actual trading day of each ISO week, ascending.
+
+    Mirrors the week grouping of ``compute_weekly_returns`` (ISO year-week,
+    last trading day kept). Shared by the Runner's warmup boundary and the
+    weekly baseline schedule so holiday-shortened weeks cannot shift decision
+    dates (§6).
+    """
+    endings: dict[tuple[int, int], str] = {}
+    for day in calendar:
+        ts = pd.Timestamp(day)
+        iso_year, iso_week, _ = ts.isocalendar()
+        key = (int(iso_year), int(iso_week))
+        ds = ts.strftime("%Y%m%d")
+        if key not in endings or ds > endings[key]:
+            endings[key] = ds
+    return sorted(endings.values())
+
+
 def _as_timestamps(index) -> list[pd.Timestamp]:
     return [pd.Timestamp(d) for d in index]
 

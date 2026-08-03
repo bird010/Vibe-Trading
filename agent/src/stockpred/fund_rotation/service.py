@@ -167,19 +167,28 @@ class FundRotationBacktestService:
             atomic_write_json(run_dir.path / "data_snapshot.json", data_snapshot)
 
             # PREPARING_RETURNS — advanced via stage_callback from pipeline
-            # Stage callback maps pipeline stage names to state machine transitions
+            # Stage callback maps pipeline stage names to state machine
+            # transitions. §13.4: the Runner adapter emits the generic tokens
+            # (PREPARING_DATA / GENERATING_SIGNALS); each expands into the
+            # persisted v1 state-machine sequence. Legacy v1 tokens stay
+            # supported for compatibility.
             stage_map = {
-                "PREPARING_RETURNS": TaskStage.PREPARING_RETURNS,
-                "CLUSTERING": TaskStage.CLUSTERING,
-                "GENERATING_TARGETS": TaskStage.GENERATING_TARGETS,
-                "EXECUTING": TaskStage.EXECUTING,
-                "COMPUTING_BENCHMARKS": TaskStage.COMPUTING_BENCHMARKS,
+                "PREPARING_RETURNS": [TaskStage.PREPARING_RETURNS],
+                "CLUSTERING": [TaskStage.CLUSTERING],
+                "GENERATING_TARGETS": [TaskStage.GENERATING_TARGETS],
+                "EXECUTING": [TaskStage.EXECUTING],
+                "COMPUTING_BENCHMARKS": [TaskStage.COMPUTING_BENCHMARKS],
+                "PREPARING_DATA": [TaskStage.PREPARING_RETURNS],
+                "GENERATING_SIGNALS": [
+                    TaskStage.CLUSTERING,
+                    TaskStage.GENERATING_TARGETS,
+                ],
             }
 
             def _stage_callback(stage_name: str) -> None:
-                target = stage_map.get(stage_name)
-                if target and sm.stage != target:
-                    advance(target)
+                for target in stage_map.get(stage_name, []):
+                    if sm.stage != target:
+                        advance(target)
 
             from backtest.fund_rotation.pipeline import run_signal_pipeline
             result = run_signal_pipeline(

@@ -360,7 +360,7 @@ def test_state_write_failure_cannot_publish_manifest(tmp_path, monkeypatch):
 
     def fake_pipeline(config, fund_daily, fund_adj, dim_fund, stage_callback):
         for stage in (
-            "PREPARING_RETURNS", "CLUSTERING", "GENERATING_TARGETS",
+            "PREPARING_DATA", "GENERATING_SIGNALS",
             "EXECUTING", "COMPUTING_BENCHMARKS",
         ):
             stage_callback(stage)
@@ -381,3 +381,30 @@ def test_state_write_failure_cannot_publish_manifest(tmp_path, monkeypatch):
     svc._execute_run(run_id, FundRotationConfig(k=1, top_n=1), params)
     assert not (run_dir.path / "manifest.json").exists()
     assert run_dir.read_state()["stage"] == "FAILED"
+
+
+def test_real_pipeline_through_service_reaches_succeeded(tmp_path, monkeypatch):
+    """§13.4 compat contract: the Runner adapter's generic stage tokens must
+    drive the persisted v1 state machine all the way to SUCCEEDED — without
+    stubbing the pipeline (only data loading is stubbed)."""
+    from tests.fund_rotation.test_pipeline import _synthetic_data
+
+    fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
+    svc = FundRotationBacktestService(tmp_path)
+    run_id = "real-pipeline"
+    RunDirectory(tmp_path, run_id).ensure()
+    monkeypatch.setattr(svc, "_load_data", lambda config: (
+        fund_daily, fund_adj, dim_fund, {"datasets": {}},
+    ))
+    config = FundRotationConfig(
+        k=3, top_n=2, min_training_weeks=20,
+        correlation_lookback_weeks=20, min_valid_weeks=10,
+        min_pairwise_weeks=10, recluster_interval_weeks=10,
+        momentum_window_weeks=4,
+        start_date="20220101", end_date="20230701",
+    )
+    svc._execute_run(run_id, config, {"k": 3, "top_n": 2})
+
+    state = RunDirectory(tmp_path, run_id).read_state()
+    assert state["stage"] == "SUCCEEDED", f"state={state}"
+    assert (RunDirectory(tmp_path, run_id).path / "manifest.json").exists()

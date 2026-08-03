@@ -8,29 +8,18 @@ weekly rebalance schedule (ISO week-endings, identical grouping to
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import pandas as pd
 
+from backtest.fund_rotation.evaluation import iso_week_endings
 from backtest.fund_rotation.universe import ExclusionReason, ExclusionRecord
 
+__all__ = ["iso_week_endings", "market_eligible_codes", "signal_date_eligible"]
 
-def iso_week_endings(calendar: Iterable[str]) -> list[str]:
-    """Last actual trading day of each ISO week, ascending.
 
-    Mirrors the week grouping of ``compute_weekly_returns`` (ISO year-week,
-    last trading day kept) so the decision schedule matches the legacy
-    week-ending index exactly.
-    """
-    endings: dict[tuple[int, int], str] = {}
-    for day in calendar:
-        ts = pd.Timestamp(day)
-        iso_year, iso_week, _ = ts.isocalendar()
-        key = (int(iso_year), int(iso_week))
-        ds = ts.strftime("%Y%m%d")
-        if key not in endings or ds > endings[key]:
-            endings[key] = ds
-    return sorted(endings.values())
+# iso_week_endings lives in the common evaluation module (shared with the
+# Runner's warmup boundary); re-exported here for the baseline session.
 
 
 def market_eligible_codes(view, codes: Sequence[str], signal_date: str) -> set[str]:

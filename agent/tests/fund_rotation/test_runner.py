@@ -35,7 +35,10 @@ from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 # ── synthetic market ──
 
 MARKET_DATES = pd.bdate_range("2024-01-02", "2024-02-02").strftime("%Y%m%d").tolist()
-SIMULATION_START = sorted(MARKET_DATES)[5]  # warmup_trade_days = 5
+# Weekly warmup boundary aligns with ISO week-endings: warmup=5 days means
+# 5//5 + 1 = 2 week-endings are needed, so the first decision date is the
+# second week-ending (Friday 20240112).
+SIMULATION_START = "20240112"
 
 
 def _market_frames():

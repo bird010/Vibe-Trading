@@ -1,12 +1,15 @@
 """Phase 2 Task 4 — baseline strategy through the common Runner (parity).
 
-Runs the Phase 0 golden fixture through BOTH the legacy fixed pipeline and the
-new strategy-neutral Runner driven by the correlation_all_members baseline
-strategy, then compares per rebalance day: targets, cluster history, orders,
-fills/blocks, equity, positions and metrics. Tolerances follow design §35.1.
+Since Phase 2 Task 6 the legacy ``run_signal_pipeline`` is itself a Runner
+adapter, so this module verifies ADAPTER vs DIRECT-RUNNER consistency (same
+targets/execution evidence through both entry points). The independent
+behavioral baseline is the frozen Phase 0 golden (test_phase0_golden.py),
+which pins the pre-migration pipeline output field-by-field under §35.1
+tolerances (with the documented Phase 0 approved_delta exemptions for the
+initial_nav anchor and full-interval positions).
 
-Divergences are NOT tolerated here (no approved_delta): the baseline must
-reproduce the legacy behavior exactly until a proven root cause says otherwise.
+Divergences beyond those are NOT tolerated here: the baseline must reproduce
+the legacy behavior exactly until a proven root cause says otherwise.
 """
 
 from __future__ import annotations

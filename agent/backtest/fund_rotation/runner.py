@@ -36,7 +36,7 @@ from backtest.fund_rotation.contracts import (
     TargetWeightDecision,
     validate_target_decision,
 )
-from backtest.fund_rotation.evaluation import EvaluationContext
+from backtest.fund_rotation.evaluation import EvaluationContext, iso_week_endings
 from backtest.fund_rotation.execution import (
     PipelineResult,
     build_execution_context,
@@ -151,17 +151,33 @@ class FundRotationBacktestRunner:
             {str(d) for d in self._fund_daily["trade_date"].astype(str).unique()}
         )
         warmup = int(requirements.warmup_trade_days)
-        if len(all_trade_dates) <= warmup:
-            return FundRotationRunResult(
-                status=SubRunStatus.FAILED,
-                error_code="INSUFFICIENT_HISTORY",
-                error_message=(
-                    f"need more than {warmup} trading days, have {len(all_trade_dates)}"
-                ),
-            )
-
-        # §6: first date at which the declared warmup is fully satisfied.
-        simulation_start = all_trade_dates[warmup]
+        if str(requirements.frequency).upper().startswith("W"):
+            # §6 weekly cadence: align the warmup boundary with ISO
+            # week-endings (N weekly returns need N+1 week-endings) so
+            # holiday-shortened weeks cannot shift the first decision date.
+            week_endings = iso_week_endings(all_trade_dates)
+            needed_endings = warmup // 5 + 1
+            if len(week_endings) < needed_endings:
+                return FundRotationRunResult(
+                    status=SubRunStatus.FAILED,
+                    error_code="INSUFFICIENT_HISTORY",
+                    error_message=(
+                        f"need at least {needed_endings} week-endings, "
+                        f"have {len(week_endings)}"
+                    ),
+                )
+            simulation_start = week_endings[needed_endings - 1]
+        else:
+            if len(all_trade_dates) <= warmup:
+                return FundRotationRunResult(
+                    status=SubRunStatus.FAILED,
+                    error_code="INSUFFICIENT_HISTORY",
+                    error_message=(
+                        f"need more than {warmup} trading days, have {len(all_trade_dates)}"
+                    ),
+                )
+            # §6: first date at which the declared warmup is fully satisfied.
+            simulation_start = all_trade_dates[warmup]
         evaluation_dates = [d.strftime("%Y%m%d") for d in evaluation.trading_dates]
         if not evaluation_dates:
             return FundRotationRunResult(

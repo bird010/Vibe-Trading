@@ -322,6 +322,31 @@ class TestPipelineE2E:
                 f"got {len(week_endings)}"
             )
 
+    def test_sparse_calendar_first_signal_aligns_with_week_index(self):
+        """Holiday-shortened weeks must not shift the first decision date: the
+        warmup boundary aligns with ISO week-endings, so the first signal is
+        the (min_weeks_needed+1)-th week-ending regardless of per-week
+        trading-day counts (§6, sparse calendar)."""
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=60)
+        # Simulate a holiday-shortened week (drop its Monday/Tuesday).
+        drop_dates = {"20220228", "20220301"}
+        fund_daily = fund_daily[~fund_daily["trade_date"].isin(drop_dates)]
+        fund_adj = fund_adj[~fund_adj["trade_date"].isin(drop_dates)]
+        config = FundRotationConfig(
+            k=3, top_n=2, min_training_weeks=20, correlation_lookback_weeks=20,
+            min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101", end_date="20230401",
+        )
+        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+
+        from backtest.fund_rotation.evaluation import iso_week_endings
+        endings = iso_week_endings(
+            sorted(fund_daily["trade_date"].astype(str).unique())
+        )
+        # min_weeks_needed = 20 -> first signal at the 21st week-ending.
+        assert min(result.weekly_targets) == endings[20]
+
     def test_52_week_boundary_first_signal_and_insufficient(self):
         """§32.1 — 52 week-endings cannot form a complete 52-return window (no
         signal, not an error); 53 week-endings produce the first signal; fewer
