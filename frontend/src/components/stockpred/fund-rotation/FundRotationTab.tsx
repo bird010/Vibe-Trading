@@ -14,6 +14,7 @@ import {
   type VariantDraft,
 } from "./StrategyVariantsEditor";
 import { StrategyComparison } from "./StrategyComparison";
+import type { StrategyDetail } from "./types";
 
 const RESEARCH_WARNING = "RESEARCH_ONLY · 仅供研究，不构成投资建议";
 const TERMINAL_STAGES = new Set([
@@ -99,6 +100,13 @@ export function FundRotationTab() {
         ]),
       ),
     [strategies, strategyDetails],
+  );
+  const availableStrategyDetails = useMemo(
+    () =>
+      Array.from(detailMap.values()).filter(
+        (detail): detail is StrategyDetail => detail !== null,
+      ),
+    [detailMap],
   );
 
   const payloadSignature = useMemo(
@@ -217,9 +225,7 @@ export function FundRotationTab() {
             </div>
           ) : (
             <StrategyVariantsEditor
-              strategies={Array.from(detailMap.values()).filter(
-                (detail): detail is NonNullable<typeof detail> => detail !== null,
-              )}
+              strategies={availableStrategyDetails}
               variants={variants}
               onChange={(next) => {
                 setVariants(next);
