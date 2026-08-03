@@ -148,7 +148,6 @@ export function StrategyConfigForm({
     () => extractFields(schema, defaults, descriptions),
     [schema, defaults, descriptions],
   );
-  const unsupportedSignature = unsupported.join("\u0000");
   const unsupportedCallbackRef = useRef(onUnsupportedChange);
 
   useEffect(() => {
@@ -157,9 +156,9 @@ export function StrategyConfigForm({
 
   useEffect(() => {
     unsupportedCallbackRef.current?.(unsupported);
-    // Callback identity must not retrigger parent updates; only a changed
-    // unsupported-field set is semantically relevant.
-  }, [unsupportedSignature]);
+    // Callback identity must not retrigger parent updates; the memoized field
+    // set changes only when the Catalog schema/defaults change.
+  }, [unsupported]);
 
   const fieldValue = (field: SchemaField): unknown => {
     const current = getAtPath(value, field.path);
