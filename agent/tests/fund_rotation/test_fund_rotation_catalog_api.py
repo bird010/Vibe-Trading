@@ -84,8 +84,8 @@ class TestStrategyDetail:
         assert schema["title"] == "CorrelationRepresentativeConfig"
         assert body["config_schema_version"]
         assert body["config_schema_hash"]
-        # Cacheability: ETag carries the schema content hash.
-        assert response.headers.get("ETag") == body["config_schema_hash"]
+        # Cacheability: RFC 7232 quoted ETag carrying the schema content hash.
+        assert response.headers.get("ETag") == '"' + body["config_schema_hash"] + '"'
         # Resolved defaults and per-parameter descriptions.
         assert body["default_config"]["representative_min_cluster_corr"] == 0.85
         assert "聚类簇数量" in body["parameter_descriptions"]["k"]
@@ -95,6 +95,14 @@ class TestStrategyDetail:
         assert {
             "cluster_history", "gates", "representatives", "exclusions", "decisions",
         } <= set(body["artifact_roles"])
+
+    def test_if_none_match_returns_304(self, tmp_path):
+        client = _client(tmp_path)
+        url = "/stockpred/fund-rotation/strategies/correlation_representative"
+        etag = client.get(url).headers["ETag"]
+        cached = client.get(url, headers={"If-None-Match": etag})
+        assert cached.status_code == 304
+        assert cached.headers["ETag"] == etag
 
     def test_baseline_detail_roles(self, tmp_path):
         body = _client(tmp_path).get(

@@ -41,6 +41,10 @@ def register_fund_rotation_routes(
     # any background task can be created — never serving a half-built list
     # (§16.3).
     catalog = FundRotationStrategyCatalog(list(default_fund_rotation_strategies()))
+    # Fail fast on any entry whose DEFAULT config cannot resolve — a broken
+    # catalog must never surface as a half-built list or a runtime 500 (§16.3).
+    for _entry in catalog.list():
+        catalog.resolve(_entry.strategy_id, {})
     catalog_version = hashlib.sha256(
         json.dumps(
             [
@@ -120,7 +124,7 @@ def register_fund_rotation_routes(
         "/stockpred/fund-rotation/strategies/{strategy_id}",
         dependencies=[Depends(require_auth)],
     )
-    def strategy_detail(strategy_id: str, response: Response) -> dict[str, Any]:
+    def strategy_detail(strategy_id: str, request: Request, response: Response) -> Any:
         try:
             binding = catalog.resolve(strategy_id, {})
         except CatalogError as exc:
@@ -132,6 +136,10 @@ def register_fund_rotation_routes(
 
         entry = catalog.require(strategy_id)
         spec = binding.spec
+        # RFC 7232 entity-tag; honor If-None-Match with 304.
+        etag = f'"{spec.config_schema_hash}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
         schema = binding.registered.config_model.model_json_schema()
         descriptions = {
             name: str(prop.get("description", ""))
@@ -158,7 +166,7 @@ def register_fund_rotation_routes(
             ),
         )
         # Schema content hash for frontend caching.
-        response.headers["ETag"] = spec.config_schema_hash
+        response.headers["ETag"] = etag
         return detail.model_dump(mode="json")
 
     @app.get("/stockpred/fund-rotation/defaults", dependencies=[Depends(require_auth)])
