@@ -2,8 +2,8 @@
 
 Only technically successful sub-runs whose equity index exactly equals the
 shared evaluation calendar participate. Metrics are recomputed from raw equity
-and the comparison fingerprint binds the actual resolved execution contract,
-not a static version label.
+and the comparison fingerprint binds the actual resolved execution contract
+and the implementation identity of every comparison policy.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -18,11 +19,32 @@ import pandas as pd
 from backtest.fund_rotation.metrics import compute_performance_metrics
 
 
+def _policy_source_hash(relative_path: str) -> str:
+    """Return a fail-fast source identity for one comparison policy."""
+    agent_root = Path(__file__).resolve().parents[3]
+    path = agent_root / relative_path
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot read comparison policy source {relative_path}: {exc}"
+        ) from exc
+    return hashlib.sha256(content).hexdigest()
+
+
 CONTRACT_VERSIONS = {
-    "universe_policy_version": "v1",
-    "return_policy_version": "v1",
-    "benchmark_contract_version": "v1",
-    "metric_contract_version": "v1",
+    "universe_policy_version": _policy_source_hash(
+        "backtest/fund_rotation/universe.py"
+    ),
+    "return_policy_version": _policy_source_hash(
+        "backtest/fund_rotation/returns.py"
+    ),
+    "benchmark_contract_version": _policy_source_hash(
+        "backtest/fund_rotation/benchmarks.py"
+    ),
+    "metric_contract_version": _policy_source_hash(
+        "backtest/fund_rotation/metrics.py"
+    ),
 }
 
 CONTRACT_COMPONENT_KEYS = {
@@ -109,8 +131,8 @@ def comparison_contract_fingerprint(
     """Return the eight comparison-contract components and fingerprint.
 
     ``execution_contract`` must be the fully resolved common execution config,
-    including server defaults. The component stores its canonical hash while
-    the resolved document is persisted separately in child specifications.
+    including server defaults. Policy components are hashes of the exact source
+    files implementing universe, return, benchmark and metric semantics.
     """
     resolved_execution = dict(execution_contract or {"version": "v1"})
     components = {
