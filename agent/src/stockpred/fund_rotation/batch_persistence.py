@@ -158,8 +158,11 @@ class BatchPersistence:
                 atomic_write_json(slot / "record.json", record)
             except Exception:
                 # Do not leave a zombie slot behind when the write itself
-                # fails; the key stays retryable.
+                # fails (clears any half-written tmp); the key stays retryable.
                 try:
+                    for leftover in slot.iterdir():
+                        if leftover.is_file():
+                            leftover.unlink()
                     slot.rmdir()
                 except OSError:
                     pass
