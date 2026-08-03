@@ -39,6 +39,7 @@ from backtest.fund_rotation.strategies.correlation_all_members.config import (
     CorrelationAllMembersConfig,
 )
 from backtest.fund_rotation.strategies.correlation_all_members.signals import (
+    ensure_instrument_pool,
     iso_week_endings,
     signal_date_eligible,
 )
@@ -109,29 +110,7 @@ class CorrelationAllMembersSession:
     def _ensure_pool(self, context: StrategyDecisionContext) -> None:
         if self._dim_pool is not None:
             return
-        view = context.data_view
-        instruments = view.eligible_universe()
-        dim = pd.DataFrame([
-            {"ts_code": i.ts_code, "name": i.name, "list_date": i.list_date}
-            for i in instruments
-        ])
-        # INSUFFICIENT_ADJ_COVERAGE: drop pool codes whose adj records do not
-        # cover every daily record (legacy pool pre-filter). Read causally —
-        # identical to the legacy result whenever coverage is complete.
-        bars = view.daily_bars(["close"])
-        adj = view.fund_adjustments()
-        if not bars.empty and not adj.empty:
-            daily_keys = bars[["ts_code", "trade_date"]].astype(str).drop_duplicates()
-            adj_keys = adj[["ts_code", "trade_date"]].astype(str).drop_duplicates()
-            coverage = daily_keys.merge(
-                adj_keys, on=["ts_code", "trade_date"], how="left", indicator=True,
-            )
-            incomplete = set(
-                coverage.loc[coverage["_merge"] == "left_only", "ts_code"].unique()
-            )
-            if incomplete:
-                dim = dim[~dim["ts_code"].astype(str).isin(incomplete)]
-        self._dim_pool = dim.reset_index(drop=True)
+        self._dim_pool = ensure_instrument_pool(context.data_view)
 
     def _eligible_at_signal(self, view, signal_date: str) -> tuple[list[str], list]:
         """Legacy eligibility order: historical → market (close & adj), with
