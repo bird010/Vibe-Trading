@@ -25,6 +25,7 @@ from backtest.fund_rotation.strategies.correlation_representative.representative
 from src.stockpred.fund_rotation.batch_models import StrategyBatchRequest
 from src.stockpred.fund_rotation.comparison import (
     comparison_contract_fingerprint,
+    evaluation_calendar_hash,
 )
 
 
@@ -80,6 +81,34 @@ class TestConfigurationBoundaries:
         assert merged.warmup_trade_days == 260
         assert merged.required_datasets == ("fund", "fund_adj")
         assert merged.needs_benchmark is True
+
+    def test_from_legacy_accepts_object_and_ignores_execution_fields(self):
+        legacy = SimpleNamespace(
+            k=6,
+            top_n=2,
+            rebalance_freq="M",
+            initial_capital=88_000_000,
+            commission_rate=0.25,
+            start_date="20200101",
+        )
+        converted = CorrelationAllMembersConfig.from_legacy(legacy)
+        assert converted.k == 6
+        assert converted.top_n == 2
+        assert converted.rebalance_freq == "M"
+        assert "initial_capital" not in converted.model_fields
+
+    def test_from_legacy_accepts_mapping_and_old_frequency_alias(self):
+        converted = CorrelationAllMembersConfig.from_legacy(
+            {
+                "k": 5,
+                "top_n": 2,
+                "rebalance_frequency": "M",
+                "initial_capital": 1,
+            }
+        )
+        assert converted.k == 5
+        assert converted.top_n == 2
+        assert converted.rebalance_freq == "M"
 
 
 class TestBatchRequestValidation:
@@ -141,7 +170,7 @@ class TestComparisonIdentity:
         assert fingerprint_a != fingerprint_b
         assert len(components_a) == 8
 
-    def test_calendar_order_is_identity_bearing(self):
+    def test_calendar_order_is_not_identity_bearing(self):
         common = {
             "framework_implementation_hash": "framework",
             "data_snapshot_fingerprint": "data",
@@ -155,7 +184,14 @@ class TestComparisonIdentity:
             **common,
             evaluation_calendar=["20240103", "20240102"],
         )
-        assert first != second
+        assert first == second
+        assert evaluation_calendar_hash(
+            ["20240103", "20240102"]
+        ) == evaluation_calendar_hash(["20240102", "20240103"])
+
+    def test_calendar_duplicates_are_rejected(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            evaluation_calendar_hash(["20240102", "20240102"])
 
 
 class _PointInTimeView:
