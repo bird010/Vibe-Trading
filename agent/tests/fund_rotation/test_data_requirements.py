@@ -19,8 +19,6 @@ from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
 class TestConfigDependentRequirements:
     def test_warmup_scales_with_lookback(self):
         strategy = CorrelationAllMembersStrategy()
-        # warmup = one full window of max(min_training, lookback) weekly
-        # returns; pin min_training so the lookback difference dominates.
         small = strategy.resolve_requirements(
             CorrelationAllMembersConfig(
                 correlation_lookback_weeks=20, min_training_weeks=20,
@@ -36,7 +34,6 @@ class TestConfigDependentRequirements:
     def test_requirements_declare_adv_and_benchmark_fields(self):
         strategy = CorrelationAllMembersStrategy()
         req = strategy.resolve_requirements(CorrelationAllMembersConfig())
-        # ADV20 needs turnover/amount; benchmark needed.
         assert "amount" in req.required_fields
         assert "adj_factor" in req.required_fields
         assert req.needs_benchmark is True
@@ -45,7 +42,6 @@ class TestConfigDependentRequirements:
     def test_resolve_is_pure_function_of_config(self):
         strategy = CorrelationAllMembersStrategy()
         cfg = CorrelationAllMembersConfig(correlation_lookback_weeks=30)
-        # Same config -> identical requirements (no I/O, no clock, no randomness).
         assert strategy.resolve_requirements(cfg) == strategy.resolve_requirements(cfg)
 
     def test_requirements_carry_no_clustering_gate_params(self):
@@ -96,7 +92,7 @@ class TestMergeRequirements:
         )
         assert merge_requirements([a, b]).needs_benchmark is True
 
-    def test_conflicting_frequency_fails(self):
+    def test_mixed_frequency_is_explicit(self):
         a = StrategyDataRequirements(
             required_datasets=(), required_fields=(), warmup_trade_days=10,
             frequency="W", needs_benchmark=False,
@@ -105,8 +101,8 @@ class TestMergeRequirements:
             required_datasets=(), required_fields=(), warmup_trade_days=10,
             frequency="M", needs_benchmark=False,
         )
-        with pytest.raises(ValueError, match="conflicting"):
-            merge_requirements([a, b])
+        merged = merge_requirements([a, b])
+        assert merged.frequency == "MIXED"
 
     def test_empty_merge_fails(self):
         with pytest.raises(ValueError):
