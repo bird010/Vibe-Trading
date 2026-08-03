@@ -13,26 +13,53 @@ from backtest.fund_rotation.catalog import (
     CatalogError,
     FundRotationStrategyCatalog,
 )
+from backtest.fund_rotation.strategies.registry import (
+    default_fund_rotation_strategies,
+)
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor
 from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
     CorrelationAllMembersStrategy,
 )
+from backtest.fund_rotation.strategies.correlation_representative.strategy import (
+    CorrelationRepresentativeStrategy,
+)
 
 
 def _catalog() -> FundRotationStrategyCatalog:
-    return FundRotationStrategyCatalog([CorrelationAllMembersStrategy])
+    return FundRotationStrategyCatalog(list(default_fund_rotation_strategies()))
 
 
 class TestCatalogRegistration:
     def test_list_sorted_and_immutable(self):
         catalog = _catalog()
         entries = catalog.list()
-        assert len(entries) == 1
-        assert entries[0].strategy_id == "correlation_all_members"
-        assert entries[0].interface_version == "1.0"
-        assert entries[0].implementation_hash  # non-empty
+        assert [e.strategy_id for e in entries] == [
+            "correlation_all_members", "correlation_representative",
+        ]
+        for entry in entries:
+            assert entry.interface_version == "1.0"
+            assert entry.implementation_hash  # non-empty
         with pytest.raises(Exception):
             entries[0].strategy_id = "x"  # frozen
+
+    def test_default_whitelist_contains_both_strategies(self):
+        strategies = default_fund_rotation_strategies()
+        assert CorrelationAllMembersStrategy in strategies
+        assert CorrelationRepresentativeStrategy in strategies
+
+    def test_representative_implementation_hash_stable_and_distinct(self):
+        catalog = _catalog()
+        entries = {e.strategy_id: e for e in catalog.list()}
+        baseline_hash = entries["correlation_all_members"].implementation_hash
+        representative_hash = entries["correlation_representative"].implementation_hash
+        assert representative_hash != baseline_hash
+        # Stable across catalog rebuilds (startup-fixed source hashing).
+        rebuilt = _catalog()
+        rebuilt_entries = {e.strategy_id: e for e in rebuilt.list()}
+        assert (
+            rebuilt_entries["correlation_representative"].implementation_hash
+            == representative_hash
+        )
 
     def test_require_unknown_raises_not_found(self):
         catalog = _catalog()
@@ -186,3 +213,51 @@ class TestCatalogResolve:
         catalog = _catalog()
         binding = catalog.resolve("correlation_all_members", {})
         assert isinstance(binding.strategy, FundRotationStrategy)
+
+
+class TestRepresentativeCatalogResolve:
+    """Phase 3 Task 6 — the representative strategy resolves through the same
+    catalog machinery: descriptor, schema, defaults, hashes, requirements."""
+
+    def test_resolve_fills_design_section_4_defaults(self):
+        catalog = _catalog()
+        binding = catalog.resolve("correlation_representative", {})
+        resolved = binding.spec.resolved_config
+        assert resolved["k"] == 8
+        assert resolved["top_n"] == 3
+        assert resolved["correlation_lookback_weeks"] == 52
+        assert resolved["representative_candidate_count"] == 5
+        assert resolved["representative_min_cluster_corr"] == 0.85
+        assert resolved["max_cluster_share_warn"] == 0.50
+        assert resolved["max_cluster_share_reject"] == 0.80
+        assert resolved["min_effective_cluster_count_warn"] == 4.0
+        assert resolved["min_effective_cluster_count_reject"] == 2.5
+
+    def test_schema_hash_and_requirements_populated(self):
+        catalog = _catalog()
+        binding = catalog.resolve("correlation_representative", {})
+        spec = binding.spec
+        assert spec.strategy_id == "correlation_representative"
+        assert spec.implementation_hash
+        assert spec.config_schema_hash
+        assert spec.resolved_config_hash
+        assert spec.resolved_requirements.frequency == "weekly"
+        assert "amount" in spec.resolved_requirements.required_fields
+        assert spec.resolved_requirements.warmup_trade_days == (52 + 1) * 5 - 1
+
+    def test_gate_threshold_change_changes_config_hash(self):
+        catalog = _catalog()
+        a = catalog.resolve("correlation_representative", {})
+        b = catalog.resolve(
+            "correlation_representative", {"max_cluster_share_reject": 0.9},
+        )
+        assert a.spec.resolved_config_hash != b.spec.resolved_config_hash
+
+    def test_conflicting_gate_thresholds_rejected_at_resolve(self):
+        catalog = _catalog()
+        with pytest.raises(CatalogError) as exc_info:
+            catalog.resolve(
+                "correlation_representative",
+                {"max_cluster_share_warn": 0.9, "max_cluster_share_reject": 0.8},
+            )
+        assert exc_info.value.code == FUND_ROTATION_CONFIG_INVALID

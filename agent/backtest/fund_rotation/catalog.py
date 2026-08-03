@@ -31,6 +31,9 @@ FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID = "FUND_ROTATION_STRATEGY_SNAPSHOT_INVAL
 
 SUPPORTED_INTERFACE_VERSION = "1.0"
 
+# The explicit strategy whitelist lives in ``strategies.registry`` (kept out
+# of the catalog machinery so the catalog stays strategy-agnostic, §16.1).
+
 
 class CatalogError(Exception):
     """Structured catalog error with a stable code (returned before any
