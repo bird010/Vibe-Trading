@@ -89,15 +89,22 @@ def _canonical_hash(obj: object) -> str:
 
 
 def _snapshot_strategy(strategy_cls: type) -> StrategyImplementationSnapshot:
-    """Capture the complete strategy package and imported strategy helpers."""
+    """Capture the complete strategy package and imported strategy helpers.
+
+    Snapshot construction runs during catalog startup and must fail through the
+    catalog's structured error boundary regardless of whether the underlying
+    filesystem/inspection failure is an ``OSError``, a mocked runtime failure,
+    or another ordinary exception. Process-control exceptions are deliberately
+    not caught because ``Exception`` excludes ``KeyboardInterrupt`` and
+    ``SystemExit``.
+    """
     from src.stockpred.fund_rotation.strategy_snapshot import (
-        FrameworkSnapshotError,
         snapshot_strategy_package,
     )
 
     try:
         snapshot = snapshot_strategy_package(strategy_cls)
-    except (FrameworkSnapshotError, OSError, TypeError) as exc:
+    except Exception as exc:
         raise CatalogError(
             FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID,
             f"cannot snapshot strategy {strategy_cls!r}: {exc}",
