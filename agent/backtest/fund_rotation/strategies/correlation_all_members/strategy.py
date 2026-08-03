@@ -40,9 +40,13 @@ from backtest.fund_rotation.strategies.correlation_all_members.config import (
 )
 from backtest.fund_rotation.strategies.correlation_all_members.signals import (
     iso_week_endings,
-    market_eligible_codes,
+    signal_date_eligible,
 )
-from backtest.fund_rotation.universe import check_historical_eligibility
+from backtest.fund_rotation.universe import (
+    ExclusionReason,
+    ExclusionRecord,
+    check_historical_eligibility,
+)
 
 DESCRIPTOR = FundRotationStrategyDescriptor(
     id="correlation_all_members",
@@ -80,6 +84,7 @@ class CorrelationAllMembersSession:
         self._clusters: dict[str, int] = {}
         self._last_recluster_week = -config.recluster_interval_weeks
         self._cluster_history: list[dict] = []
+        self._exclusions: list = []
         self._dim_pool: pd.DataFrame | None = None
 
     def scheduled_dates(
@@ -128,11 +133,14 @@ class CorrelationAllMembersSession:
                 dim = dim[~dim["ts_code"].astype(str).isin(incomplete)]
         self._dim_pool = dim.reset_index(drop=True)
 
-    def _eligible_at_signal(self, view, signal_date: str) -> list[str]:
-        """Legacy eligibility order: historical → market (close & adj)."""
-        eligible, _ = check_historical_eligibility(self._dim_pool, signal_date)
-        market_ok = market_eligible_codes(view, eligible, signal_date)
-        return [c for c in eligible if c in market_ok]
+    def _eligible_at_signal(self, view, signal_date: str) -> tuple[list[str], list]:
+        """Legacy eligibility order: historical → market (close & adj), with
+        exclusion records for the market step."""
+        eligible, _historical_excluded = check_historical_eligibility(
+            self._dim_pool, signal_date,
+        )
+        kept, market_excluded = signal_date_eligible(view, eligible, signal_date)
+        return kept, market_excluded
 
     # ── decision ──
 
@@ -149,16 +157,40 @@ class CorrelationAllMembersSession:
         # rows ending at the signal week (never includes future data, §6).
         window = view.returns("weekly", cfg.correlation_lookback_weeks)
 
-        eligible = self._eligible_at_signal(view, signal_date)
-
         weeks_since_recluster = week_idx - self._last_recluster_week
-        if weeks_since_recluster >= cfg.recluster_interval_weeks or not self._clusters:
-            valid_codes = [c for c in eligible if c in window.columns]
+        reclustering = (
+            weeks_since_recluster >= cfg.recluster_interval_weeks
+            or not self._clusters
+        )
+        if reclustering:
+            # Legacy recluster block records historical + market exclusions
+            # before the valid-weeks gate and pairwise exclusion.
+            eligible_recluster, historical_excluded = check_historical_eligibility(
+                self._dim_pool, signal_date,
+            )
+            self._exclusions.extend(historical_excluded)
+            kept_recluster, market_excluded = signal_date_eligible(
+                view, eligible_recluster, signal_date,
+            )
+            self._exclusions.extend(market_excluded)
+
+            valid_codes = [c for c in kept_recluster if c in window.columns]
             if cfg.min_valid_weeks > 0 and valid_codes:
                 counts = window[valid_codes].notna().sum()
-                valid_codes = [
+                qualified_codes = [
                     c for c in valid_codes if counts.get(c, 0) >= cfg.min_valid_weeks
                 ]
+                for code in sorted(set(valid_codes) - set(qualified_codes)):
+                    self._exclusions.append(ExclusionRecord(
+                        ts_code=code,
+                        reason=ExclusionReason.INSUFFICIENT_VALID_WEEKS,
+                        details=(
+                            f"valid_weeks={int(counts.get(code, 0))}; "
+                            f"required={cfg.min_valid_weeks}"
+                        ),
+                        signal_date=signal_date,
+                    ))
+                valid_codes = qualified_codes
             if len(valid_codes) < cfg.k:
                 raise ValueError(
                     f"Recluster at {signal_date}: only {len(valid_codes)} eligible "
@@ -167,7 +199,8 @@ class CorrelationAllMembersSession:
             dist = compute_correlation_distance(
                 window[valid_codes], min_pairwise_weeks=cfg.min_pairwise_weeks,
             )
-            kept_codes, _pair_excluded = iterative_exclude(dist, k=cfg.k)
+            kept_codes, pair_excluded = iterative_exclude(dist, k=cfg.k)
+            self._exclusions.extend(pair_excluded)
             sub_dist = dist.loc[kept_codes, kept_codes]
             self._clusters = hierarchical_cluster(sub_dist, k=cfg.k)
             self._last_recluster_week = week_idx
@@ -176,6 +209,11 @@ class CorrelationAllMembersSession:
                 "clusters": dict(self._clusters),
                 "num_etfs": len(self._clusters),
             })
+
+        # Target eligibility at the signal date (every week; the market
+        # exclusions are recorded exactly as the legacy Step 6 did).
+        eligible, market_excluded = self._eligible_at_signal(view, signal_date)
+        self._exclusions.extend(market_excluded)
 
         if not self._clusters:
             # Legacy "continue" branch (no clusters yet): no target event.
@@ -212,17 +250,28 @@ class CorrelationAllMembersSession:
             target_weights=dict(targets),
             cash_weight=1.0 - sum(targets.values()),
             quality_status=QualityStatus.VALID,
-            diagnostics={"num_clusters": len(self._clusters)},
+            diagnostics={
+                "num_clusters": len(self._clusters),
+                # Eligible codes at the signal date feed the legacy dynamic
+                # equal-weight benchmark (§10) through the compat adapter.
+                "eligible_codes": list(eligible),
+            },
         )
 
     def finalize(self) -> StrategyDiagnostics:
-        # Cluster diagnostics are strategy-specific artifacts (§12), kept in
-        # the session's private state until publication (Phase 2 Task 5).
+        # Cluster diagnostics and the exclusion trail are strategy-specific
+        # artifacts (§12), kept in the session's private state until
+        # publication (Phase 2 Task 5).
         return StrategyDiagnostics(artifacts=(
             StrategyArtifact(
                 role="cluster_history",
                 media_type="application/json",
                 payload=self._cluster_history,
+            ),
+            StrategyArtifact(
+                role="exclusions",
+                media_type="application/json",
+                payload=self._exclusions,
             ),
         ))
 

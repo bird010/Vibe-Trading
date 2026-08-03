@@ -12,6 +12,8 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
+from backtest.fund_rotation.universe import ExclusionReason, ExclusionRecord
+
 
 def iso_week_endings(calendar: Iterable[str]) -> list[str]:
     """Last actual trading day of each ISO week, ascending.
@@ -34,19 +36,48 @@ def iso_week_endings(calendar: Iterable[str]) -> list[str]:
 def market_eligible_codes(view, codes: Sequence[str], signal_date: str) -> set[str]:
     """§8.2 — codes with a positive close AND positive adj_factor exactly on
     the signal date, read through the causal data view."""
+    kept, _rejected = signal_date_eligible(view, codes, signal_date)
+    return set(kept)
+
+
+def signal_date_eligible(
+    view, codes: Sequence[str], signal_date: str,
+) -> tuple[list[str], list[ExclusionRecord]]:
+    """§8.2 — ordered market eligibility with exclusion records.
+
+    Mirrors the legacy pipeline semantics: a code missing a positive close on
+    the signal date is NO_VALID_CLOSE; otherwise a missing/non-positive
+    adj_factor is INSUFFICIENT_ADJ_COVERAGE.
+    """
     bars = view.daily_bars(["close"])
     sig_bars = bars[bars["trade_date"].astype(str) == signal_date]
-    close_ok = {
-        str(code)
+    close_by_code = {
+        str(code): pd.to_numeric(close, errors="coerce")
         for code, close in zip(sig_bars["ts_code"], sig_bars["close"])
-        if pd.to_numeric(close, errors="coerce") is not None
-        and float(pd.to_numeric(close, errors="coerce")) > 0
     }
     adj = view.fund_adjustments()
     sig_adj = adj[adj["trade_date"].astype(str) == signal_date]
-    adj_ok = {
-        str(code)
+    adj_by_code = {
+        str(code): pd.to_numeric(factor, errors="coerce")
         for code, factor in zip(sig_adj["ts_code"], sig_adj["adj_factor"])
-        if float(pd.to_numeric(factor, errors="coerce")) > 0
     }
-    return set(codes) & close_ok & adj_ok
+    kept: list[str] = []
+    rejected: list[ExclusionRecord] = []
+    for code in codes:
+        close = close_by_code.get(str(code))
+        factor = adj_by_code.get(str(code))
+        if close is None or pd.isna(close) or float(close) <= 0:
+            rejected.append(ExclusionRecord(
+                ts_code=str(code), reason=ExclusionReason.NO_VALID_CLOSE,
+                details="missing or non-positive close on signal date",
+                signal_date=signal_date,
+            ))
+        elif factor is None or pd.isna(factor) or float(factor) <= 0:
+            rejected.append(ExclusionRecord(
+                ts_code=str(code), reason=ExclusionReason.INSUFFICIENT_ADJ_COVERAGE,
+                details="missing or non-positive adj_factor on signal date",
+                signal_date=signal_date,
+            ))
+        else:
+            kept.append(str(code))
+    return kept, rejected

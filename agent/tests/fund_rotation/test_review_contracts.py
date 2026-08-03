@@ -165,6 +165,27 @@ def test_only_one_etf_capacity_execution_implementation_exists():
     assert inspect.getsource(pipeline).count("def execute_with_capacity(") == 0
 
 
+def test_pipeline_contains_no_matching_valuation_or_strategy_algorithm():
+    """Phase 2 Task 6 (§13.1/§32.3): the shrunk pipeline is a Runner adapter —
+    it must never regain order matching, valuation, or strategy-algorithm
+    implementations (only imports/delegation)."""
+    source = inspect.getsource(pipeline)
+    # Strategy algorithm implementations live in the strategy package.
+    for banned in (
+        "def compute_correlation_distance", "def iterative_exclude",
+        "def hierarchical_cluster", "def compute_cluster_momentum",
+        "def select_top_clusters", "def build_target_weights",
+    ):
+        assert banned not in source, f"pipeline must not define {banned!r}"
+    # Order matching / valuation live in the common execution module.
+    for banned in (
+        "def mark_to_market(", "def _mark_to_market(",
+        "def run_execution_loop(", "def _run_execution_loop(",
+        "PortfolioExecutor(", "OrderManager(",
+    ):
+        assert banned not in source, f"pipeline must not instantiate/define {banned!r}"
+
+
 def _spy_pct_change(monkeypatch):
     """Record fill_method kwarg of every Series/DataFrame pct_change call."""
     calls: list = []

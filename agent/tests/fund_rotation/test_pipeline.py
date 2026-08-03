@@ -249,9 +249,8 @@ class TestPipelineE2E:
         )
 
         assert stages == [
-            "PREPARING_RETURNS",
-            "CLUSTERING",
-            "GENERATING_TARGETS",
+            "PREPARING_DATA",
+            "GENERATING_SIGNALS",
             "EXECUTING",
             "COMPUTING_BENCHMARKS",
         ]
@@ -291,17 +290,22 @@ class TestPipelineE2E:
 
     def test_correlation_window_is_exactly_lookback_rows(self, monkeypatch):
         """§32.1 — the window fed to correlation has exactly lookback rows and
-        ends at the signal week (no future data)."""
+        ends at the signal week (no future data). Phase 2: signal generation
+        moved to the baseline strategy session, so the spy targets the session
+        module's call site."""
         windows: list = []
-        from backtest.fund_rotation import pipeline as pipeline_mod
-        orig = pipeline_mod.compute_correlation_distance
+        from backtest.fund_rotation.strategies.correlation_all_members import (
+            strategy as strategy_mod,
+        )
+        orig = strategy_mod.compute_correlation_distance
 
         def spy(sub_returns, **kwargs):
             windows.append(list(sub_returns.index))
             return orig(sub_returns, **kwargs)
 
         monkeypatch.setattr(
-            "backtest.fund_rotation.pipeline.compute_correlation_distance", spy,
+            "backtest.fund_rotation.strategies.correlation_all_members.strategy."
+            "compute_correlation_distance", spy,
         )
         fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)
         config = FundRotationConfig(
