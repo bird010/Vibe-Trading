@@ -2,8 +2,8 @@
 
 The publisher is the ONLY component that writes run artifacts to disk. It owns:
 
-* the fixed common role registry (manifest, evaluation_calendar, targets,
-  orders, fills, equity, metrics, events) with stable file names;
+* the fixed common role registry for identity, lifecycle, execution and result
+  artifacts with stable file names;
 * safe file naming for strategy-declared ``StrategyArtifact`` s (roles are
   namespaced and can never override a common role; path-traversal roles are
   rejected before any write);
@@ -31,12 +31,19 @@ from src.stockpred.fund_rotation.persistence import atomic_write_json
 # role -> fixed file name for the common artifacts (§12).
 COMMON_ROLES: dict[str, str] = {
     "manifest": "manifest.json",
+    "state": "state.json",
+    "resolved_spec": "resolved_spec.json",
+    "strategy_snapshot": "strategy_snapshot.json",
+    "data_snapshot": "data_snapshot.json",
     "evaluation_calendar": "evaluation_calendar.json",
+    "target_decisions": "target_decisions.csv",
     "targets": "targets.csv",
     "orders": "orders.csv",
     "fills": "trade_events.csv",
+    "positions": "positions.csv",
     "equity": "equity.csv",
     "metrics": "metrics.json",
+    "summary": "summary.json",
     "events": "events.jsonl",
 }
 
@@ -83,9 +90,9 @@ class ArtifactPublisher:
             raise ArtifactPublicationError(
                 "the manifest role is reserved for finalize(); it cannot be published"
             )
-        if role == "events":
+        if role in {"events", "state"}:
             raise ArtifactPublicationError(
-                "the events role is append-persisted externally (§29/§30.1); "
+                f"the {role} role is persisted externally (§29/§30.1); "
                 "use index_external() to include it without rewriting"
             )
         if role in COMMON_ROLES and producer != "common":

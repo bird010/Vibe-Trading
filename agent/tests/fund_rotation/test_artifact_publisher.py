@@ -27,8 +27,10 @@ def _publisher(tmp_path):
 
 def test_common_roles_are_the_fixed_set():
     assert set(COMMON_ROLES) == {
-        "manifest", "evaluation_calendar", "targets", "orders",
-        "fills", "equity", "metrics", "events",
+        "state", "resolved_spec", "strategy_snapshot", "data_snapshot",
+        "manifest", "evaluation_calendar", "target_decisions", "targets",
+        "orders", "fills", "positions", "equity", "metrics", "summary",
+        "events",
     }
     # fills keeps the legacy file name; events aligns with the append-based
     # run event log (§29/§30.1).

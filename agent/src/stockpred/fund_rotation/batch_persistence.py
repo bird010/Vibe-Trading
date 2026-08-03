@@ -14,7 +14,7 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -41,6 +41,8 @@ class VariantIdentity:
     resolved_config_hash: str
     resolved_requirements_hash: str
     implementation_hash: str
+    resolved_config: dict[str, Any] = field(default_factory=dict)
+    resolved_requirements: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,14 @@ def build_variant_identities(
             resolved_config_hash=spec.resolved_config_hash,
             resolved_requirements_hash=spec.resolved_requirements_hash,
             implementation_hash=spec.implementation_hash,
+            resolved_config=dict(spec.resolved_config),
+            resolved_requirements={
+                "required_datasets": list(spec.resolved_requirements.required_datasets),
+                "required_fields": list(spec.resolved_requirements.required_fields),
+                "warmup_trade_days": spec.resolved_requirements.warmup_trade_days,
+                "frequency": spec.resolved_requirements.frequency,
+                "needs_benchmark": spec.resolved_requirements.needs_benchmark,
+            },
         ))
     return tuple(identities)
 

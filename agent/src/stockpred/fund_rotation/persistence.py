@@ -140,7 +140,7 @@ from src.stockpred.fund_rotation.state_machine import (  # noqa: E402
 )
 
 _BATCH_STAGE_NAMES = {s.value for s in BatchStage}
-_VARIANT_STAGE_NAMES = {s.value for s in ChildStage} | {s.value for s in BatchStage}
+_VARIANT_STAGE_NAMES = {s.value for s in ChildStage}
 
 
 class EventValidationError(ValueError):

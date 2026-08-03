@@ -157,6 +157,12 @@ def build_comparison(
             )
             continue
 
+        if variant.decision_quality not in ("VALID", "DEGRADED", "INVALID"):
+            excluded.append(
+                {"variant_key": key, "reason": EXCLUDED_TECHNICAL_FAILURE}
+            )
+            continue
+
         # Recompute metrics from the raw equity and the common anchor.
         metrics[key] = compute_performance_metrics(
             equity, periods_per_year=244, initial_nav=initial_nav,
@@ -172,11 +178,6 @@ def build_comparison(
                     "excluded from ranking"
                 ),
             })
-            continue
-        if variant.decision_quality not in ("VALID", "DEGRADED"):
-            excluded.append(
-                {"variant_key": key, "reason": EXCLUDED_TECHNICAL_FAILURE}
-            )
             continue
         ranked_entries.append({
             "variant_key": key,

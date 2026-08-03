@@ -47,7 +47,8 @@ class TestRecovery:
         service.run_batch_sync(outcome["batch_id"])
         batch_dir = service.persistence.batch_dir(outcome["batch_id"])
 
-        # Simulate a crash by rewriting state to a running stage.
+        # Simulate a crash before the parent publication boundary.
+        (batch_dir / "manifest.json").unlink()
         state_path = batch_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["stage"] = "RUNNING_STRATEGIES"
@@ -59,6 +60,11 @@ class TestRecovery:
         assert outcome["batch_id"] in recovered
         new_state = json.loads(state_path.read_text(encoding="utf-8"))
         assert new_state["stage"] == "FAILED_INTERRUPTED"
+        terminal = json.loads(
+            (batch_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )
+        assert terminal["event_type"] == "TERMINAL"
+        assert terminal["stage"] == "FAILED_INTERRUPTED"
 
     def test_completed_batch_left_untouched_by_recovery(self, tmp_path):
         service = _service(tmp_path)
@@ -81,13 +87,12 @@ class TestRecovery:
         ])
         outcome = service.submit_batch(request)
         service.run_batch_sync(outcome["batch_id"])
-        batch_dir = service.persistence.batch_dir(outcome["batch_id"])
-
         # Corrupt a child run state to a running stage.
-        runs_dir = batch_dir / "runs"
+        runs_dir = service.runs_root
         children = list(runs_dir.iterdir())
         assert len(children) == 2
         child_state_path = children[0] / "state.json"
+        (children[0] / "manifest.json").unlink()
         child_state = json.loads(child_state_path.read_text(encoding="utf-8"))
         child_state["stage"] = "GENERATING_SIGNALS"
         child_state_path.write_text(json.dumps(child_state), encoding="utf-8")
@@ -96,6 +101,11 @@ class TestRecovery:
         fresh.recover_interrupted()
         new_child = json.loads(child_state_path.read_text(encoding="utf-8"))
         assert new_child["stage"] == "FAILED_INTERRUPTED"
+        terminal = json.loads(
+            (children[0] / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )
+        assert terminal["event_type"] == "TERMINAL"
+        assert terminal["stage"] == "FAILED_INTERRUPTED"
 
         # Already terminal child stays unchanged.
         other = json.loads((children[1] / "state.json").read_text(encoding="utf-8"))
@@ -110,7 +120,8 @@ class TestRecovery:
         service.run_batch_sync(outcome["batch_id"])
         batch_dir = service.persistence.batch_dir(outcome["batch_id"])
 
-        # Corrupt to running state.
+        # Corrupt an unpublished parent while retaining its completed files.
+        (batch_dir / "manifest.json").unlink()
         state_path = batch_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["stage"] = "RUNNING_STRATEGIES"
@@ -119,16 +130,13 @@ class TestRecovery:
         fresh = _service(tmp_path)
         fresh.recover_interrupted()
 
-        # Manifest and resolved artifacts must still be readable.
-        manifest_path = batch_dir / "manifest.json"
-        assert manifest_path.exists()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert manifest["status"] == "SUCCEEDED"
-
+        # Recovery does not publish a manifest, but existing artifacts remain.
+        assert not (batch_dir / "manifest.json").exists()
         resolved_path = batch_dir / "resolved_batch.json"
         assert resolved_path.exists()
         resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
         assert len(resolved["variants"]) == 1
+        assert (batch_dir / "data_snapshot.json").exists()
 
     def test_no_auto_resume_after_recovery(self, tmp_path):
         """Recovery never re-runs a batch; it only marks states."""
@@ -140,7 +148,8 @@ class TestRecovery:
         service.run_batch_sync(outcome["batch_id"])
         batch_dir = service.persistence.batch_dir(outcome["batch_id"])
 
-        # Corrupt to running.
+        # Corrupt to running before the parent publication boundary.
+        (batch_dir / "manifest.json").unlink()
         state_path = batch_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["stage"] = "RUNNING_STRATEGIES"

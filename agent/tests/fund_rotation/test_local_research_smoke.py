@@ -51,17 +51,16 @@ class TestRealDataSmoke:
         def metadata_loader():
             from src.stockpred.fund_rotation.data_snapshot import resolve_pinned_snapshot
 
-            snap = resolve_pinned_snapshot(lance_dir)
-            return {"trading_dates": list(snap.trading_dates), "fingerprint": snap.fingerprint}
+            return resolve_pinned_snapshot(lance_dir)
 
-        def frames_loader(data_start, data_end):
+        def frames_loader(snapshot, data_start, data_end):
             from src.stockpred.fund_rotation.data_snapshot import (
                 load_pinned_frames,
-                resolve_pinned_snapshot,
             )
 
-            snap = resolve_pinned_snapshot(lance_dir)
-            return load_pinned_frames(snap, lance_dir, data_start=data_start, data_end=data_end)
+            return load_pinned_frames(
+                snapshot, lance_dir, data_start=data_start, data_end=data_end,
+            )
 
         service = BatchService(
             tmp_path / "batches",

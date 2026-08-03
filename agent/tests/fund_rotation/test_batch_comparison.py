@@ -132,6 +132,24 @@ class TestEligibility:
         warnings = {w["variant_key"] for w in outcome.quality_warnings}
         assert warnings == {"s@cccc"}
 
+    @pytest.mark.parametrize("quality", ["FAILED", "UNKNOWN"])
+    def test_failed_or_unknown_quality_is_not_displayed_or_measured(self, quality):
+        inputs = _inputs() + [
+            VariantComparisonInput(
+                variant_key="s@cccc", strategy_id="s", run_id="r3",
+                status="SUCCEEDED", equity=_equity([1.0] * 10),
+                decision_quality=quality,
+            ),
+        ]
+
+        outcome = build_comparison(
+            inputs, evaluation_calendar=CALENDAR, **FP_KW,
+        )
+
+        assert "s@cccc" not in outcome.equity_frame.columns
+        assert "s@cccc" not in outcome.metrics
+        assert {entry["variant_key"] for entry in outcome.excluded} == {"s@cccc"}
+
 
 class TestMetrics:
     def test_metrics_recomputed_from_raw_equity(self):

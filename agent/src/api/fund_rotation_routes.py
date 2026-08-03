@@ -97,37 +97,33 @@ def register_fund_rotation_routes(
     service.recover_interrupted()
 
     # ── Batch service (§21/Phase 4) ──
-    batches_dir = runs_dir / "fund_rotation_batches"
+    fund_rotation_root = runs_dir / "fund_rotation"
+    batches_dir = fund_rotation_root / "strategy_batches"
     batch_service = None
     if stockpred_root is not None:
         from src.stockpred.fund_rotation.batch_service import BatchService
 
         lance_dir = stockpred_root / "data" / "lance" / "market_core"
 
-        def _batch_metadata_loader() -> dict[str, Any]:
+        def _batch_metadata_loader():
             from src.stockpred.fund_rotation.data_snapshot import (
                 resolve_pinned_snapshot,
             )
-            snap = resolve_pinned_snapshot(lance_dir)
-            return {
-                "trading_dates": list(snap.trading_dates),
-                "fingerprint": snap.fingerprint,
-            }
+            return resolve_pinned_snapshot(lance_dir)
 
         def _batch_frames_loader(
-            data_start: str, data_end: str,
+            snapshot, data_start: str, data_end: str,
         ) -> tuple:
             from src.stockpred.fund_rotation.data_snapshot import (
                 load_pinned_frames,
-                resolve_pinned_snapshot,
             )
-            snap = resolve_pinned_snapshot(lance_dir)
             return load_pinned_frames(
-                snap, lance_dir, data_start=data_start, data_end=data_end,
+                snapshot, lance_dir, data_start=data_start, data_end=data_end,
             )
 
         batch_service = BatchService(
             batches_dir,
+            runs_root=fund_rotation_root,
             catalog=catalog,
             metadata_loader=_batch_metadata_loader,
             frames_loader=_batch_frames_loader,
@@ -233,10 +229,16 @@ def register_fund_rotation_routes(
         if batch_service is None:
             raise HTTPException(status_code=503, detail="Batch service not available")
 
+        from src.stockpred.fund_rotation.batch_persistence import BatchIdempotencyError
         from src.stockpred.fund_rotation.batch_service import BatchPlanningError
 
         try:
             result = batch_service.submit_batch(batch_request)
+        except BatchIdempotencyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
         except BatchPlanningError as exc:
             raise HTTPException(
                 status_code=422,
@@ -245,7 +247,8 @@ def register_fund_rotation_routes(
 
         from fastapi.responses import JSONResponse
 
-        return JSONResponse(status_code=202, content=result)
+        status_code = 200 if result.get("status") == "EXISTING" else 202
+        return JSONResponse(status_code=status_code, content=result)
 
     @app.get(POST_BATCH_PATH, dependencies=[Depends(require_auth)])
     def list_strategy_batches(limit: int = 50) -> list[dict[str, Any]]:
@@ -297,16 +300,16 @@ def register_fund_rotation_routes(
         resolved = {}
         if resolved_path.exists():
             resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
-        # Collect child run states
-        runs_dir = batch_dir / "runs"
+        # Child runs live under the unified global run root; the parent only
+        # persists run_id references.
         child_runs: list[dict[str, Any]] = []
-        if runs_dir.exists():
-            for child in sorted(runs_dir.iterdir()):
-                child_state_path = child / "state.json"
-                if child_state_path.exists():
-                    child_runs.append(
-                        json.loads(child_state_path.read_text(encoding="utf-8")),
-                    )
+        for variant in resolved.get("variants", []):
+            run_id = variant.get("run_id")
+            child_state_path = batch_service.runs_root / str(run_id) / "state.json"
+            if run_id and child_state_path.exists():
+                child_runs.append(
+                    json.loads(child_state_path.read_text(encoding="utf-8")),
+                )
         return {
             "batch_id": batch_id,
             "state": state,
@@ -324,6 +327,15 @@ def register_fund_rotation_routes(
             raise HTTPException(status_code=503, detail="Batch service not available")
         cancelled = batch_service.cancel_batch(batch_id)
         if not cancelled:
+            batch_dir = batch_service.persistence.batch_dir(batch_id)
+            if batch_dir.exists():
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "BATCH_NOT_CANCELLABLE",
+                        "message": f"Batch {batch_id} is already terminal",
+                    },
+                )
             raise HTTPException(
                 status_code=404,
                 detail={"code": "BATCH_NOT_FOUND", "message": f"Batch {batch_id} not found or not cancellable"},
@@ -367,7 +379,6 @@ def register_fund_rotation_routes(
                         seq = event.get("seq", 0)
                         if seq > last_seq:
                             last_seq = seq
-                            yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                             etype = event.get("event_type", "")
                             if etype == "TERMINAL" and event.get("scope") == "BATCH":
                                 msg = event.get("message", "")
@@ -375,20 +386,16 @@ def register_fund_rotation_routes(
                                            "CANCELED", "FAILED_INTERRUPTED"):
                                     yield f"id: {seq}\nevent: done\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                                     return
-                # Check if manifest signals completion
-                manifest_path = batch_dir / "manifest.json"
-                if manifest_path.exists():
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    status = manifest.get("status", "")
-                    if status in ("SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED"):
-                        terminal = {
-                            "seq": last_seq + 1,
-                            "event_type": "TERMINAL",
-                            "scope": "BATCH",
-                            "message": status,
-                            "source": "manifest",
-                        }
-                        yield f"id: {last_seq + 1}\nevent: done\ndata: {json.dumps(terminal, ensure_ascii=False)}\n\n"
+                            yield f"id: {seq}\nevent: progress\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                # A terminal state closes the stream but never authorizes a
+                # synthetic event; only events.jsonl rows are emitted.
+                state_path = batch_dir / "state.json"
+                if state_path.exists():
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if state.get("stage") in (
+                        "SUCCEEDED", "PARTIAL_SUCCEEDED", "FAILED",
+                        "CANCELED", "FAILED_INTERRUPTED",
+                    ):
                         return
                 await asyncio.sleep(0.5)
 

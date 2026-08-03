@@ -104,12 +104,14 @@ class FundRotationBacktestService:
             if not d.is_dir():
                 continue
             state_path = d / "state.json"
-            if not state_path.exists():
+            if not state_path.exists() or (d / "manifest.json").exists():
                 continue
             import json
 
             with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
+            if state.get("schema_version") in {"2", "v2"}:
+                continue
             if TaskStateMachine.detect_interrupted(state):
                 updated = TaskStateMachine.mark_interrupted(state)
                 atomic_write_json(state_path, updated)

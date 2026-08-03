@@ -68,8 +68,7 @@ class TestBoundedParallelism:
         resolved = _resolved(service, outcome["batch_id"])
         assert len(resolved["executed_order"]) == 3
         # Sequential execution: each variant should have its own run dir.
-        batch_dir = service.persistence.batch_dir(outcome["batch_id"])
-        runs_dir = batch_dir / "runs"
+        runs_dir = service.runs_root
         assert runs_dir.exists()
         assert len(list(runs_dir.iterdir())) == 3
 
@@ -93,11 +92,11 @@ class TestBoundedParallelism:
         assert len(resolved["executed_order"]) == 10
 
         # Each variant has an independent run directory.
-        batch_dir = service.persistence.batch_dir(outcome["batch_id"])
-        runs_dir = batch_dir / "runs"
+        runs_dir = service.runs_root
         assert len(list(runs_dir.iterdir())) == 10
 
         # Comparison artifacts for 10 variants.
+        batch_dir = service.persistence.batch_dir(outcome["batch_id"])
         reports = json.loads(
             (batch_dir / "reports.json").read_text(encoding="utf-8"),
         )

@@ -109,10 +109,19 @@ class FakeBatchStrategy:
 
 
 def _calendar_metadata():
-    return {"trading_dates": list(CALENDAR), "fingerprint": "fp-test"}
+    from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+
+    return PinnedFundDataSnapshot(
+        fund_version=17,
+        fund_adj_version=23,
+        dim_version=31,
+        universe_codes=("E1",),
+        trading_dates=tuple(CALENDAR),
+        fingerprint="fp-test",
+    )
 
 
-def _frames_loader(data_start, data_end):
+def _frames_loader(snapshot, data_start, data_end):
     import pandas as pd
 
     dates = [d for d in CALENDAR if data_start <= d <= data_end]
@@ -133,12 +142,12 @@ def _service(tmp_path, *, frames_loader=None, fail_frames=False,
              auto_start=False):
     FakeBatchStrategy.session_log = []
 
-    def frames(data_start, data_end):
+    def frames(snapshot, data_start, data_end):
         if fail_frames:
             raise RuntimeError("snapshot read failed")
         if frames_loader is not None:
-            return frames_loader(data_start, data_end)
-        return _frames_loader(data_start, data_end)
+            return frames_loader(snapshot, data_start, data_end)
+        return _frames_loader(snapshot, data_start, data_end)
 
     from backtest.fund_rotation.catalog import FundRotationStrategyCatalog
     catalog = FundRotationStrategyCatalog([FakeBatchStrategy])
@@ -205,9 +214,9 @@ class TestPlanning:
     def test_planning_scans_no_market_data_and_loads_once(self, tmp_path):
         scanned = []
 
-        def tracking_frames(data_start, data_end):
+        def tracking_frames(snapshot, data_start, data_end):
             scanned.append((data_start, data_end))
-            return _frames_loader(data_start, data_end)
+            return _frames_loader(snapshot, data_start, data_end)
 
         service = _service(tmp_path, frames_loader=tracking_frames)
         request = _request([
@@ -363,7 +372,7 @@ class TestExecution:
         )
         outcome = _submit_and_run(service, request)
         assert _state(service, outcome["batch_id"])["stage"] == "FAILED"
-        runs_dir = service.persistence.batch_dir(outcome["batch_id"]) / "runs"
+        runs_dir = service.runs_root
         assert not runs_dir.exists() or not any(runs_dir.iterdir())
 
     def test_all_variants_failed_means_batch_failed(self, tmp_path):
@@ -383,8 +392,8 @@ class TestExecution:
             {"strategy_id": "fake_batch", "params": {"lookback_days": 30}},
             {"strategy_id": "fake_batch", "params": {"lookback_days": 40}},
         ])
-        outcome = _submit_and_run(service, request)
-        runs_dir = service.persistence.batch_dir(outcome["batch_id"]) / "runs"
+        _submit_and_run(service, request)
+        runs_dir = service.runs_root
         children = sorted(p.name for p in runs_dir.iterdir())
         assert len(children) == 2
         for child in runs_dir.iterdir():
@@ -415,10 +424,10 @@ class TestCancellation:
         started = threading.Event()
         release = threading.Event()
 
-        def blocking_frames(data_start, data_end):
+        def blocking_frames(snapshot, data_start, data_end):
             started.set()
             release.wait(timeout=5)
-            return _frames_loader(data_start, data_end)
+            return _frames_loader(snapshot, data_start, data_end)
 
         service = _service(tmp_path, frames_loader=blocking_frames,
                            auto_start=True)
@@ -455,7 +464,8 @@ class TestRecovery:
         )
         outcome = _submit_and_run(service, request)
         batch_dir = service.persistence.batch_dir(outcome["batch_id"])
-        # Simulate a crash: rewrite state to a running stage.
+        # Simulate a crash before the publication boundary.
+        (batch_dir / "manifest.json").unlink()
         state_path = batch_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["stage"] = "RUNNING_STRATEGIES"

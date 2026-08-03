@@ -224,6 +224,19 @@ class TestEventEnvelope:
         )
         assert event["run_id"] == "r1"
 
+    def test_variant_stage_rejects_parent_batch_stage(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+
+        with pytest.raises(EventValidationError, match="stage"):
+            log.append(
+                event_type="VARIANT_STAGE",
+                scope="VARIANT",
+                stage="RUNNING_STRATEGIES",
+                run_id="r1",
+                variant_key="s@abc",
+                strategy_id="s",
+            )
+
     def test_unknown_event_type_or_scope_rejected(self, tmp_path):
         log = BatchEventLog(tmp_path, batch_id="b1")
         with pytest.raises(EventValidationError):
