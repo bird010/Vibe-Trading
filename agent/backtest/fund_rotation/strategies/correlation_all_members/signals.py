@@ -1,9 +1,8 @@
-"""Baseline signal helpers — Phase 2 Task 4 (design §32.2).
+"""Shared PIT signal helpers for correlation fund-rotation strategies.
 
-Pure helpers shared by the correlation_all_members baseline session: the
-weekly rebalance schedule (ISO week-endings, identical grouping to
-``compute_weekly_returns``) and per-signal-date market eligibility
-(positive close AND positive adj_factor on the signal date, §8.2).
+The instrument pool is resolved for each signal date. It is never cached as a
+run-wide eligible set: listing status, current-window market data and adjustment
+coverage can change during a backtest.
 """
 
 from __future__ import annotations
@@ -23,61 +22,99 @@ __all__ = [
 ]
 
 
-# iso_week_endings lives in the common evaluation module (shared with the
-# Runner's warmup boundary); re-exported here for the baseline session.
+def ensure_instrument_pool(
+    view,
+    *,
+    lookback_trade_days: int | None = None,
+) -> "pd.DataFrame":
+    """Resolve the historically visible pool with window-scoped adj coverage.
 
-
-def ensure_instrument_pool(view) -> "pd.DataFrame":
-    """Build the strategy's instrument pool from the causal view.
-
-    Mirrors the legacy pool pre-filter: static universe from
-    ``eligible_universe`` minus codes whose adj records do not cover every
-    daily record seen so far (INSUFFICIENT_ADJ_COVERAGE, read causally).
+    ``view.eligible_universe()`` already enforces ``list_date <= signal_date``.
+    Adjustment completeness is checked only for the declared strategy window,
+    not against unrelated older history. A fund can therefore enter after
+    listing/warmup and can recover after a temporary data gap once the active
+    window is complete again.
     """
     instruments = view.eligible_universe()
-    dim = pd.DataFrame([
-        {"ts_code": i.ts_code, "name": i.name, "list_date": i.list_date}
-        for i in instruments
-    ])
-    bars = view.daily_bars(["close"])
-    adj = view.fund_adjustments()
-    if not dim.empty and not bars.empty and not adj.empty:
-        daily_keys = bars[["ts_code", "trade_date"]].astype(str).drop_duplicates()
-        adj_keys = adj[["ts_code", "trade_date"]].astype(str).drop_duplicates()
-        coverage = daily_keys.merge(
-            adj_keys, on=["ts_code", "trade_date"], how="left", indicator=True,
-        )
-        incomplete = set(
-            coverage.loc[coverage["_merge"] == "left_only", "ts_code"].unique()
-        )
-        if incomplete:
-            dim = dim[~dim["ts_code"].astype(str).isin(incomplete)]
-    return dim.reset_index(drop=True)
+    dim = pd.DataFrame(
+        [
+            {
+                "ts_code": instrument.ts_code,
+                "name": instrument.name,
+                "list_date": instrument.list_date,
+            }
+            for instrument in instruments
+        ]
+    )
+    if dim.empty:
+        return pd.DataFrame(columns=["ts_code", "name", "list_date"])
+
+    bars = view.daily_bars(["close"], lookback=lookback_trade_days)
+    adj = view.fund_adjustments(lookback=lookback_trade_days)
+    if bars.empty:
+        return dim.iloc[0:0].reset_index(drop=True)
+
+    daily_keys = (
+        bars[["ts_code", "trade_date"]]
+        .astype(str)
+        .drop_duplicates()
+    )
+    if adj.empty:
+        return dim.iloc[0:0].reset_index(drop=True)
+    valid_adj = adj.copy()
+    valid_adj["adj_factor"] = pd.to_numeric(
+        valid_adj["adj_factor"], errors="coerce"
+    )
+    valid_adj = valid_adj[
+        valid_adj["adj_factor"].notna()
+        & (valid_adj["adj_factor"] > 0)
+    ]
+    adj_keys = (
+        valid_adj[["ts_code", "trade_date"]]
+        .astype(str)
+        .drop_duplicates()
+    )
+    coverage = daily_keys.merge(
+        adj_keys,
+        on=["ts_code", "trade_date"],
+        how="left",
+        indicator=True,
+    )
+    incomplete = set(
+        coverage.loc[
+            coverage["_merge"] == "left_only",
+            "ts_code",
+        ].astype(str)
+    )
+    available = set(daily_keys["ts_code"].astype(str)) - incomplete
+    return (
+        dim[dim["ts_code"].astype(str).isin(available)]
+        .reset_index(drop=True)
+    )
 
 
-def market_eligible_codes(view, codes: Sequence[str], signal_date: str) -> set[str]:
-    """§8.2 — codes with a positive close AND positive adj_factor exactly on
-    the signal date, read through the causal data view."""
+def market_eligible_codes(
+    view,
+    codes: Sequence[str],
+    signal_date: str,
+) -> set[str]:
     kept, _rejected = signal_date_eligible(view, codes, signal_date)
     return set(kept)
 
 
 def signal_date_eligible(
-    view, codes: Sequence[str], signal_date: str,
+    view,
+    codes: Sequence[str],
+    signal_date: str,
 ) -> tuple[list[str], list[ExclusionRecord]]:
-    """§8.2 — ordered market eligibility with exclusion records.
-
-    Mirrors the legacy pipeline semantics: a code missing a positive close on
-    the signal date is NO_VALID_CLOSE; otherwise a missing/non-positive
-    adj_factor is INSUFFICIENT_ADJ_COVERAGE.
-    """
-    bars = view.daily_bars(["close"])
+    """Return ordered codes with positive close and adj factor on signal day."""
+    bars = view.daily_bars(["close"], lookback=None)
     sig_bars = bars[bars["trade_date"].astype(str) == signal_date]
     close_by_code = {
         str(code): pd.to_numeric(close, errors="coerce")
         for code, close in zip(sig_bars["ts_code"], sig_bars["close"])
     }
-    adj = view.fund_adjustments()
+    adj = view.fund_adjustments(lookback=None)
     sig_adj = adj[adj["trade_date"].astype(str) == signal_date]
     adj_by_code = {
         str(code): pd.to_numeric(factor, errors="coerce")
@@ -85,21 +122,30 @@ def signal_date_eligible(
     }
     kept: list[str] = []
     rejected: list[ExclusionRecord] = []
-    for code in codes:
-        close = close_by_code.get(str(code))
-        factor = adj_by_code.get(str(code))
+    for raw_code in codes:
+        code = str(raw_code)
+        close = close_by_code.get(code)
+        factor = adj_by_code.get(code)
         if close is None or pd.isna(close) or float(close) <= 0:
-            rejected.append(ExclusionRecord(
-                ts_code=str(code), reason=ExclusionReason.NO_VALID_CLOSE,
-                details="missing or non-positive close on signal date",
-                signal_date=signal_date,
-            ))
+            rejected.append(
+                ExclusionRecord(
+                    ts_code=code,
+                    reason=ExclusionReason.NO_VALID_CLOSE,
+                    details="missing or non-positive close on signal date",
+                    signal_date=signal_date,
+                )
+            )
         elif factor is None or pd.isna(factor) or float(factor) <= 0:
-            rejected.append(ExclusionRecord(
-                ts_code=str(code), reason=ExclusionReason.INSUFFICIENT_ADJ_COVERAGE,
-                details="missing or non-positive adj_factor on signal date",
-                signal_date=signal_date,
-            ))
+            rejected.append(
+                ExclusionRecord(
+                    ts_code=code,
+                    reason=ExclusionReason.INSUFFICIENT_ADJ_COVERAGE,
+                    details=(
+                        "missing or non-positive adj_factor on signal date"
+                    ),
+                    signal_date=signal_date,
+                )
+            )
         else:
-            kept.append(str(code))
+            kept.append(code)
     return kept, rejected
