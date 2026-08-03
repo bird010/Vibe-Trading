@@ -1,142 +1,207 @@
+/** Phase 5 Task 4 — hook migrated to batch SSE and strategy catalog. */
+
 import { create } from "zustand";
-import { authHeaders, withAuthQuery } from "@/lib/apiAuth";
+import type {
+  BatchDetail,
+  BatchListItem,
+  BatchSubmitResponse,
+  ComparisonReports,
+  EventEnvelope,
+  StrategyDetail,
+  StrategySummary,
+} from "./types";
+import {
+  fetchStrategies,
+  fetchStrategyDetail,
+  submitBatch,
+  fetchBatches,
+  fetchBatchDetail,
+  cancelBatch,
+  connectBatchSSE,
+  fetchBatchReports,
+} from "./api";
+import type { VariantDraft } from "./StrategyVariantsEditor";
+import type { StrategyBatchRequest } from "./types";
 
-// ── Types ──
-
-export interface FundRotationDefaults {
-  params: Record<string, number>;
-  schema_version: string;
-  mode: string;
-}
-
-export interface FundRotationRun {
-  run_id: string;
-  stage: string;
-  created_at?: string;
-  params_fingerprint?: string;
-  summary?: Record<string, unknown>;
-}
+let eventSource: EventSource | null = null;
 
 export interface FundRotationState {
-  defaults: FundRotationDefaults | null;
-  runs: FundRotationRun[];
-  activeRunId: string | null;
-  activeRun: FundRotationRun | null;
+  // Catalog
+  catalogVersion: string;
+  strategies: StrategySummary[];
+  strategyDetails: Map<string, StrategyDetail>;
+  catalogLoading: boolean;
+  catalogError: string | null;
+
+  // Batch
+  batches: BatchListItem[];
+  activeBatchId: string | null;
+  activeBatch: BatchDetail | null;
+  comparison: ComparisonReports | null;
   loading: boolean;
   error: string | null;
-  events: Array<{ seq: number; stage: string; ts: number; [k: string]: unknown }>;
+  events: EventEnvelope[];
 
-  fetchDefaults: () => Promise<void>;
-  fetchRuns: () => Promise<void>;
-  submitBacktest: (params: Record<string, number>, idempotencyKey: string) => Promise<string>;
-  selectRun: (runId: string) => void;
-  connectSSE: (runId: string) => void;
+  // Actions
+  fetchCatalog: () => Promise<void>;
+  fetchBatches: () => Promise<void>;
+  submitStrategyBatch: (
+    variants: VariantDraft[],
+    evaluationStart: string,
+    evaluationEnd: string,
+    execution: StrategyBatchRequest["execution"],
+    idempotencyKey: string,
+  ) => Promise<BatchSubmitResponse>;
+  selectBatch: (batchId: string) => Promise<void>;
+  cancelActiveBatch: () => Promise<boolean>;
+  connectBatchSSE: (batchId: string) => void;
   disconnectSSE: () => void;
   reset: () => void;
 }
 
-let eventSource: EventSource | null = null;
-
 export const useFundRotation = create<FundRotationState>((set, get) => ({
-  defaults: null,
-  runs: [],
-  activeRunId: null,
-  activeRun: null,
+  catalogVersion: "",
+  strategies: [],
+  strategyDetails: new Map(),
+  catalogLoading: false,
+  catalogError: null,
+
+  batches: [],
+  activeBatchId: null,
+  activeBatch: null,
+  comparison: null,
   loading: false,
   error: null,
   events: [],
 
-  fetchDefaults: async () => {
+  fetchCatalog: async () => {
+    set({ catalogLoading: true, catalogError: null });
     try {
-      const res = await fetch(withAuthQuery("/stockpred/fund-rotation/defaults"), {
-        headers: authHeaders(),
+      const list = await fetchStrategies();
+      const details = new Map<string, StrategyDetail>();
+      for (const s of list.strategies) {
+        try {
+          const { data } = await fetchStrategyDetail(s.strategy_id);
+          details.set(s.strategy_id, data);
+        } catch {
+          // skip detail if unavailable; summary still shows
+        }
+      }
+      set({
+        catalogVersion: list.catalog_version,
+        strategies: list.strategies,
+        strategyDetails: details,
+        catalogLoading: false,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      set({ defaults: data });
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to load defaults" });
+      set({
+        catalogError: e instanceof Error ? e.message : "Failed to load catalog",
+        catalogLoading: false,
+      });
     }
   },
 
-  fetchRuns: async () => {
+  fetchBatches: async () => {
     try {
-      const res = await fetch(withAuthQuery("/stockpred/fund-rotation/backtests?limit=20"), {
-        headers: authHeaders(),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      set({ runs: data });
+      const batches = await fetchBatches();
+      set({ batches, error: null });
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to load runs" });
+      set({ error: e instanceof Error ? e.message : "Failed to load batches" });
     }
   },
 
-  submitBacktest: async (params, idempotencyKey) => {
+  submitStrategyBatch: async (variants, evaluationStart, evaluationEnd, execution, idempotencyKey) => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch("/stockpred/fund-rotation/backtests", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ params, idempotency_key: idempotencyKey }),
-      });
-      if (res.status === 409) {
-        throw new Error("Idempotency conflict: same key with different parameters");
-      }
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail?.message || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      set({ loading: false, activeRunId: data.run_id, events: [] });
-      get().connectSSE(data.run_id);
-      return data.run_id;
+      const request: StrategyBatchRequest = {
+        schema_version: "1",
+        idempotency_key: idempotencyKey,
+        mode: "RESEARCH_ONLY",
+        evaluation_start_date: evaluationStart,
+        evaluation_end_date: evaluationEnd,
+        execution,
+        variants: variants.map((v) => ({
+          strategy_id: v.strategyId,
+          label: v.label || undefined,
+          params: v.params,
+        })),
+      };
+      const result = await submitBatch(request);
+      set({ loading: false });
+      await get().fetchBatches();
+      return result;
     } catch (e) {
-      set({ loading: false, error: e instanceof Error ? e.message : "Submit failed" });
+      set({
+        loading: false,
+        error: e instanceof Error ? e.message : "Submission failed",
+      });
       throw e;
     }
   },
 
-  selectRun: (runId) => {
-    set({ activeRunId: runId, events: [], activeRun: null });
-    // Fetch run detail
-    fetch(withAuthQuery(`/stockpred/fund-rotation/backtests/${runId}`), {
-      headers: authHeaders(),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) set({ activeRun: data });
-      })
-      .catch(() => undefined);
-    get().connectSSE(runId);
+  selectBatch: async (batchId: string) => {
+    set({ activeBatchId: batchId, activeBatch: null, comparison: null, events: [], error: null });
+    try {
+      const detail = await fetchBatchDetail(batchId);
+      set({ activeBatch: detail });
+      // Load comparison if batch succeeded
+      if (
+        detail.state.stage === "SUCCEEDED" ||
+        detail.state.stage === "PARTIAL_SUCCEEDED"
+      ) {
+        try {
+          const reports = await fetchBatchReports(batchId);
+          set({ comparison: reports });
+        } catch {
+          // comparison optional
+        }
+      }
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : "Failed to load batch" });
+    }
   },
 
-  connectSSE: (runId) => {
-    get().disconnectSSE();
-    const url = withAuthQuery(`/stockpred/fund-rotation/backtests/${runId}/events`);
-    eventSource = new EventSource(url);
+  cancelActiveBatch: async () => {
+    const { activeBatchId } = get();
+    if (!activeBatchId) return false;
+    try {
+      const result = await cancelBatch(activeBatchId);
+      return result.cancelled;
+    } catch {
+      return false;
+    }
+  },
 
-    eventSource.addEventListener("progress", (e) => {
-      const data = JSON.parse(e.data);
-      set((state) => ({
-        events: [...state.events, data],
-        activeRun: state.activeRun ? { ...state.activeRun, stage: data.stage } : null,
-      }));
-    });
+  connectBatchSSE: (batchId: string) => {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    const lastSeq = get().events.length > 0
+      ? get().events[get().events.length - 1].seq
+      : null;
 
-    eventSource.addEventListener("done", (e) => {
-      const data = JSON.parse(e.data);
-      // Update stage without duplicating the event (progress already appended it)
-      set((state) => ({
-        activeRun: state.activeRun ? { ...state.activeRun, stage: data.stage } : null,
-      }));
-      get().disconnectSSE();
-      get().fetchRuns();
-    });
-
-    eventSource.onerror = () => {
-      // Browser auto-reconnects; fall back to polling after repeated failures
-    };
+    eventSource = connectBatchSSE(
+      batchId,
+      lastSeq,
+      (event) => {
+        set((state) => {
+          const exists = state.events.some((e) => e.seq === event.seq);
+          if (exists) return {};
+          return { events: [...state.events, event as unknown as EventEnvelope] };
+        });
+      },
+      () => {
+        eventSource = null;
+        get().fetchBatches();
+        if (get().activeBatchId) {
+          get().selectBatch(get().activeBatchId!);
+        }
+      },
+      () => {
+        eventSource = null;
+      },
+    );
   },
 
   disconnectSSE: () => {
@@ -147,7 +212,17 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
   },
 
   reset: () => {
-    get().disconnectSSE();
-    set({ activeRunId: null, activeRun: null, events: [], error: null });
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    set({
+      activeBatchId: null,
+      activeBatch: null,
+      comparison: null,
+      loading: false,
+      error: null,
+      events: [],
+    });
   },
 }));
