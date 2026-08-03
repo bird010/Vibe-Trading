@@ -261,6 +261,37 @@ class TestSelectRepresentative:
         )
         assert selection.selected == "B"  # same ADV -> lexicographically first
 
+    def test_adv_tie_three_level_break_valid_days_then_listing_then_code(self):
+        """§8.2: ADV tie -> more valid trading days -> longer listing -> code."""
+        window = _correlated_window()
+        members = ["A", "B", "C"]
+        dist = _distance({
+            "A": {"A": 0.0, "B": 0.1, "C": 0.12},
+            "B": {"B": 0.0, "A": 0.1, "C": 0.11},
+            "C": {"C": 0.0, "A": 0.12, "B": 0.11},
+        })
+        common = dict(
+            distance=dist, weekly_window=window, members=members,
+            adv20={"A": 1_000.0, "B": 3_000.0, "C": 3_000.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset(members),
+        )
+        # 1) C has more valid trading days -> beats B despite code order.
+        first = select_representative(
+            tie_break={"B": (180, 900), "C": (195, 500)}, **common,
+        )
+        assert first.selected == "C"
+        # 2) Equal valid days -> longer listing history wins.
+        second = select_representative(
+            tie_break={"B": (190, 900), "C": (190, 1200)}, **common,
+        )
+        assert second.selected == "C"
+        # 3) Equal days and listing -> code (regression to level-3 tie-break).
+        third = select_representative(
+            tie_break={"B": (190, 900), "C": (190, 900)}, **common,
+        )
+        assert third.selected == "B"
+
     def test_no_viable_candidate_reports_no_eligible_representative(self):
         window = _correlated_window()
         members = ["A", "B"]
@@ -388,3 +419,28 @@ class TestLockAndFallback:
         assert selection.selected is None
         assert selection.lock_maintained is False
         assert selection.exclusion_reason == "NO_ELIGIBLE_REPRESENTATIVE"
+
+    def test_current_dropped_from_neighborhood_falls_back(self):
+        """Representative leaves the candidate neighborhood (members change or
+        M truncation) -> treated as hard failure, fall back inside the
+        neighborhood."""
+        window = _correlated_window()
+        dist = _distance({
+            "A": {"A": 0.0, "B": 0.10, "C": 0.32, "D": 0.33},
+            "B": {"B": 0.0, "A": 0.10, "C": 0.30, "D": 0.31},
+            "C": {"C": 0.0, "A": 0.32, "B": 0.30, "D": 0.10},
+            "D": {"D": 0.0, "A": 0.33, "B": 0.31, "C": 0.10},
+        })
+        selection = maintain_representative_lock(
+            distance=dist, weekly_window=window,
+            members=["A", "B", "C", "D"],
+            adv20={"A": 1_000.0, "B": 2_000.0, "C": 1_500.0, "D": 1_200.0},
+            candidate_count=2,          # medoid B + nearest A only
+            min_cluster_corr=0.85,
+            eligible=frozenset({"A", "B", "C", "D"}),
+            current="C",                # C is outside the M=2 neighborhood
+        )
+        assert selection.medoid == "B"
+        assert selection.lock_maintained is False
+        assert selection.selected == "A" or selection.selected == "B"
+        assert selection.selected != "C"

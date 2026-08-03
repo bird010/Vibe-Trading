@@ -112,11 +112,17 @@ def select_representative(
     candidate_count: int,
     min_cluster_corr: float,
     eligible: AbstractSet[str],
+    tie_break: Mapping[str, tuple[int, int]] | None = None,
 ) -> RepresentativeSelection:
     """§8.2 — score the neighborhood and pick the most liquid survivor.
 
     ``adv20`` must contain only decision-date-visible (causal) values; the
     caller guarantees no execution-day turnover enters it.
+
+    ``tie_break`` closes the §8.2 three-level ADV tie: code ->
+    (valid trading-day count, listing-history days). When provided, ties on
+    ADV20 resolve by more valid trading days, then longer listing history,
+    then ts_code.
     """
     if len(members) < 2:
         # Single-member clusters cannot produce a leave-one-out index; the
@@ -185,8 +191,17 @@ def select_representative(
             exclusion_reason=NO_ELIGIBLE_REPRESENTATIVE,
         )
 
-    # Largest causal ADV20; ties break by ts_code.
-    best = min(viable, key=lambda r: (-r.adv20, r.code))
+    # Largest causal ADV20; §8.2 tie-break: valid trading days, then listing
+    # history, then ts_code.
+    def _tie_values(code: str) -> tuple[int, int]:
+        if tie_break is not None and code in tie_break:
+            return tie_break[code]
+        return (0, 0)
+
+    best = min(
+        viable,
+        key=lambda r: (-r.adv20, -_tie_values(r.code)[0], -_tie_values(r.code)[1], r.code),
+    )
     return RepresentativeSelection(
         medoid=medoid,
         candidates=tuple(records),
@@ -205,6 +220,7 @@ def maintain_representative_lock(
     min_cluster_corr: float,
     eligible: AbstractSet[str],
     current: str | None,
+    tie_break: Mapping[str, tuple[int, int]] | None = None,
 ) -> RepresentativeSelection:
     """§8.2 — lock maintenance and hard-failure fallback.
 
@@ -217,6 +233,11 @@ def maintain_representative_lock(
     escalated to the decision action INVALID).
 
     ``current=None`` performs the fresh (reclustering) selection.
+
+    Contract (§8.2 "pre-saved order"): ``distance``/``members``/
+    ``candidate_count`` must be the inputs frozen at the latest reclustering;
+    callers must not roll them between reclusters, otherwise the neighborhood
+    (and thus the fallback order) would drift under the lock.
     """
     base = select_representative(
         distance=distance,
@@ -226,6 +247,7 @@ def maintain_representative_lock(
         candidate_count=candidate_count,
         min_cluster_corr=min_cluster_corr,
         eligible=eligible,
+        tie_break=tie_break,
     )
     if base.exclusion_reason == SINGLE_MEMBER_CLUSTER:
         return base
