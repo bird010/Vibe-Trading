@@ -121,7 +121,13 @@ def validate_research_mode(value: str) -> str:
 
 
 def canonical_payload_hash(request: StrategyBatchRequest) -> str:
-    payload = request.model_dump(mode="json")
+    """Hash only fields the client explicitly supplied.
+
+    Resolved execution defaults remain part of the run identity, but a later
+    server-default change cannot retroactively alter an existing idempotency
+    binding for the same client payload.
+    """
+    payload = request.model_dump(mode="json", exclude_unset=True)
     for old_name, new_name in _DECLARED_ALIASES.items():
         if old_name in payload:
             payload.setdefault(new_name, payload.pop(old_name))
