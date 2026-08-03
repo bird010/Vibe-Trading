@@ -228,6 +228,11 @@ export interface ComparisonReports {
   }>;
 }
 
+export interface ComparisonEquityData {
+  dates: string[];
+  series: Record<string, number[]>;
+}
+
 export interface FileDetail {
   checksum: string;
 }
