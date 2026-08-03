@@ -143,6 +143,9 @@ class FundRotationBacktestRunner:
         evaluation: EvaluationContext,
         execution: ExecutionConfig,
         cancellation: CancellationToken,
+        *,
+        simulation_start_date: str | None = None,
+        run_id: str | None = None,
     ) -> FundRotationRunResult:
         if cancellation.is_cancelled:
             return FundRotationRunResult(status=SubRunStatus.CANCELED, error_code="CANCELED")
@@ -152,7 +155,18 @@ class FundRotationBacktestRunner:
             {str(d) for d in self._fund_daily["trade_date"].astype(str).unique()}
         )
         warmup = int(requirements.warmup_trade_days)
-        if str(requirements.frequency).upper().startswith("W"):
+        if simulation_start_date is not None:
+            simulation_start = str(simulation_start_date)
+            if simulation_start not in all_trade_dates:
+                return FundRotationRunResult(
+                    status=SubRunStatus.FAILED,
+                    error_code=StrategyContractViolation.code,
+                    error_message=(
+                        f"planned simulation_start_date {simulation_start!r} "
+                        "is not an available trading day"
+                    ),
+                )
+        elif str(requirements.frequency).upper().startswith("W"):
             # §6 weekly cadence: align the warmup boundary with ISO
             # week-endings (N weekly returns need N+1 week-endings) so
             # holiday-shortened weeks cannot shift the first decision date.
@@ -189,7 +203,7 @@ class FundRotationBacktestRunner:
 
         session = strategy.create_session(
             StrategyInitializationContext(
-                run_id=self._run_id,
+                run_id=run_id or self._run_id,
                 evaluation_calendar=tuple(evaluation_dates),
             ),
             config,
@@ -253,12 +267,23 @@ class FundRotationBacktestRunner:
                 return _fail("STRATEGY_EVALUATION_ERROR", str(exc))
 
             try:
+                if not isinstance(decision, TargetWeightDecision):
+                    raise StrategyContractViolation(
+                        "strategy must return a TargetWeightDecision instance"
+                    )
                 if str(decision.signal_date) != str(signal_date):
                     raise StrategyContractViolation(
                         f"decision signal_date {decision.signal_date!r} does not match "
                         f"the scheduled date {signal_date!r}"
                     )
-                validate_target_decision(decision, universe, seen_decision_ids)
+                eligible_codes = universe
+                if decision.action is DecisionKind.SET_TARGETS and decision.target_weights:
+                    eligible_codes = frozenset(
+                        instrument.ts_code for instrument in view.eligible_universe()
+                    )
+                validate_target_decision(decision, eligible_codes, seen_decision_ids)
+            except UndeclaredStrategyDataAccess as exc:
+                return _fail(exc.code, str(exc))
             except StrategyContractViolation as exc:
                 return _fail(StrategyContractViolation.code, str(exc))
 

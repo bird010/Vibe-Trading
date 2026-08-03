@@ -279,7 +279,10 @@ class CorrelationAllMembersStrategy:
         warmup_trade_days = (min_weeks + 1) * 5 - 1
         return StrategyDataRequirements(
             required_datasets=("fund", "fact_fund_adj", "dim_fund"),
-            required_fields=("open", "close", "high", "low", "pre_close", "vol", "amount", "adj_factor"),
+            required_fields=(
+                "ts_code", "trade_date", "name", "list_date", "open", "close", "high",
+                "low", "pre_close", "vol", "amount", "adj_factor",
+            ),
             warmup_trade_days=warmup_trade_days,
             frequency=cfg.rebalance_freq,
             needs_benchmark=True,

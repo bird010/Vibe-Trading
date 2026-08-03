@@ -190,6 +190,14 @@ def validate_target_decision(
     Raises:
         StrategyContractViolation: on any violation.
     """
+    if not isinstance(decision, TargetWeightDecision):
+        raise StrategyContractViolation(
+            "strategy must return a TargetWeightDecision instance"
+        )
+    if not isinstance(decision.action, DecisionKind):
+        raise StrategyContractViolation(
+            "decision action must be one of SET_TARGETS, HOLD_TARGETS, INVALID"
+        )
     if decision.decision_id in seen_decision_ids:
         raise StrategyContractViolation(
             f"duplicate decision_id within sub-run: {decision.decision_id}"

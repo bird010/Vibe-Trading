@@ -45,7 +45,7 @@ def _dim_fund():
 
 
 def _view(signal_date="20240109", universe=("A", "B", "C"),
-          fields=("close", "amount", "adj_factor", "open"),
+          fields=("ts_code", "trade_date", "name", "list_date", "close", "amount", "adj_factor", "open"),
           datasets=("fund", "fact_fund_adj", "dim_fund"), warmup=100):
     req = StrategyDataRequirements(
         required_datasets=tuple(datasets),
@@ -104,6 +104,19 @@ class TestQuerySurface:
         bars = view.daily_bars(["close"], lookback=2)
         assert set(bars["trade_date"].astype(str)) == {"20240109", "20240110"}
 
+    def test_implicit_none_lookback_is_capped_at_declared_warmup(self):
+        view = _view(signal_date="20240110", warmup=2)
+
+        assert set(view.daily_bars(["close"])["trade_date"].astype(str)) == {
+            "20240109", "20240110",
+        }
+        assert set(view.fund_adjustments()["trade_date"].astype(str)) == {
+            "20240109", "20240110",
+        }
+        assert view.trading_calendar() == (
+            pd.Timestamp("20240109"), pd.Timestamp("20240110"),
+        )
+
     def test_adjusted_closes_causal(self):
         view = _view(signal_date="20240108")
         adj = view.adjusted_closes()
@@ -142,6 +155,12 @@ class TestQuerySurface:
         assert all(isinstance(i, FundInstrument) for i in universe)
         assert {i.ts_code for i in universe} == {"A", "B"}
 
+    def test_eligible_universe_excludes_funds_listed_after_signal_date(self):
+        view = _view(signal_date="20240109")
+        view._dim_fund.loc[view._dim_fund["ts_code"] == "C", "list_date"] = "20240110"
+
+        assert {i.ts_code for i in view.eligible_universe()} == {"A", "B"}
+
     def test_trading_calendar(self):
         view = _view(signal_date="20240108")
         cal = view.trading_calendar()
@@ -179,6 +198,22 @@ class TestDatasetAndLookbackEnforcement:
         view = _view(fields=("close",))  # amount not declared
         with pytest.raises(UndeclaredStrategyDataAccess):
             view.causal_adv()
+
+    @pytest.mark.parametrize(
+        ("method", "fields"),
+        [
+            (lambda view: view.adjusted_closes(), ("close", "adj_factor")),
+            (lambda view: view.returns("daily", 1), ("close", "adj_factor")),
+            (lambda view: view.causal_adv(), ("ts_code", "trade_date", "amount")),
+            (lambda view: view.fund_adjustments(), ("ts_code", "trade_date", "adj_factor")),
+            (lambda view: view.eligible_universe(), ("ts_code", "name", "list_date")),
+            (lambda view: view.trading_calendar(), ("trade_date",)),
+        ],
+    )
+    def test_implicit_field_reads_require_declaration(self, method, fields):
+        view = _view(fields=tuple(field for field in _view()._requirements.required_fields if field not in fields))
+        with pytest.raises(UndeclaredStrategyDataAccess):
+            method(view)
 
     def test_lookback_overrun_rejected(self):
         # warmup=10 trading days -> daily lookback capped at 10.

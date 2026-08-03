@@ -71,6 +71,17 @@ class CausalDataView:
         "trading_calendar": ("fund",),
     }
 
+    # Fields read implicitly by each controlled query.  These are just as
+    # strategy-visible as explicit ``daily_bars(fields=...)`` requests.
+    _METHOD_FIELDS = {
+        "adjusted_closes": ("ts_code", "trade_date", "close", "adj_factor"),
+        "returns": ("ts_code", "trade_date", "close", "adj_factor"),
+        "causal_adv": ("ts_code", "trade_date", "amount"),
+        "fund_adjustments": ("ts_code", "trade_date", "adj_factor"),
+        "eligible_universe": ("ts_code", "name", "list_date"),
+        "trading_calendar": ("trade_date",),
+    }
+
     @property
     def signal_date(self) -> pd.Timestamp:
         return self._signal_date
@@ -100,23 +111,24 @@ class CausalDataView:
                     f"(declared: {sorted(declared)})"
                 )
 
-    def _check_lookback(self, method: str, lookback: int | None, unit_days: int) -> None:
+    def _check_lookback(self, method: str, lookback: int | None, unit_days: int) -> int:
         """Reject lookbacks exceeding the declared warmup (in the method's unit).
 
         ``unit_days`` converts the method's lookback unit to trading days
         (1 for daily bars/calendar/adv, 5 for weekly, 21 for monthly).
         """
+        max_lookback = self._requirements.warmup_trade_days // unit_days
         if lookback is None:
-            return
+            return max_lookback
         if lookback < 0:
             raise ValueError(f"{method} lookback must be non-negative, got {lookback}")
-        max_lookback = self._requirements.warmup_trade_days // unit_days
         if lookback > max_lookback:
             raise UndeclaredStrategyDataAccess(
                 f"{method} lookback {lookback} exceeds declared warmup "
                 f"({max_lookback} in this unit; warmup_trade_days="
                 f"{self._requirements.warmup_trade_days})"
             )
+        return lookback
 
     def _causal_filter(self, df: pd.DataFrame) -> pd.DataFrame:
         """Restrict to snapshot universe and dates <= signal_date."""
@@ -158,8 +170,8 @@ class CausalDataView:
 
     def daily_bars(self, fields: Sequence[str], lookback: int | None = None) -> pd.DataFrame:
         self._check_datasets("daily_bars")
-        self._check_fields(fields)
-        self._check_lookback("daily_bars", lookback, unit_days=1)
+        self._check_fields(("ts_code", "trade_date", *fields))
+        lookback = self._check_lookback("daily_bars", lookback, unit_days=1)
         cols = ["ts_code", "trade_date", *[f for f in fields if f not in ("ts_code", "trade_date")]]
         df = self._causal_filter(self._fund_daily)
         df = df[[c for c in cols if c in df.columns]]
@@ -169,7 +181,8 @@ class CausalDataView:
 
     def adjusted_closes(self, lookback: int | None = None) -> pd.DataFrame:
         self._check_datasets("adjusted_closes")
-        self._check_lookback("adjusted_closes", lookback, unit_days=1)
+        self._check_fields(self._METHOD_FIELDS["adjusted_closes"])
+        lookback = self._check_lookback("adjusted_closes", lookback, unit_days=1)
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
@@ -191,8 +204,9 @@ class CausalDataView:
         lookback: int,
     ) -> pd.DataFrame:
         self._check_datasets("returns")
+        self._check_fields(self._METHOD_FIELDS["returns"])
         unit_days = {"daily": 1, "weekly": 5, "monthly": 21}[frequency]
-        self._check_lookback("returns", lookback, unit_days=unit_days)
+        lookback = self._check_lookback("returns", lookback, unit_days=unit_days)
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
@@ -226,8 +240,8 @@ class CausalDataView:
         """Causal average daily turnover (amount) per ETF, using only completed
         trading days strictly before the signal date."""
         self._check_datasets("causal_adv")
-        self._check_fields(["amount"])
-        self._check_lookback("causal_adv", lookback_days, unit_days=1)
+        self._check_fields(self._METHOD_FIELDS["causal_adv"])
+        lookback_days = self._check_lookback("causal_adv", lookback_days, unit_days=1)
         df = self._causal_filter(self._fund_daily)
         if "amount" not in df.columns or df.empty:
             self._audit("causal_adv", ("amount",), df)
@@ -243,7 +257,8 @@ class CausalDataView:
 
     def fund_adjustments(self, lookback: int | None = None) -> pd.DataFrame:
         self._check_datasets("fund_adjustments")
-        self._check_lookback("fund_adjustments", lookback, unit_days=1)
+        self._check_fields(self._METHOD_FIELDS["fund_adjustments"])
+        lookback = self._check_lookback("fund_adjustments", lookback, unit_days=1)
         df = self._causal_filter(self._fund_adj)
         df = self._tail_dates(df, lookback)
         self._audit("fund_adjustments", ("adj_factor",), df)
@@ -251,8 +266,11 @@ class CausalDataView:
 
     def eligible_universe(self) -> tuple[FundInstrument, ...]:
         self._check_datasets("eligible_universe")
+        self._check_fields(self._METHOD_FIELDS["eligible_universe"])
         dim = self._dim_fund
         dim = dim[dim["ts_code"].astype(str).isin(self._universe_codes)]
+        list_dates = pd.to_datetime(dim["list_date"], errors="coerce")
+        dim = dim[list_dates.notna() & (list_dates <= self._signal_date)]
         instruments = tuple(
             FundInstrument(
                 ts_code=str(row["ts_code"]),
@@ -266,7 +284,8 @@ class CausalDataView:
 
     def trading_calendar(self, lookback: int | None = None) -> tuple[pd.Timestamp, ...]:
         self._check_datasets("trading_calendar")
-        self._check_lookback("trading_calendar", lookback, unit_days=1)
+        self._check_fields(self._METHOD_FIELDS["trading_calendar"])
+        lookback = self._check_lookback("trading_calendar", lookback, unit_days=1)
         df = self._causal_filter(self._fund_daily)
         dates = sorted({str(d) for d in df["trade_date"]}) if not df.empty else []
         if lookback == 0:

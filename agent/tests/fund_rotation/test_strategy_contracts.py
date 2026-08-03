@@ -79,6 +79,16 @@ class TestTargetDecisionValidation:
         validate_target_decision(d1, ELIGIBLE, set())
         validate_target_decision(d2, ELIGIBLE, set())
 
+    def test_unknown_action_is_a_contract_violation_not_a_set_targets_alias(self):
+        decision = _decision(action="REBALANCE")
+
+        with pytest.raises(StrategyContractViolation, match="action"):
+            validate_target_decision(decision, ELIGIBLE, set())
+
+    def test_non_decision_object_is_a_contract_violation(self):
+        with pytest.raises(StrategyContractViolation, match="TargetWeightDecision"):
+            validate_target_decision({"action": "SET_TARGETS"}, ELIGIBLE, set())
+
 
 class TestHoldAndInvalidSemantics:
     def test_hold_targets_must_not_carry_weights(self):

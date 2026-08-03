@@ -139,7 +139,10 @@ class FakeStrategy:
         self._session = session
         self._requirements = requirements or StrategyDataRequirements(
             required_datasets=("fund", "fact_fund_adj", "dim_fund"),
-            required_fields=("ts_code", "trade_date", "close", "amount", "adj_factor"),
+            required_fields=(
+                "ts_code", "trade_date", "name", "list_date", "close", "amount",
+                "adj_factor",
+            ),
             warmup_trade_days=5,
             frequency="weekly",
             needs_benchmark=False,
@@ -155,21 +158,33 @@ class FakeStrategy:
         return self._requirements
 
     def create_session(self, initialization, config):
+        self.initialization = initialization
         return self._session
 
 
-def _run(session, *, requirements=None, token=None):
-    fund_daily, fund_adj, dim_fund = _market_frames()
-    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+def _run(session, *, requirements=None, token=None, runner_run_id=None,
+         simulation_start_date=None, run_id=None, dim_fund=None):
+    fund_daily, fund_adj, default_dim_fund = _market_frames()
+    runner = FundRotationBacktestRunner(
+        fund_daily, fund_adj, dim_fund if dim_fund is not None else default_dim_fund,
+        run_id=runner_run_id,
+    )
     strategy = FakeStrategy(session, requirements)
-    return runner.run(
+    run_kwargs = {}
+    if simulation_start_date is not None:
+        run_kwargs["simulation_start_date"] = simulation_start_date
+    if run_id is not None:
+        run_kwargs["run_id"] = run_id
+    result = runner.run(
         strategy=strategy,
         config=FakeConfig(),
         snapshot=_snapshot(),
         evaluation=_evaluation(),
         execution=_execution(),
         cancellation=token or CancellationToken(),
+        **run_kwargs,
     )
+    return result, strategy
 
 
 # ── SET_TARGETS ──
@@ -179,7 +194,7 @@ def test_set_targets_drives_execution_and_succeeds():
         "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
                               {"A": 0.5, "B": 0.5}, cash=0.0),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert isinstance(result, FundRotationRunResult)
     assert result.status is SubRunStatus.SUCCEEDED
@@ -199,7 +214,7 @@ def test_set_targets_drives_execution_and_succeeds():
 
 def test_hold_before_any_set_keeps_cash_and_creates_no_events():
     session = FakeSession({})  # every date -> HOLD
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.SUCCEEDED
     assert result.weekly_targets == {}
@@ -214,7 +229,7 @@ def test_hold_after_set_keeps_previous_targets_without_new_events():
         "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
                               {"A": 1.0}, cash=0.0),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.SUCCEEDED
     # One target event only; HOLDs do not add or recompute orders.
@@ -266,7 +281,7 @@ def test_invalid_after_warmup_terminates_subrun():
         "20240119": _decision("20240119", DecisionKind.INVALID,
                               reason="DATA_MISSING"),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "DATA_MISSING"
@@ -279,7 +294,7 @@ def test_invalid_before_evaluation_also_terminates():
         "20240112": _decision("20240112", DecisionKind.INVALID,
                               reason="INSUFFICIENT_CAUSAL_HISTORY"),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "INSUFFICIENT_CAUSAL_HISTORY"
@@ -289,7 +304,7 @@ def test_invalid_before_evaluation_also_terminates():
 
 def test_pure_warmup_period_never_calls_evaluate():
     session = FakeSession({})
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.SUCCEEDED
     calendar, sim_start, eval_end = session.scheduled_arguments
@@ -301,7 +316,7 @@ def test_pure_warmup_period_never_calls_evaluate():
 
 def test_scheduled_date_before_warmup_is_contract_violation():
     session = FakeSession({}, scheduled=("20240102",))  # inside pure warmup
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "STRATEGY_CONTRACT_VIOLATION"
@@ -319,7 +334,7 @@ def test_cancellation_at_decision_checkpoint_cancels_subrun():
         return decision
 
     session = FakeSession({"20240112": cancel_after_first})
-    result = _run(session, token=token)
+    result, _ = _run(session, token=token)
 
     assert result.status is SubRunStatus.CANCELED
     assert len(result.decisions) == 1
@@ -349,7 +364,7 @@ def test_cancellation_during_execution_preserves_partial_events():
         "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
                               {"A": 1.0}, cash=0.0),
     })
-    result = _run(session, token=token)
+    result, _ = _run(session, token=token)
 
     assert result.status is SubRunStatus.CANCELED
     assert result.error_code == "CANCELED"
@@ -366,7 +381,7 @@ def test_weights_not_summing_to_one_is_contract_violation():
         "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
                               {"A": 0.9}, cash=1.0),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "STRATEGY_CONTRACT_VIOLATION"
@@ -386,7 +401,7 @@ def test_undeclared_data_access_fails_subrun():
         return _decision(context.signal_date, DecisionKind.HOLD_TARGETS)
 
     session = FakeSession({"20240112": read_undeclared})
-    result = _run(session, requirements=requirements)
+    result, _ = _run(session, requirements=requirements)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "UNDECLARED_STRATEGY_DATA_ACCESS"
@@ -398,7 +413,7 @@ def test_evaluate_exception_preserves_prior_decisions_and_fails():
                               {"A": 1.0}, cash=0.0),
         "20240119": RuntimeError("boom"),
     })
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "STRATEGY_EVALUATION_ERROR"
@@ -412,12 +427,41 @@ def test_finalize_failure_preserves_events_and_does_not_fake_success():
                                {"A": 1.0}, cash=0.0)},
         finalize_error=RuntimeError("finalize exploded"),
     )
-    result = _run(session)
+    result, _ = _run(session)
 
     assert result.status is SubRunStatus.FAILED
     assert result.error_code == "FINALIZE_FAILED"
     assert not result.executed_equity.empty
     assert result.trade_events  # prior events preserved
+
+
+def test_runner_uses_planned_start_date_and_passes_external_run_id_to_session():
+    session = FakeSession({}, scheduled=("20240119",))
+
+    result, strategy = _run(
+        session,
+        simulation_start_date="20240119",
+        run_id="external-variant-run",
+    )
+
+    assert result.status is SubRunStatus.SUCCEEDED
+    assert session.scheduled_arguments[1] == "20240119"
+    assert session.evaluate_calls == ["20240119"]
+    assert strategy.initialization.run_id == "external-variant-run"
+
+
+def test_runner_rejects_targets_not_eligible_on_signal_date():
+    _, _, dim_fund = _market_frames()
+    dim_fund.loc[dim_fund["ts_code"] == "B", "list_date"] = "20240120"
+    session = FakeSession({
+        "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
+                              {"B": 1.0}, cash=0.0),
+    })
+
+    result, _ = _run(session, dim_fund=dim_fund)
+
+    assert result.status is SubRunStatus.FAILED
+    assert result.error_code == "STRATEGY_CONTRACT_VIOLATION"
 
 
 # ── strategy-agnostic guard ──
