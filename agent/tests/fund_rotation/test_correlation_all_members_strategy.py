@@ -47,6 +47,18 @@ class TestConfigContract:
         with pytest.raises(ValidationError, match="min_pairwise_weeks"):
             CorrelationAllMembersConfig(correlation_lookback_weeks=20, min_pairwise_weeks=30)
 
+    def test_momentum_window_must_be_subset_of_lookback(self):
+        # momentum_window_weeks must stay strictly inside the correlation
+        # window so the session parity domain is well-defined (Phase 2 Task 4).
+        with pytest.raises(ValidationError, match="momentum_window_weeks"):
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=20, momentum_window_weeks=20,
+            )
+        with pytest.raises(ValidationError, match="momentum_window_weeks"):
+            CorrelationAllMembersConfig(
+                correlation_lookback_weeks=20, momentum_window_weeks=30,
+            )
+
     def test_start_date_must_not_exceed_end_date(self):
         with pytest.raises(ValidationError, match="start_date"):
             CorrelationAllMembersConfig(start_date="20230101", end_date="20220101")

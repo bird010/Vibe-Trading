@@ -50,6 +50,14 @@ class CorrelationAllMembersConfig(BaseModel):
     def _cross_field_constraints(self) -> "CorrelationAllMembersConfig":
         if self.top_n > self.k:
             raise ValueError(f"top_n must be in [1, k={self.k}], got {self.top_n}")
+        if self.momentum_window_weeks >= self.correlation_lookback_weeks:
+            # The momentum window must stay a strict subset of the correlation
+            # window; otherwise the session's tail-slice momentum diverges from
+            # the legacy pipeline's independent slice (Phase 2 parity domain).
+            raise ValueError(
+                f"momentum_window_weeks ({self.momentum_window_weeks}) must be < "
+                f"correlation_lookback_weeks ({self.correlation_lookback_weeks})"
+            )
         if self.min_pairwise_weeks > self.correlation_lookback_weeks:
             raise ValueError(
                 f"min_pairwise_weeks ({self.min_pairwise_weeks}) must be <= "
