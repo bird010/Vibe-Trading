@@ -48,6 +48,7 @@ export function FundRotationTab() {
     activeBatch,
     activeBatchId,
     comparison,
+    comparisonEquity,
     loading,
     error,
     events,
@@ -227,12 +228,7 @@ export function FundRotationTab() {
             <StrategyVariantsEditor
               strategies={availableStrategyDetails}
               variants={variants}
-              onChange={(next) => {
-                setVariants(next);
-                if (idempotencyRef.current?.payloadSignature !== payloadSignature) {
-                  idempotencyRef.current = null;
-                }
-              }}
+              onChange={setVariants}
               onUnsupportedChange={(uiKey, unsupported) =>
                 setUnsupportedByVariant((current) => ({
                   ...current,
@@ -369,7 +365,10 @@ export function FundRotationTab() {
             策略比较
           </h3>
           {comparison ? (
-            <StrategyComparison reports={comparison} />
+            <StrategyComparison
+              reports={comparison}
+              equity={comparisonEquity}
+            />
           ) : activeBatch ? (
             <div className="text-xs text-muted-foreground">
               {isTerminal &&
