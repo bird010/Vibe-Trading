@@ -6,7 +6,10 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 
 def atomic_write_json(path: Path, data: dict | list) -> None:
@@ -118,3 +121,140 @@ class IdempotencyGuard:
         state = run_dir.read_state()
         status = state.get("stage", "UNKNOWN") if state else "UNKNOWN"
         return run_id, status
+
+
+# ── Phase 4 Task 3: batch event envelope and log (§30.1) ──
+
+EVENT_SCHEMA_VERSION = "v2"
+
+VALID_EVENT_TYPES = {
+    "BATCH_STAGE", "VARIANT_STAGE", "VARIANT_PROGRESS", "TERMINAL", "ERROR",
+}
+VALID_EVENT_SCOPES = {"BATCH", "VARIANT"}
+
+
+class EventValidationError(ValueError):
+    """Raised when an event envelope or its progress violates §30.1."""
+
+
+def _validate_progress(progress: dict[str, Any]) -> dict[str, Any]:
+    """§30.1 — completed/total non-negative ints, completed<=total; ratio is
+    always recomputed from the two (never caller-supplied)."""
+    completed = progress.get("completed")
+    total = progress.get("total")
+    unit = progress.get("unit", "")
+    for name, value in (("completed", completed), ("total", total)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise EventValidationError(
+                f"progress.{name} must be a non-negative integer, got {value!r}"
+            )
+    if completed > total:
+        raise EventValidationError(
+            f"progress.completed ({completed}) must be <= total ({total})"
+        )
+    ratio = completed / total if total > 0 else 0.0
+    return {
+        "completed": completed,
+        "total": total,
+        "unit": unit,
+        "ratio": ratio,
+    }
+
+
+class BatchEventLog:
+    """§30.1 — append-only parent-batch event log with a global monotonic seq.
+
+    Events are atomically appended (persisted) BEFORE any SSE publication
+    (the publisher is the service layer). Child-local seqs are diagnostic
+    only and never enter this file; every record here carries a batch-global
+    seq. ``strategy_substage`` is stored verbatim and never drives any state
+    machine.
+    """
+
+    def __init__(self, batch_dir: Path, *, batch_id: str) -> None:
+        self.batch_dir = Path(batch_dir)
+        self.batch_id = batch_id
+        self.path = self.batch_dir / "events.jsonl"
+        self._lock = threading.Lock()
+        self._next_seq = self._recover_next_seq()
+        # (run_id, unit) -> last completed; same-unit progress must not regress.
+        self._last_completed: dict[tuple[str, str], int] = {}
+
+    def _recover_next_seq(self) -> int:
+        if not self.path.exists():
+            return 1
+        max_seq = 0
+        with open(self.path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    max_seq = max(max_seq, int(json.loads(line).get("seq", 0)))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+        return max_seq + 1
+
+    def append(
+        self,
+        *,
+        event_type: str,
+        scope: str,
+        stage: str | None = None,
+        run_id: str | None = None,
+        variant_key: str | None = None,
+        strategy_id: str | None = None,
+        strategy_substage: str | None = None,
+        progress: dict[str, Any] | None = None,
+        message: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate, assign the global seq, atomically append, then return the
+        event (publication happens after this returns)."""
+        if event_type not in VALID_EVENT_TYPES:
+            raise EventValidationError(f"unknown event_type {event_type!r}")
+        if scope not in VALID_EVENT_SCOPES:
+            raise EventValidationError(f"unknown scope {scope!r}")
+        if scope == "VARIANT" and not (run_id and variant_key and strategy_id):
+            raise EventValidationError(
+                "VARIANT events require run_id, variant_key and strategy_id"
+            )
+
+        validated_progress = None
+        if progress is not None:
+            validated_progress = _validate_progress(progress)
+
+        with self._lock:
+            if validated_progress is not None:
+                unit_key = (run_id or "", validated_progress["unit"])
+                last = self._last_completed.get(unit_key)
+                if last is not None and validated_progress["completed"] < last:
+                    raise EventValidationError(
+                        f"progress for unit {validated_progress['unit']!r} went "
+                        f"backwards: {validated_progress['completed']} < {last}"
+                    )
+            seq = self._next_seq
+            event = {
+                "schema_version": EVENT_SCHEMA_VERSION,
+                "seq": seq,
+                "event_type": event_type,
+                "scope": scope,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime(
+                    "%Y-%m-%dT%H:%M:%S"
+                ),
+                "batch_id": self.batch_id,
+                "run_id": run_id,
+                "variant_key": variant_key,
+                "strategy_id": strategy_id,
+                "stage": stage,
+                "strategy_substage": strategy_substage,
+                "progress": validated_progress,
+                "message": message,
+                "error": error,
+            }
+            append_jsonl(self.path, event)
+            if validated_progress is not None:
+                unit_key = (run_id or "", validated_progress["unit"])
+                self._last_completed[unit_key] = validated_progress["completed"]
+            self._next_seq = seq + 1
+        return event

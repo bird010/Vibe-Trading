@@ -187,3 +187,126 @@ class TestTaskStateMachine:
         result = TaskStateMachine.mark_interrupted({"stage": "CLUSTERING", "progress": 50})
         assert result["stage"] == "FAILED_INTERRUPTED"
         assert result["progress"] == 50
+
+
+# ── Phase 4 Task 3: batch event envelope and log (§30.1) ──
+
+from src.stockpred.fund_rotation.persistence import (  # noqa: E402
+    BatchEventLog,
+    EventValidationError,
+)
+
+
+class TestEventEnvelope:
+    def test_append_writes_full_envelope_persisted_first(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        event = log.append(
+            event_type="BATCH_STAGE", scope="BATCH", stage="VALIDATING",
+        )
+        # Persisted before being returned (events.jsonl already contains it).
+        line = (tmp_path / "events.jsonl").read_text(encoding="utf-8").strip()
+        stored = json.loads(line)
+        assert stored["seq"] == event["seq"] == 1
+        assert stored["schema_version"] == "v2"
+        assert stored["event_type"] == "BATCH_STAGE"
+        assert stored["scope"] == "BATCH"
+        assert stored["batch_id"] == "b1"
+        assert stored["stage"] == "VALIDATING"
+        assert stored["ts"]  # §30.1 time field
+
+    def test_variant_scope_requires_identity_fields(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        with pytest.raises(EventValidationError):
+            log.append(event_type="VARIANT_STAGE", scope="VARIANT", stage="EXECUTING")
+        event = log.append(
+            event_type="VARIANT_STAGE", scope="VARIANT", stage="EXECUTING",
+            run_id="r1", variant_key="s@abc", strategy_id="s",
+        )
+        assert event["run_id"] == "r1"
+
+    def test_unknown_event_type_or_scope_rejected(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        with pytest.raises(EventValidationError):
+            log.append(event_type="NOPE", scope="BATCH")
+        with pytest.raises(EventValidationError):
+            log.append(event_type="BATCH_STAGE", scope="NOPE")
+
+    def test_seq_globally_monotonic_across_scopes(self, tmp_path):
+        """§30.1 — the batch-level seq is global; child-local seqs never leak
+        into the parent event file."""
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        seqs = []
+        seqs.append(log.append(event_type="BATCH_STAGE", scope="BATCH",
+                               stage="VALIDATING")["seq"])
+        seqs.append(log.append(event_type="VARIANT_STAGE", scope="VARIANT",
+                               stage="EXECUTING", run_id="r1",
+                               variant_key="s@a", strategy_id="s")["seq"])
+        seqs.append(log.append(event_type="VARIANT_STAGE", scope="VARIANT",
+                               stage="EXECUTING", run_id="r2",
+                               variant_key="s@b", strategy_id="s")["seq"])
+        seqs.append(log.append(event_type="TERMINAL", scope="BATCH",
+                               stage="SUCCEEDED")["seq"])
+        assert seqs == [1, 2, 3, 4]
+
+    def test_seq_continues_after_restart(self, tmp_path):
+        first = BatchEventLog(tmp_path, batch_id="b1")
+        first.append(event_type="BATCH_STAGE", scope="BATCH", stage="VALIDATING")
+        first.append(event_type="BATCH_STAGE", scope="BATCH",
+                     stage="SNAPSHOTTING_DATA")
+        reopened = BatchEventLog(tmp_path, batch_id="b1")
+        event = reopened.append(event_type="BATCH_STAGE", scope="BATCH",
+                                stage="RUNNING_STRATEGIES")
+        assert event["seq"] == 3
+
+
+class TestProgressValidation:
+    def _append_progress(self, log, completed, total, unit="decision_dates"):
+        return log.append(
+            event_type="VARIANT_PROGRESS", scope="VARIANT",
+            run_id="r1", variant_key="s@a", strategy_id="s",
+            progress={"completed": completed, "total": total, "unit": unit},
+        )
+
+    def test_ratio_recomputed_from_completed_and_total(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        event = self._append_progress(log, 12, 81)
+        assert event["progress"]["ratio"] == pytest.approx(12 / 81)
+
+    def test_zero_total_ratio_is_zero(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        event = self._append_progress(log, 0, 0)
+        assert event["progress"]["ratio"] == 0.0
+
+    def test_negative_or_inverted_progress_rejected(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        with pytest.raises(EventValidationError):
+            self._append_progress(log, -1, 10)
+        with pytest.raises(EventValidationError):
+            self._append_progress(log, 11, 10)
+        with pytest.raises(EventValidationError):
+            log.append(
+                event_type="VARIANT_PROGRESS", scope="VARIANT",
+                run_id="r1", variant_key="s@a", strategy_id="s",
+                progress={"completed": 1.5, "total": 10, "unit": "x"},
+            )
+
+    def test_same_unit_progress_cannot_go_backwards(self, tmp_path):
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        self._append_progress(log, 10, 81)
+        with pytest.raises(EventValidationError):
+            self._append_progress(log, 5, 81)
+        # Equal or forward is fine; a different unit is independent.
+        self._append_progress(log, 10, 81)
+        self._append_progress(log, 0, 3, unit="reclusters")
+
+    def test_progress_tracks_per_variant(self, tmp_path):
+        """The no-regression window is per (run_id, unit): another variant may
+        start at zero."""
+        log = BatchEventLog(tmp_path, batch_id="b1")
+        self._append_progress(log, 10, 81)
+        event = log.append(
+            event_type="VARIANT_PROGRESS", scope="VARIANT",
+            run_id="r2", variant_key="s@b", strategy_id="s",
+            progress={"completed": 0, "total": 81, "unit": "decision_dates"},
+        )
+        assert event["progress"]["completed"] == 0
