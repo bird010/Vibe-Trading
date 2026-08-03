@@ -1,18 +1,9 @@
 """Strict common-calendar comparisons — Phase 4 Task 5 (§22/§27).
 
-Only technically successful sub-runs whose equity index EXACTLY equals the
-shared evaluation calendar participate; the interval is never shortened by
-date intersection. Metrics are recomputed from each variant's RAW equity and
-the common ``initial_nav=1.0`` — display fields are never reused.
-
-Research quality is four-valued (VALID/DEGRADED/INVALID/FAILED): only
-VALID/DEGRADED rank; a technically successful INVALID-quality run keeps its
-full NAV and diagnostics with a warning but never ranks; FAILED never enters
-the comparison with zero returns (§9/§27).
-
-The comparison contract fingerprint has exactly eight components and never
-includes strategy implementation/config identities; each variant's identity
-hash travels separately (§27).
+Only technically successful sub-runs whose equity index exactly equals the
+shared evaluation calendar participate. Metrics are recomputed from raw equity
+and the comparison fingerprint binds the actual resolved execution contract,
+not a static version label.
 """
 
 from __future__ import annotations
@@ -20,19 +11,18 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
 from backtest.fund_rotation.metrics import compute_performance_metrics
 
-# Contract component versions (bumped when the corresponding policy changes).
+
 CONTRACT_VERSIONS = {
     "universe_policy_version": "v1",
-    "return_policy_version": "v1",      # pct_change(fill_method=None), PIT
-    "execution_contract": "v1",         # ETF lots/ADV20/fees (§12)
+    "return_policy_version": "v1",
     "benchmark_contract_version": "v1",
-    "metric_contract_version": "v1",    # 244 periods/year, initial_nav anchor
+    "metric_contract_version": "v1",
 }
 
 CONTRACT_COMPONENT_KEYS = {
@@ -46,7 +36,6 @@ CONTRACT_COMPONENT_KEYS = {
     "metric_contract_version",
 }
 
-# Stable exclusion reason codes.
 EXCLUDED_TECHNICAL_FAILURE = "TECHNICAL_FAILURE"
 EXCLUDED_CANCELED = "CANCELED"
 EXCLUDED_DECISION_INVALID = "DECISION_INVALID"
@@ -56,8 +45,6 @@ EXCLUDED_NO_EQUITY = "NO_EQUITY"
 
 @dataclass(frozen=True)
 class VariantComparisonInput:
-    """One sub-run's comparison evidence (raw equity, not display fields)."""
-
     variant_key: str
     strategy_id: str
     run_id: str
@@ -78,9 +65,22 @@ class ComparisonOutcome:
     quality_warnings: list[dict[str, str]] = field(default_factory=list)
 
 
+def _canonical_hash(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def evaluation_calendar_hash(calendar: Sequence[str]) -> str:
-    """Order-independent hash of the shared evaluation calendar."""
-    canonical = json.dumps(sorted(str(d) for d in calendar), ensure_ascii=False)
+    """Hash the exact ordered evaluation calendar."""
+    canonical = json.dumps(
+        [str(date) for date in calendar],
+        ensure_ascii=False,
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -89,19 +89,31 @@ def comparison_contract_fingerprint(
     framework_implementation_hash: str,
     data_snapshot_fingerprint: str,
     evaluation_calendar: Sequence[str],
+    execution_contract: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, str], str]:
-    """§27 — the eight comparison-contract components and their fingerprint.
+    """Return the eight comparison-contract components and fingerprint.
 
-    Strategy implementation/config identities are deliberately NOT components.
+    ``execution_contract`` must be the fully resolved common execution config,
+    including server defaults. The component stores its canonical hash while
+    the resolved document is persisted separately in child specifications.
     """
+    resolved_execution = dict(execution_contract or {"version": "v1"})
     components = {
         "framework_implementation_hash": framework_implementation_hash,
         "data_snapshot_fingerprint": data_snapshot_fingerprint,
-        "evaluation_calendar_hash": evaluation_calendar_hash(evaluation_calendar),
+        "evaluation_calendar_hash": evaluation_calendar_hash(
+            evaluation_calendar
+        ),
+        "execution_contract": _canonical_hash(resolved_execution),
         **CONTRACT_VERSIONS,
     }
-    canonical = json.dumps(components, sort_keys=True, ensure_ascii=False)
-    return components, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if set(components) != CONTRACT_COMPONENT_KEYS:
+        raise ValueError(
+            "comparison contract registry mismatch: "
+            f"expected {sorted(CONTRACT_COMPONENT_KEYS)}, "
+            f"got {sorted(components)}"
+        )
+    return components, _canonical_hash(components)
 
 
 def build_comparison(
@@ -110,19 +122,14 @@ def build_comparison(
     evaluation_calendar: Sequence[str],
     framework_implementation_hash: str,
     data_snapshot_fingerprint: str,
+    execution_contract: Mapping[str, object] | None = None,
     initial_nav: float = 1.0,
 ) -> ComparisonOutcome:
-    """Build the strict comparison across eligible sub-runs.
-
-    Eligibility: status SUCCEEDED, no decision action INVALID, and an equity
-    index EXACTLY equal to the evaluation calendar (no intersection).
-    INVALID-quality runs stay displayed (equity + metrics + warning) but are
-    never ranked; ranking covers VALID/DEGRADED only, by annual_return desc.
-    """
     components, fingerprint = comparison_contract_fingerprint(
         framework_implementation_hash=framework_implementation_hash,
         data_snapshot_fingerprint=data_snapshot_fingerprint,
         evaluation_calendar=evaluation_calendar,
+        execution_contract=execution_contract,
     )
 
     calendar_index = pd.Index(list(evaluation_calendar))
@@ -151,7 +158,8 @@ def build_comparison(
         if equity is None or equity.empty:
             excluded.append({"variant_key": key, "reason": EXCLUDED_NO_EQUITY})
             continue
-        if not equity.index.equals(calendar_index):
+        normalized_index = pd.Index([str(value) for value in equity.index])
+        if not normalized_index.equals(calendar_index):
             excluded.append(
                 {"variant_key": key, "reason": EXCLUDED_CALENDAR_MISMATCH}
             )
@@ -163,38 +171,53 @@ def build_comparison(
             )
             continue
 
-        # Recompute metrics from the raw equity and the common anchor.
+        normalized_equity = equity.copy()
+        normalized_equity.index = normalized_index
         metrics[key] = compute_performance_metrics(
-            equity, periods_per_year=244, initial_nav=initial_nav,
+            normalized_equity,
+            periods_per_year=244,
+            initial_nav=initial_nav,
         )
-        displayed[key] = equity
+        displayed[key] = normalized_equity
 
         if variant.decision_quality == "INVALID":
-            quality_warnings.append({
-                "variant_key": key,
-                "reason": "RESEARCH_QUALITY_INVALID",
-                "message": (
-                    "research quality INVALID: NAV preserved for display, "
-                    "excluded from ranking"
-                ),
-            })
+            quality_warnings.append(
+                {
+                    "variant_key": key,
+                    "reason": "RESEARCH_QUALITY_INVALID",
+                    "message": (
+                        "research quality INVALID: NAV preserved for display, "
+                        "excluded from ranking"
+                    ),
+                }
+            )
             continue
-        ranked_entries.append({
-            "variant_key": key,
-            "strategy_id": variant.strategy_id,
-            "run_id": variant.run_id,
-            "quality_status": variant.decision_quality,
-            "annual_return": metrics[key].get("annual_return", 0.0),
-        })
+
+        variant_metrics = metrics[key]
+        ranked_entries.append(
+            {
+                "variant_key": key,
+                "strategy_id": variant.strategy_id,
+                "run_id": variant.run_id,
+                "quality_status": variant.decision_quality,
+                "annual_return": variant_metrics.get("annual_return", 0.0),
+                "total_return": variant_metrics.get("total_return", 0.0),
+                "sharpe": variant_metrics.get("sharpe", 0.0),
+                "max_drawdown": variant_metrics.get("max_drawdown", 0.0),
+                "calmar": variant_metrics.get("calmar", 0.0),
+            }
+        )
 
     ranked_entries.sort(
-        key=lambda e: (-e["annual_return"], e["variant_key"]),
+        key=lambda entry: (-entry["annual_return"], entry["variant_key"])
     )
     for rank, entry in enumerate(ranked_entries, start=1):
         entry["rank"] = rank
 
-    equity_frame = pd.DataFrame(displayed) if displayed else pd.DataFrame(
-        index=calendar_index,
+    equity_frame = (
+        pd.DataFrame(displayed)
+        if displayed
+        else pd.DataFrame(index=calendar_index)
     )
 
     return ComparisonOutcome(
