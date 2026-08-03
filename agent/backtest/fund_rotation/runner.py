@@ -3,12 +3,15 @@
 Design §5/§6/§7/§24/§26/§32.3. The Runner drives any ``FundRotationStrategy``
 through the common life cycle without knowing its algorithm:
 
-1. resolve data requirements and build a per-signal ``CausalDataView``;
-2. create an isolated session and drive ``evaluate`` on its scheduled dates;
+1. consume the immutable resolved data requirements and build a per-signal
+   ``CausalDataView``;
+2. create an isolated session and drive ``evaluate`` only from the planned
+   decision start date (never from the data-loading warmup boundary);
 3. validate every ``TargetWeightDecision`` against the public contract;
 4. schedule SET_TARGETS decisions via the shared ``schedule_targets`` rule and
    drive the common execution module (sell-before-buy, ADV capacity, valuation);
-5. finalize the session and report metrics.
+5. enforce the exact evaluation calendar, finalize the session and report
+   metrics.
 
 The Runner recognizes only the three public decision actions — never a
 per-strategy branch. Cancellation is checked at decision-day and execution
@@ -23,13 +26,14 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from backtest.fund_rotation.causal_data import CausalDataView, UndeclaredStrategyDataAccess
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.contracts import (
     DecisionKind,
     StrategyContractViolation,
+    StrategyDataRequirements,
     StrategyDecisionContext,
     StrategyDiagnostics,
     StrategyInitializationContext,
@@ -71,20 +75,33 @@ class ExecutionConfig(BaseModel):
     """Common execution parameters shared by all strategies (§25).
 
     Deliberately contains NO strategy parameters (k, lookbacks, ...): execution
-    rules are identical for every variant in a batch.
+    rules are identical for every variant in a batch.  Bounds are enforced at
+    request validation time so a background task is never created with an
+    impossible execution contract.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    initial_capital: float = 1_000_000.0
-    commission_rate: float = 0.00025
-    commission_min: float = 5.0
-    other_fee_rate: float = 0.0
-    max_participation_rate: float = 0.05
-    adv_lookback: int = 20
-    adv_min_observations: int = 10
-    base_slippage_bps: float = 5.0
-    max_slippage_bps: float = 30.0
+    initial_capital: float = Field(default=1_000_000.0, gt=0)
+    commission_rate: float = Field(default=0.00025, ge=0)
+    commission_min: float = Field(default=5.0, ge=0)
+    other_fee_rate: float = Field(default=0.0, ge=0)
+    max_participation_rate: float = Field(default=0.05, gt=0, le=1)
+    adv_lookback: int = Field(default=20, ge=1)
+    adv_min_observations: int = Field(default=10, ge=1)
+    base_slippage_bps: float = Field(default=5.0, ge=0)
+    max_slippage_bps: float = Field(default=30.0, ge=0)
+    lot_size: int = Field(default=100, ge=1)
+
+    def model_post_init(self, __context: object) -> None:
+        if self.adv_min_observations > self.adv_lookback:
+            raise ValueError(
+                "adv_min_observations must be <= adv_lookback"
+            )
+        if self.max_slippage_bps < self.base_slippage_bps:
+            raise ValueError(
+                "max_slippage_bps must be >= base_slippage_bps"
+            )
 
 
 class SubRunStatus(str, Enum):
@@ -144,25 +161,45 @@ class FundRotationBacktestRunner:
         execution: ExecutionConfig,
         cancellation: CancellationToken,
         *,
-        simulation_start_date: str | None = None,
+        decision_start_date: str | None = None,
+        resolved_requirements: StrategyDataRequirements | None = None,
         run_id: str | None = None,
+        # Backward-compatible alias for direct callers.  Batch orchestration
+        # must use ``decision_start_date``; this alias will be removed after
+        # legacy callers have migrated.
+        simulation_start_date: str | None = None,
     ) -> FundRotationRunResult:
         if cancellation.is_cancelled:
             return FundRotationRunResult(status=SubRunStatus.CANCELED, error_code="CANCELED")
 
-        requirements = strategy.resolve_requirements(config)
+        if (
+            decision_start_date is not None
+            and simulation_start_date is not None
+            and str(decision_start_date) != str(simulation_start_date)
+        ):
+            return FundRotationRunResult(
+                status=SubRunStatus.FAILED,
+                error_code=StrategyContractViolation.code,
+                error_message=(
+                    "decision_start_date and deprecated simulation_start_date "
+                    "must match when both are supplied"
+                ),
+            )
+
+        requirements = resolved_requirements or strategy.resolve_requirements(config)
         all_trade_dates = sorted(
             {str(d) for d in self._fund_daily["trade_date"].astype(str).unique()}
         )
         warmup = int(requirements.warmup_trade_days)
-        if simulation_start_date is not None:
-            simulation_start = str(simulation_start_date)
-            if simulation_start not in all_trade_dates:
+        planned_decision_start = decision_start_date or simulation_start_date
+        if planned_decision_start is not None:
+            decision_start = str(planned_decision_start)
+            if decision_start not in all_trade_dates:
                 return FundRotationRunResult(
                     status=SubRunStatus.FAILED,
                     error_code=StrategyContractViolation.code,
                     error_message=(
-                        f"planned simulation_start_date {simulation_start!r} "
+                        f"planned decision_start_date {decision_start!r} "
                         "is not an available trading day"
                     ),
                 )
@@ -181,7 +218,7 @@ class FundRotationBacktestRunner:
                         f"have {len(week_endings)}"
                     ),
                 )
-            simulation_start = week_endings[needed_endings - 1]
+            decision_start = week_endings[needed_endings - 1]
         else:
             if len(all_trade_dates) <= warmup:
                 return FundRotationRunResult(
@@ -192,7 +229,8 @@ class FundRotationBacktestRunner:
                     ),
                 )
             # §6: first date at which the declared warmup is fully satisfied.
-            simulation_start = all_trade_dates[warmup]
+            decision_start = all_trade_dates[warmup]
+
         evaluation_dates = [d.strftime("%Y%m%d") for d in evaluation.trading_dates]
         if not evaluation_dates:
             return FundRotationRunResult(
@@ -211,9 +249,14 @@ class FundRotationBacktestRunner:
 
         try:
             scheduled = tuple(
-                session.scheduled_dates(tuple(all_trade_dates), simulation_start, evaluation_end)
+                session.scheduled_dates(tuple(all_trade_dates), decision_start, evaluation_end)
             )
-            self._check_schedule(scheduled, set(all_trade_dates), simulation_start, evaluation_end)
+            self._check_schedule(
+                scheduled,
+                set(all_trade_dates),
+                decision_start,
+                evaluation_end,
+            )
         except StrategyContractViolation as exc:
             return FundRotationRunResult(
                 status=SubRunStatus.FAILED,
@@ -227,17 +270,37 @@ class FundRotationBacktestRunner:
         current_targets: dict[str, float] = {}
         seen_decision_ids: set[str] = set()
 
-        def _fail(error_code: str, error_message: str = "") -> FundRotationRunResult:
+        def _fail(
+            error_code: str,
+            error_message: str = "",
+            *,
+            executed_equity: pd.Series | None = None,
+            trade_events: list[dict] | None = None,
+            orders: list[dict] | None = None,
+            positions_history: list[dict] | None = None,
+            strategy_metrics: dict[str, float] | None = None,
+            quality_status: str = "VALID",
+        ) -> FundRotationRunResult:
             return FundRotationRunResult(
                 status=SubRunStatus.FAILED,
                 error_code=error_code,
                 error_message=error_message,
                 decisions=tuple(decisions),
                 weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                executed_equity=(
+                    executed_equity
+                    if executed_equity is not None
+                    else pd.Series(dtype=float)
+                ),
+                trade_events=trade_events or [],
+                orders=orders or [],
+                positions_history=positions_history or [],
+                strategy_metrics=strategy_metrics or {},
+                quality_status=quality_status,
             )
 
-        # §6/§7 — decision loop (pure warmup dates are never evaluated because
-        # scheduled_dates starts at the strategy's own warmup boundary).
+        # §6/§7 — decision loop.  Pure warmup dates are data-only and can never
+        # enter this loop because the session is scheduled from decision_start.
         for signal_date in scheduled:
             if cancellation.is_cancelled:
                 return FundRotationRunResult(
@@ -318,13 +381,16 @@ class FundRotationBacktestRunner:
             adv_min_observations=execution.adv_min_observations,
             base_slippage_bps=execution.base_slippage_bps,
             max_slippage_bps=execution.max_slippage_bps,
+            lot_size=execution.lot_size,
             start_date=evaluation_dates[0],
             end_date=evaluation_dates[-1],
         )
         pipeline_result = PipelineResult(weekly_targets=targets_map)
         exec_ctx = build_execution_context(self._fund_daily, self._fund_adj, exec_config)
         run_execution_loop(
-            pipeline_result, exec_config, exec_ctx,
+            pipeline_result,
+            exec_config,
+            exec_ctx,
             evaluation_dates=evaluation_dates,
             should_cancel=lambda: cancellation.is_cancelled,
         )
@@ -341,6 +407,21 @@ class FundRotationBacktestRunner:
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
             )
+
+        actual_equity_dates = pd.Index(
+            [str(value) for value in pipeline_result.executed_equity.index]
+        )
+        expected_equity_dates = pd.Index(evaluation_dates)
+        if not actual_equity_dates.equals(expected_equity_dates):
+            return _fail(
+                "EVALUATION_CALENDAR_MISMATCH",
+                "executed equity index must exactly equal the evaluation calendar",
+                executed_equity=pipeline_result.executed_equity,
+                trade_events=pipeline_result.trade_events,
+                orders=pipeline_result.orders,
+                positions_history=pipeline_result.positions_history,
+            )
+
         strategy_metrics = compute_performance_metrics(
             pipeline_result.executed_equity,
             periods_per_year=244,
@@ -354,12 +435,9 @@ class FundRotationBacktestRunner:
         try:
             diagnostics = session.finalize()
         except Exception as exc:
-            return FundRotationRunResult(
-                status=SubRunStatus.FAILED,
-                error_code="FINALIZE_FAILED",
-                error_message=str(exc),
-                decisions=tuple(decisions),
-                weekly_targets={d: dict(w) for d, w in targets_map.items()},
+            return _fail(
+                "FINALIZE_FAILED",
+                str(exc),
                 executed_equity=pipeline_result.executed_equity,
                 trade_events=pipeline_result.trade_events,
                 orders=pipeline_result.orders,
@@ -387,11 +465,11 @@ class FundRotationBacktestRunner:
     def _check_schedule(
         scheduled: tuple[str, ...],
         trading_days: set[str],
-        simulation_start: str,
+        decision_start: str,
         evaluation_end: str,
     ) -> None:
         """§6 — decision calendar: strictly increasing actual trading days
-        within [warmup boundary, evaluation end]."""
+        within [decision start, evaluation end]."""
         previous = ""
         for date in scheduled:
             date = str(date)
@@ -399,10 +477,10 @@ class FundRotationBacktestRunner:
                 raise StrategyContractViolation(
                     f"scheduled decision date {date!r} is not an actual trading day"
                 )
-            if date < simulation_start:
+            if date < decision_start:
                 raise StrategyContractViolation(
                     f"scheduled decision date {date!r} is inside the pure warmup "
-                    f"period (before {simulation_start!r})"
+                    f"period (before decision start {decision_start!r})"
                 )
             if date > evaluation_end:
                 raise StrategyContractViolation(
@@ -426,7 +504,9 @@ def _worst_quality_status(decisions: list) -> str:
     worst = max(
         decisions,
         key=lambda d: _QUALITY_ORDER.get(
-            str(d.quality_status.value) if hasattr(d.quality_status, "value") else str(d.quality_status),
+            str(d.quality_status.value)
+            if hasattr(d.quality_status, "value")
+            else str(d.quality_status),
             0,
         ),
     )
