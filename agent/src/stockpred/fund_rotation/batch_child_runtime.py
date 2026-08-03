@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -26,15 +27,20 @@ from src.stockpred.fund_rotation.state_machine import (
     detect_interrupted_state,
     mark_state_interrupted,
 )
+from src.stockpred.fund_rotation.strategy_snapshot import (
+    compute_run_identity_hash,
+    record_runtime_versions,
+)
 
 
 class BatchChildRuntime:
-    """Own child state transitions, artifact publication and crash recovery."""
+    """Own child state transitions, artifacts and crash recovery."""
 
     def __init__(self, runs_root: Path, catalog, framework_hash: str) -> None:
         self.runs_root = Path(runs_root)
         self.catalog = catalog
         self.framework_hash = framework_hash
+        self.runtime_versions = record_runtime_versions()
 
     def record_stage(
         self,
@@ -80,7 +86,11 @@ class BatchChildRuntime:
             state["error"] = error
         atomic_write_json(state_path, state)
         self._append_event(
-            run_dir, state, stage=target, message=message, error=error,
+            run_dir,
+            state,
+            stage=target,
+            message=message,
+            error=error,
         )
 
     def publish_result(
@@ -92,100 +102,202 @@ class BatchChildRuntime:
         snapshot,
         evaluation: EvaluationContext,
         result,
+        terminal_stage: str = ChildStage.SUCCEEDED.value,
+        execution_config=None,
     ) -> None:
-        """Write a complete child result and publish its manifest last."""
+        """Publish complete or partial evidence and write the manifest last.
+
+        FAILED and CANCELED runs preserve all evidence produced before their
+        terminal checkpoint. Their manifests are explicitly marked partial and
+        non-comparable; they are never accepted by success readers.
+        """
+        terminal = ChildStage(terminal_stage)
+        if terminal not in {
+            ChildStage.SUCCEEDED,
+            ChildStage.FAILED,
+            ChildStage.CANCELED,
+        }:
+            raise ValueError(f"unsupported child terminal stage: {terminal.value}")
+
         identity = plan["identity"]
         run_id = plan["run_id"]
         run_dir = self.runs_root / run_id
         publisher = ArtifactPublisher(run_dir)
         registered = self.catalog.require(identity.strategy_id)
 
-        publisher.publish(StrategyArtifact(
-            role="resolved_spec",
-            media_type="application/json",
-            payload={
-                **identity.__dict__,
-                "batch_id": batch_id,
-                "run_id": run_id,
-                "schema_version": request.schema_version,
-                "mode": request.mode,
-                "simulation_start_date": plan["simulation_start"],
-                "evaluation_start_date": request.evaluation_start_date,
-                "evaluation_end_date": request.evaluation_end_date,
-                "execution": dict(request.execution),
-                "framework_implementation_hash": self.framework_hash,
-                "data_snapshot_fingerprint": snapshot.fingerprint,
-            },
-        ))
-        publisher.publish(StrategyArtifact(
-            role="strategy_snapshot",
-            media_type="application/json",
-            payload={
-                "strategy_id": identity.strategy_id,
-                "implementation_hash": identity.implementation_hash,
-                "source_files": list(
-                    registered.implementation_snapshot.source_files
-                ),
-                "descriptor": asdict(registered.descriptor),
-            },
-        ))
-        publisher.publish(StrategyArtifact(
-            role="data_snapshot", media_type="application/json",
-            payload=asdict(snapshot),
-        ))
-        publisher.publish(StrategyArtifact(
-            role="evaluation_calendar", media_type="application/json",
-            payload=[date.strftime("%Y%m%d") for date in evaluation.trading_dates],
-        ))
+        resolved_execution = (
+            execution_config.model_dump(mode="json")
+            if execution_config is not None
+            else dict(request.execution)
+        )
+        resolved_execution_hash = _canonical_hash(resolved_execution)
+        research_contract = {
+            "schema_version": request.schema_version,
+            "mode": request.mode,
+            "data_start": plan["data_start"],
+            "decision_start_date": plan["decision_start_date"],
+            "anchor_decision_date": plan["anchor_decision_date"],
+            "evaluation_start_date": request.evaluation_start_date,
+            "evaluation_end_date": request.evaluation_end_date,
+            "resolved_requirements_hash": identity.resolved_requirements_hash,
+        }
+        run_identity_hash = compute_run_identity_hash(
+            identity.implementation_hash,
+            self.framework_hash,
+            identity.resolved_config_hash,
+            snapshot.fingerprint,
+            research_contract,
+            resolved_execution,
+        )
+        partial = terminal is not ChildStage.SUCCEEDED
 
-        decisions = pd.DataFrame([
-            {
-                "decision_id": decision.decision_id,
-                "signal_date": decision.signal_date,
-                "action": decision.action.value,
-                "target_weights": json.dumps(
-                    dict(decision.target_weights), sort_keys=True,
-                    ensure_ascii=False,
-                ),
-                "cash_weight": decision.cash_weight,
-                "reason_code": decision.reason_code,
-                "quality_status": decision.quality_status.value,
-                "diagnostics": json.dumps(
-                    dict(decision.diagnostics), sort_keys=True,
-                    ensure_ascii=False, default=str,
-                ),
-            }
-            for decision in result.decisions
-        ], columns=[
-            "decision_id", "signal_date", "action", "target_weights",
-            "cash_weight", "reason_code", "quality_status", "diagnostics",
-        ])
-        targets = pd.DataFrame([
-            {"week_ending": date, "ts_code": code, "weight": weight}
-            for date, weights in sorted(result.weekly_targets.items())
-            for code, weight in sorted(weights.items())
-        ], columns=["week_ending", "ts_code", "weight"])
+        publisher.publish(
+            StrategyArtifact(
+                role="resolved_spec",
+                media_type="application/json",
+                payload={
+                    **identity.__dict__,
+                    "batch_id": batch_id,
+                    "run_id": run_id,
+                    "schema_version": request.schema_version,
+                    "mode": request.mode,
+                    "data_start": plan["data_start"],
+                    "decision_start_date": plan["decision_start_date"],
+                    "anchor_decision_date": plan["anchor_decision_date"],
+                    "evaluation_start_date": request.evaluation_start_date,
+                    "evaluation_end_date": request.evaluation_end_date,
+                    "execution": resolved_execution,
+                    "resolved_execution_hash": resolved_execution_hash,
+                    "framework_implementation_hash": self.framework_hash,
+                    "strategy_implementation_hash": identity.implementation_hash,
+                    "data_snapshot_fingerprint": snapshot.fingerprint,
+                    "run_identity_hash": run_identity_hash,
+                    "runtime_versions": dict(self.runtime_versions),
+                    "terminal_status": terminal.value,
+                    "partial": partial,
+                    "publishable_for_comparison": not partial,
+                },
+            )
+        )
+        publisher.publish(
+            StrategyArtifact(
+                role="strategy_snapshot",
+                media_type="application/json",
+                payload={
+                    "strategy_id": identity.strategy_id,
+                    "implementation_hash": identity.implementation_hash,
+                    "source_files": list(
+                        registered.implementation_snapshot.source_files
+                    ),
+                    "file_hashes": dict(
+                        registered.implementation_snapshot.file_hashes
+                    ),
+                    "descriptor": asdict(registered.descriptor),
+                },
+            )
+        )
+        publisher.publish(
+            StrategyArtifact(
+                role="data_snapshot",
+                media_type="application/json",
+                payload=asdict(snapshot),
+            )
+        )
+        publisher.publish(
+            StrategyArtifact(
+                role="evaluation_calendar",
+                media_type="application/json",
+                payload=[
+                    date.strftime("%Y%m%d")
+                    for date in evaluation.trading_dates
+                ],
+            )
+        )
+
+        decisions = pd.DataFrame(
+            [
+                {
+                    "decision_id": decision.decision_id,
+                    "signal_date": decision.signal_date,
+                    "action": decision.action.value,
+                    "target_weights": json.dumps(
+                        dict(decision.target_weights),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                    ),
+                    "cash_weight": decision.cash_weight,
+                    "reason_code": decision.reason_code,
+                    "quality_status": decision.quality_status.value,
+                    "diagnostics": json.dumps(
+                        dict(decision.diagnostics),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+                for decision in result.decisions
+            ],
+            columns=[
+                "decision_id",
+                "signal_date",
+                "action",
+                "target_weights",
+                "cash_weight",
+                "reason_code",
+                "quality_status",
+                "diagnostics",
+            ],
+        )
+        targets = pd.DataFrame(
+            [
+                {
+                    "week_ending": date,
+                    "ts_code": code,
+                    "weight": weight,
+                }
+                for date, weights in sorted(result.weekly_targets.items())
+                for code, weight in sorted(weights.items())
+            ],
+            columns=["week_ending", "ts_code", "weight"],
+        )
         orders = pd.DataFrame(result.orders)
         if orders.empty:
-            orders = pd.DataFrame(columns=["order_id", "ts_code", "status"])
+            orders = pd.DataFrame(
+                columns=["order_id", "ts_code", "status"]
+            )
         fills = pd.DataFrame(result.trade_events)
         if fills.empty:
-            fills = pd.DataFrame(columns=["trade_date", "ts_code", "quantity"])
+            fills = pd.DataFrame(
+                columns=["trade_date", "ts_code", "quantity"]
+            )
         positions = pd.DataFrame(_flatten_positions(result.positions_history))
         if positions.empty:
-            positions = pd.DataFrame(columns=[
-                "trade_date", "ts_code", "quantity", "market_value", "cash",
-            ])
+            positions = pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "ts_code",
+                    "quantity",
+                    "market_value",
+                    "cash",
+                ]
+            )
+
         summary = {
             "mode": request.mode,
             "run_id": run_id,
             "strategy_id": identity.strategy_id,
             "variant_key": identity.variant_key,
+            "status": terminal.value,
+            "partial": partial,
+            "publishable_for_comparison": not partial,
+            "error_code": getattr(result, "error_code", ""),
+            "error_message": getattr(result, "error_message", ""),
             "quality_status": result.quality_status,
             "annual_return": result.strategy_metrics.get("annual_return", 0.0),
             "max_drawdown": result.strategy_metrics.get("max_drawdown", 0.0),
             "sharpe": result.strategy_metrics.get("sharpe", 0.0),
             "total_return": result.strategy_metrics.get("total_return", 0.0),
+            "run_identity_hash": run_identity_hash,
         }
         for role, media_type, payload in (
             ("target_decisions", "text/csv", decisions),
@@ -194,22 +306,43 @@ class BatchChildRuntime:
             ("fills", "text/csv", fills),
             ("positions", "text/csv", positions),
             ("equity", "text/csv", result.executed_equity.rename("strategy")),
-            ("metrics", "application/json", {
-                "strategy": dict(result.strategy_metrics),
-                "quality_status": result.quality_status,
-            }),
+            (
+                "metrics",
+                "application/json",
+                {
+                    "strategy": dict(result.strategy_metrics),
+                    "quality_status": result.quality_status,
+                    "status": terminal.value,
+                    "partial": partial,
+                    "error_code": getattr(result, "error_code", ""),
+                    "error_message": getattr(result, "error_message", ""),
+                },
+            ),
             ("summary", "application/json", summary),
         ):
-            publisher.publish(StrategyArtifact(
-                role=role, media_type=media_type, payload=payload,
-            ))
+            publisher.publish(
+                StrategyArtifact(
+                    role=role,
+                    media_type=media_type,
+                    payload=payload,
+                )
+            )
         if result.diagnostics is not None:
             for artifact in result.diagnostics.artifacts:
                 publisher.publish(artifact, producer=identity.strategy_id)
 
         self.record_stage(
-            batch_id=batch_id, request=request, identity=identity,
-            run_id=run_id, snapshot=snapshot, stage=ChildStage.SUCCEEDED.value,
+            batch_id=batch_id,
+            request=request,
+            identity=identity,
+            run_id=run_id,
+            snapshot=snapshot,
+            stage=terminal.value,
+            error=(
+                getattr(result, "error_message", "") or None
+                if partial
+                else None
+            ),
             quality_status=result.quality_status,
         )
         try:
@@ -219,29 +352,46 @@ class BatchChildRuntime:
                 entry["file"]: {
                     key: value
                     for key, value in entry.items()
-                    if key in {
-                        "checksum", "rows", "schema_version", "encoding",
+                    if key
+                    in {
+                        "checksum",
+                        "rows",
+                        "schema_version",
+                        "encoding",
                         "columns",
                     }
                 }
                 for entry in publisher.artifact_index().values()
             }
-            publisher.finalize(identity={
-                "run_id": run_id,
-                "batch_id": batch_id,
-                "variant_key": identity.variant_key,
-                "strategy_id": identity.strategy_id,
-                "mode": request.mode,
-                "quality_status": result.quality_status,
-                "params_fingerprint": identity.resolved_config_hash,
-                "data_snapshot_fingerprint": snapshot.fingerprint,
-                "state_checksum": compute_file_checksum(run_dir / "state.json"),
-                "file_details": file_details,
-            })
+            publisher.finalize(
+                status=terminal.value,
+                identity={
+                    "run_id": run_id,
+                    "batch_id": batch_id,
+                    "variant_key": identity.variant_key,
+                    "strategy_id": identity.strategy_id,
+                    "mode": request.mode,
+                    "quality_status": result.quality_status,
+                    "partial": partial,
+                    "publishable_for_comparison": not partial,
+                    "params_fingerprint": identity.resolved_config_hash,
+                    "resolved_execution_hash": resolved_execution_hash,
+                    "framework_implementation_hash": self.framework_hash,
+                    "strategy_implementation_hash": identity.implementation_hash,
+                    "data_snapshot_fingerprint": snapshot.fingerprint,
+                    "run_identity_hash": run_identity_hash,
+                    "state_checksum": compute_file_checksum(
+                        run_dir / "state.json"
+                    ),
+                    "file_details": file_details,
+                },
+            )
         except Exception as exc:
             self._mark_interrupted(
                 run_dir,
-                json.loads((run_dir / "state.json").read_text(encoding="utf-8")),
+                json.loads(
+                    (run_dir / "state.json").read_text(encoding="utf-8")
+                ),
                 error=f"child publication failed: {exc}",
             )
             raise
@@ -264,8 +414,12 @@ class BatchChildRuntime:
             return
         if detect_interrupted_state(state):
             self.record_stage(
-                batch_id=batch_id, request=request, identity=identity,
-                run_id=run_id, snapshot=snapshot, stage=ChildStage.FAILED.value,
+                batch_id=batch_id,
+                request=request,
+                identity=identity,
+                run_id=run_id,
+                snapshot=snapshot,
+                stage=ChildStage.FAILED.value,
                 error=error,
             )
 
@@ -301,10 +455,12 @@ class BatchChildRuntime:
         error: str | None = None,
     ) -> None:
         BatchEventLog(
-            child_dir, batch_id=str(state["batch_id"]),
+            child_dir,
+            batch_id=str(state["batch_id"]),
         ).append(
             event_type=(
-                "TERMINAL" if stage in CHILD_TERMINAL_STAGES
+                "TERMINAL"
+                if stage in CHILD_TERMINAL_STAGES
                 else "VARIANT_STAGE"
             ),
             scope="VARIANT",
@@ -336,14 +492,26 @@ class BatchChildRuntime:
         )
 
 
+def _canonical_hash(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _flatten_positions(history: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for snapshot in history:
         trade_date = snapshot.get("trade_date", "")
         for holding in snapshot.get("holdings", []):
-            rows.append({
-                "trade_date": trade_date,
-                **holding,
-                "cash": snapshot.get("cash", 0.0),
-            })
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    **holding,
+                    "cash": snapshot.get("cash", 0.0),
+                }
+            )
     return rows
