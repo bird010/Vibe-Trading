@@ -38,9 +38,9 @@ class TestCatalogRegistration:
         ]
         for entry in entries:
             assert entry.interface_version == "1.0"
-            assert entry.implementation_hash  # non-empty
+            assert entry.implementation_hash
         with pytest.raises(Exception):
-            entries[0].strategy_id = "x"  # frozen
+            entries[0].strategy_id = "x"
 
     def test_default_whitelist_contains_both_strategies(self):
         strategies = default_fund_rotation_strategies()
@@ -53,7 +53,6 @@ class TestCatalogRegistration:
         baseline_hash = entries["correlation_all_members"].implementation_hash
         representative_hash = entries["correlation_representative"].implementation_hash
         assert representative_hash != baseline_hash
-        # Stable across catalog rebuilds (startup-fixed source hashing).
         rebuilt = _catalog()
         rebuilt_entries = {e.strategy_id: e for e in rebuilt.list()}
         assert (
@@ -69,7 +68,7 @@ class TestCatalogRegistration:
 
     def test_duplicate_id_detected_at_startup(self):
         class _Dup(CorrelationAllMembersStrategy):
-            pass  # same descriptor.id
+            pass
 
         with pytest.raises(CatalogError) as exc_info:
             FundRotationStrategyCatalog([CorrelationAllMembersStrategy, _Dup])
@@ -134,17 +133,20 @@ class TestCatalogRegistration:
 
             return _S
 
-        # Insert out of order; list() must sort by strategy_id.
         catalog = FundRotationStrategyCatalog([_make("zeta"), _make("alpha")])
         assert [e.strategy_id for e in catalog.list()] == ["alpha", "zeta"]
 
     def test_snapshot_invalid_on_unreadable_source(self, monkeypatch):
-        import backtest.fund_rotation.catalog as catalog_mod
+        import src.stockpred.fund_rotation.strategy_snapshot as snapshot_mod
 
-        def _bad_getfile(cls):
-            return "/nonexistent/path/strategy.py"
+        def unreadable(_strategy_cls):
+            raise OSError("strategy source is unreadable")
 
-        monkeypatch.setattr(catalog_mod.inspect, "getfile", _bad_getfile)
+        monkeypatch.setattr(
+            snapshot_mod,
+            "snapshot_strategy_package",
+            unreadable,
+        )
         with pytest.raises(CatalogError) as exc_info:
             FundRotationStrategyCatalog([CorrelationAllMembersStrategy])
         assert exc_info.value.code == FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID
@@ -162,7 +164,8 @@ class TestCatalogResolve:
         catalog = _catalog()
         omitted = catalog.resolve("correlation_all_members", {})
         explicit = catalog.resolve(
-            "correlation_all_members", {"k": 8, "top_n": 3, "initial_capital": 1_000_000.0},
+            "correlation_all_members",
+            {"k": 8, "top_n": 3},
         )
         assert omitted.spec.resolved_config_hash == explicit.spec.resolved_config_hash
 
@@ -194,17 +197,16 @@ class TestCatalogResolve:
         catalog = _catalog()
         binding = catalog.resolve("correlation_all_members", {})
         spec = binding.spec
-        assert spec.implementation_hash  # bound startup snapshot
+        assert spec.implementation_hash
         assert spec.resolved_requirements.warmup_trade_days > 0
-        assert spec.resolved_requirements_hash  # non-empty
-        assert spec.config_schema_hash  # non-empty
+        assert spec.resolved_requirements_hash
+        assert spec.config_schema_hash
 
     def test_factory_not_in_persistable_spec(self):
         catalog = _catalog()
         binding = catalog.resolve("correlation_all_members", {})
         spec_fields = set(binding.spec.__dataclass_fields__)
         assert "factory" not in spec_fields
-        # registered holds the factory; spec does not
         assert callable(binding.registered.factory)
 
     def test_resolve_returns_instantiated_strategy(self):
@@ -216,8 +218,7 @@ class TestCatalogResolve:
 
 
 class TestRepresentativeCatalogResolve:
-    """Phase 3 Task 6 — the representative strategy resolves through the same
-    catalog machinery: descriptor, schema, defaults, hashes, requirements."""
+    """Representative strategy resolves through the shared catalog machinery."""
 
     def test_resolve_fills_design_section_4_defaults(self):
         catalog = _catalog()
