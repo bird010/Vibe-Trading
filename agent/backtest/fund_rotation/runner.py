@@ -1,25 +1,14 @@
-"""Strategy-neutral fund-rotation backtest Runner — Phase 2 Task 3.
+"""Strategy-neutral fund-rotation backtest Runner.
 
-Design §5/§6/§7/§24/§26/§32.3. The Runner drives any ``FundRotationStrategy``
-through the common life cycle without knowing its algorithm:
-
-1. consume the immutable resolved data requirements and build a per-signal
-   ``CausalDataView``;
-2. create an isolated session and drive ``evaluate`` only from the planned
-   decision start date (never from the data-loading warmup boundary);
-3. validate every ``TargetWeightDecision`` against the public contract;
-4. schedule SET_TARGETS decisions via the shared ``schedule_targets`` rule and
-   drive the common execution module (sell-before-buy, ADV capacity, valuation);
-5. enforce the exact evaluation calendar, finalize the session and report
-   metrics.
-
-The Runner recognizes only the three public decision actions — never a
-per-strategy branch. Cancellation is checked at decision-day and execution
-checkpoints (§26.1).
+The Runner consumes an immutable resolved strategy requirement, starts strategy
+evaluation at the planned decision boundary, executes all targets through one
+common account model, enforces the exact evaluation calendar and produces
+strategy, benchmark and execution evidence.
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,7 +17,10 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
-from backtest.fund_rotation.causal_data import CausalDataView, UndeclaredStrategyDataAccess
+from backtest.fund_rotation.causal_data import (
+    CausalDataView,
+    UndeclaredStrategyDataAccess,
+)
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.contracts import (
     DecisionKind,
@@ -47,19 +39,14 @@ from backtest.fund_rotation.execution import (
     run_execution_loop,
 )
 from backtest.fund_rotation.metrics import compute_performance_metrics
+from backtest.fund_rotation.returns import compute_adjusted_close
 
-if TYPE_CHECKING:  # type-only: the Runner stays independent of the src layer
+if TYPE_CHECKING:
     from backtest.fund_rotation.contracts import FundRotationStrategy
     from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 
 
 class CancellationToken:
-    """Cooperative cancellation token (§26.1).
-
-    The Runner checks it at decision-day and execution checkpoints; setting it
-    never raises, it only transitions the sub-run to CANCELED.
-    """
-
     def __init__(self) -> None:
         self._cancelled = False
 
@@ -72,13 +59,7 @@ class CancellationToken:
 
 
 class ExecutionConfig(BaseModel):
-    """Common execution parameters shared by all strategies (§25).
-
-    Deliberately contains NO strategy parameters (k, lookbacks, ...): execution
-    rules are identical for every variant in a batch.  Bounds are enforced at
-    request validation time so a background task is never created with an
-    impossible execution contract.
-    """
+    """Common execution parameters shared by all strategy variants."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -105,8 +86,6 @@ class ExecutionConfig(BaseModel):
 
 
 class SubRunStatus(str, Enum):
-    """§26 — terminal states of one strategy sub-run."""
-
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELED = "CANCELED"
@@ -114,29 +93,26 @@ class SubRunStatus(str, Enum):
 
 @dataclass(frozen=True)
 class FundRotationRunResult:
-    """Outcome of one strategy sub-run.
-
-    Failed/canceled runs still carry every decision and event collected before
-    the failure — partial evidence is preserved but never faked as success.
-    """
-
     status: SubRunStatus
     error_code: str = ""
     error_message: str = ""
     decisions: tuple[TargetWeightDecision, ...] = ()
     weekly_targets: dict[str, dict[str, float]] = field(default_factory=dict)
-    executed_equity: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    executed_equity: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype=float)
+    )
     trade_events: list[dict] = field(default_factory=list)
     orders: list[dict] = field(default_factory=list)
     positions_history: list[dict] = field(default_factory=list)
     strategy_metrics: dict[str, float] = field(default_factory=dict)
+    benchmark_equity: dict[str, pd.Series] = field(default_factory=dict)
+    benchmark_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
+    execution_diagnostics: dict[str, float] = field(default_factory=dict)
     diagnostics: StrategyDiagnostics | None = None
-    quality_status: str = "VALID"  # worst across all decisions (§9/§27)
+    quality_status: str = "VALID"
 
 
 class FundRotationBacktestRunner:
-    """Strategy-neutral driver for one fund-rotation sub-run (§32.3)."""
-
     def __init__(
         self,
         fund_daily: pd.DataFrame,
@@ -150,8 +126,6 @@ class FundRotationBacktestRunner:
         self._dim_fund = dim_fund
         self._run_id = run_id or uuid.uuid4().hex[:12]
 
-    # ── public entry point ──
-
     def run(
         self,
         strategy: "FundRotationStrategy",
@@ -164,14 +138,13 @@ class FundRotationBacktestRunner:
         decision_start_date: str | None = None,
         resolved_requirements: StrategyDataRequirements | None = None,
         run_id: str | None = None,
-        # Backward-compatible alias for direct callers.  Batch orchestration
-        # must use ``decision_start_date``; this alias will be removed after
-        # legacy callers have migrated.
         simulation_start_date: str | None = None,
     ) -> FundRotationRunResult:
         if cancellation.is_cancelled:
-            return FundRotationRunResult(status=SubRunStatus.CANCELED, error_code="CANCELED")
-
+            return FundRotationRunResult(
+                status=SubRunStatus.CANCELED,
+                error_code="CANCELED",
+            )
         if (
             decision_start_date is not None
             and simulation_start_date is not None
@@ -186,14 +159,19 @@ class FundRotationBacktestRunner:
                 ),
             )
 
-        requirements = resolved_requirements or strategy.resolve_requirements(config)
+        requirements = (
+            resolved_requirements or strategy.resolve_requirements(config)
+        )
         all_trade_dates = sorted(
-            {str(d) for d in self._fund_daily["trade_date"].astype(str).unique()}
+            {
+                str(date)
+                for date in self._fund_daily["trade_date"].astype(str).unique()
+            }
         )
         warmup = int(requirements.warmup_trade_days)
-        planned_decision_start = decision_start_date or simulation_start_date
-        if planned_decision_start is not None:
-            decision_start = str(planned_decision_start)
+        planned_start = decision_start_date or simulation_start_date
+        if planned_start is not None:
+            decision_start = str(planned_start)
             if decision_start not in all_trade_dates:
                 return FundRotationRunResult(
                     status=SubRunStatus.FAILED,
@@ -204,9 +182,6 @@ class FundRotationBacktestRunner:
                     ),
                 )
         elif str(requirements.frequency).upper().startswith("W"):
-            # §6 weekly cadence: align the warmup boundary with ISO
-            # week-endings (N weekly returns need N+1 week-endings) so
-            # holiday-shortened weeks cannot shift the first decision date.
             week_endings = iso_week_endings(all_trade_dates)
             needed_endings = warmup // 5 + 1
             if len(week_endings) < needed_endings:
@@ -225,13 +200,15 @@ class FundRotationBacktestRunner:
                     status=SubRunStatus.FAILED,
                     error_code="INSUFFICIENT_HISTORY",
                     error_message=(
-                        f"need more than {warmup} trading days, have {len(all_trade_dates)}"
+                        f"need more than {warmup} trading days, "
+                        f"have {len(all_trade_dates)}"
                     ),
                 )
-            # §6: first date at which the declared warmup is fully satisfied.
             decision_start = all_trade_dates[warmup]
 
-        evaluation_dates = [d.strftime("%Y%m%d") for d in evaluation.trading_dates]
+        evaluation_dates = [
+            date.strftime("%Y%m%d") for date in evaluation.trading_dates
+        ]
         if not evaluation_dates:
             return FundRotationRunResult(
                 status=SubRunStatus.FAILED,
@@ -246,10 +223,13 @@ class FundRotationBacktestRunner:
             ),
             config,
         )
-
         try:
             scheduled = tuple(
-                session.scheduled_dates(tuple(all_trade_dates), decision_start, evaluation_end)
+                session.scheduled_dates(
+                    tuple(all_trade_dates),
+                    decision_start,
+                    evaluation_end,
+                )
             )
             self._check_schedule(
                 scheduled,
@@ -264,13 +244,13 @@ class FundRotationBacktestRunner:
                 error_message=str(exc),
             )
 
-        universe = frozenset(str(c) for c in snapshot.universe_codes)
+        universe = frozenset(str(code) for code in snapshot.universe_codes)
         decisions: list[TargetWeightDecision] = []
         targets_map: dict[str, dict[str, float]] = {}
         current_targets: dict[str, float] = {}
         seen_decision_ids: set[str] = set()
 
-        def _fail(
+        def fail(
             error_code: str,
             error_message: str = "",
             *,
@@ -279,6 +259,9 @@ class FundRotationBacktestRunner:
             orders: list[dict] | None = None,
             positions_history: list[dict] | None = None,
             strategy_metrics: dict[str, float] | None = None,
+            benchmark_equity: dict[str, pd.Series] | None = None,
+            benchmark_metrics: dict[str, dict[str, float]] | None = None,
+            execution_diagnostics: dict[str, float] | None = None,
             quality_status: str = "VALID",
         ) -> FundRotationRunResult:
             return FundRotationRunResult(
@@ -286,7 +269,10 @@ class FundRotationBacktestRunner:
                 error_code=error_code,
                 error_message=error_message,
                 decisions=tuple(decisions),
-                weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                weekly_targets={
+                    date: dict(weights)
+                    for date, weights in targets_map.items()
+                },
                 executed_equity=(
                     executed_equity
                     if executed_equity is not None
@@ -296,18 +282,22 @@ class FundRotationBacktestRunner:
                 orders=orders or [],
                 positions_history=positions_history or [],
                 strategy_metrics=strategy_metrics or {},
+                benchmark_equity=benchmark_equity or {},
+                benchmark_metrics=benchmark_metrics or {},
+                execution_diagnostics=execution_diagnostics or {},
                 quality_status=quality_status,
             )
 
-        # §6/§7 — decision loop.  Pure warmup dates are data-only and can never
-        # enter this loop because the session is scheduled from decision_start.
         for signal_date in scheduled:
             if cancellation.is_cancelled:
                 return FundRotationRunResult(
                     status=SubRunStatus.CANCELED,
                     error_code="CANCELED",
                     decisions=tuple(decisions),
-                    weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                    weekly_targets={
+                        date: dict(weights)
+                        for date, weights in targets_map.items()
+                    },
                 )
             view = CausalDataView(
                 self._fund_daily,
@@ -325,9 +315,9 @@ class FundRotationBacktestRunner:
             try:
                 decision = session.evaluate(context)
             except UndeclaredStrategyDataAccess as exc:
-                return _fail(exc.code, str(exc))
+                return fail(exc.code, str(exc))
             except Exception as exc:
-                return _fail("STRATEGY_EVALUATION_ERROR", str(exc))
+                return fail("STRATEGY_EVALUATION_ERROR", str(exc))
 
             try:
                 if not isinstance(decision, TargetWeightDecision):
@@ -336,42 +326,48 @@ class FundRotationBacktestRunner:
                     )
                 if str(decision.signal_date) != str(signal_date):
                     raise StrategyContractViolation(
-                        f"decision signal_date {decision.signal_date!r} does not match "
-                        f"the scheduled date {signal_date!r}"
+                        f"decision signal_date {decision.signal_date!r} does not "
+                        f"match scheduled date {signal_date!r}"
                     )
                 eligible_codes = universe
-                if decision.action is DecisionKind.SET_TARGETS and decision.target_weights:
+                if (
+                    decision.action is DecisionKind.SET_TARGETS
+                    and decision.target_weights
+                ):
                     eligible_codes = frozenset(
-                        instrument.ts_code for instrument in view.eligible_universe()
+                        instrument.ts_code
+                        for instrument in view.eligible_universe()
                     )
-                validate_target_decision(decision, eligible_codes, seen_decision_ids)
+                validate_target_decision(
+                    decision,
+                    eligible_codes,
+                    seen_decision_ids,
+                )
             except UndeclaredStrategyDataAccess as exc:
-                return _fail(exc.code, str(exc))
+                return fail(exc.code, str(exc))
             except StrategyContractViolation as exc:
-                return _fail(StrategyContractViolation.code, str(exc))
+                return fail(StrategyContractViolation.code, str(exc))
 
             seen_decision_ids.add(decision.decision_id)
             decisions.append(decision)
-
             if decision.action is DecisionKind.INVALID:
-                # §7.3 — any INVALID after warmup terminates the sub-run.
-                return _fail(decision.reason_code or "INVALID")
+                return fail(decision.reason_code or "INVALID")
             if decision.action is DecisionKind.SET_TARGETS:
-                # §7.1 — full replacement (empty weights = 100% cash).
                 current_targets = dict(decision.target_weights)
                 targets_map[signal_date] = dict(current_targets)
-            # §7.2 — HOLD_TARGETS: no new target event, no order interaction.
 
         if cancellation.is_cancelled:
             return FundRotationRunResult(
                 status=SubRunStatus.CANCELED,
                 error_code="CANCELED",
                 decisions=tuple(decisions),
-                weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                weekly_targets={
+                    date: dict(weights)
+                    for date, weights in targets_map.items()
+                },
             )
 
-        # §24/§12 — common execution over the formal evaluation calendar.
-        exec_config = FundRotationConfig(
+        legacy_execution = FundRotationConfig(
             initial_capital=execution.initial_capital,
             commission_rate=execution.commission_rate,
             commission_min=execution.commission_min,
@@ -386,56 +382,89 @@ class FundRotationBacktestRunner:
             end_date=evaluation_dates[-1],
         )
         pipeline_result = PipelineResult(weekly_targets=targets_map)
-        exec_ctx = build_execution_context(self._fund_daily, self._fund_adj, exec_config)
+        execution_context = build_execution_context(
+            self._fund_daily,
+            self._fund_adj,
+            legacy_execution,
+        )
         run_execution_loop(
             pipeline_result,
-            exec_config,
-            exec_ctx,
+            legacy_execution,
+            execution_context,
             evaluation_dates=evaluation_dates,
             should_cancel=lambda: cancellation.is_cancelled,
         )
         if cancellation.is_cancelled:
-            # §26.1 — canceled during execution: keep collected evidence, never
-            # publish it as a successful run.
             return FundRotationRunResult(
                 status=SubRunStatus.CANCELED,
                 error_code="CANCELED",
                 decisions=tuple(decisions),
-                weekly_targets={d: dict(w) for d, w in targets_map.items()},
+                weekly_targets={
+                    date: dict(weights)
+                    for date, weights in targets_map.items()
+                },
                 executed_equity=pipeline_result.executed_equity,
                 trade_events=pipeline_result.trade_events,
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
+                execution_diagnostics=_execution_diagnostics(
+                    pipeline_result,
+                    execution,
+                ),
             )
 
-        actual_equity_dates = pd.Index(
+        actual_dates = pd.Index(
             [str(value) for value in pipeline_result.executed_equity.index]
         )
-        expected_equity_dates = pd.Index(evaluation_dates)
-        if not actual_equity_dates.equals(expected_equity_dates):
-            return _fail(
+        expected_dates = pd.Index(evaluation_dates)
+        if not actual_dates.equals(expected_dates):
+            return fail(
                 "EVALUATION_CALENDAR_MISMATCH",
                 "executed equity index must exactly equal the evaluation calendar",
                 executed_equity=pipeline_result.executed_equity,
                 trade_events=pipeline_result.trade_events,
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
+                execution_diagnostics=_execution_diagnostics(
+                    pipeline_result,
+                    execution,
+                ),
             )
 
+        benchmark_equity = self._public_benchmarks(
+            evaluation_dates,
+            execution,
+        )
+        benchmark_metrics = {
+            name: compute_performance_metrics(
+                series,
+                periods_per_year=244,
+                initial_nav=evaluation.initial_nav,
+            )
+            for name, series in benchmark_equity.items()
+            if not series.empty and not series.isna().all()
+        }
         strategy_metrics = compute_performance_metrics(
             pipeline_result.executed_equity,
             periods_per_year=244,
             initial_nav=evaluation.initial_nav,
         )
+        strategy_metrics.update(
+            _relative_metrics(
+                pipeline_result.executed_equity,
+                benchmark_equity.get("equal_weight_etf"),
+            )
+        )
+        execution_diagnostics = _execution_diagnostics(
+            pipeline_result,
+            execution,
+        )
 
-        # §9/§27 — aggregate worst research quality across all decisions.
         overall_quality = _worst_quality_status(decisions)
-
-        # Finalize failure fails the sub-run but preserves all prior evidence.
         try:
             diagnostics = session.finalize()
         except Exception as exc:
-            return _fail(
+            return fail(
                 "FINALIZE_FAILED",
                 str(exc),
                 executed_equity=pipeline_result.executed_equity,
@@ -443,23 +472,115 @@ class FundRotationBacktestRunner:
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
                 strategy_metrics=strategy_metrics,
+                benchmark_equity=benchmark_equity,
+                benchmark_metrics=benchmark_metrics,
+                execution_diagnostics=execution_diagnostics,
                 quality_status=overall_quality,
             )
 
         return FundRotationRunResult(
             status=SubRunStatus.SUCCEEDED,
             decisions=tuple(decisions),
-            weekly_targets={d: dict(w) for d, w in targets_map.items()},
+            weekly_targets={
+                date: dict(weights)
+                for date, weights in targets_map.items()
+            },
             executed_equity=pipeline_result.executed_equity,
             trade_events=pipeline_result.trade_events,
             orders=pipeline_result.orders,
             positions_history=pipeline_result.positions_history,
             strategy_metrics=strategy_metrics,
+            benchmark_equity=benchmark_equity,
+            benchmark_metrics=benchmark_metrics,
+            execution_diagnostics=execution_diagnostics,
             diagnostics=diagnostics,
             quality_status=overall_quality,
         )
 
-    # ── internal helpers ──
+    def _public_benchmarks(
+        self,
+        evaluation_dates: list[str],
+        execution: ExecutionConfig,
+    ) -> dict[str, pd.Series]:
+        """Build common daily benchmarks from the same pinned market frames."""
+        index = pd.Index(evaluation_dates)
+        cash = pd.Series(1.0, index=index, name="cash")
+        adjusted = compute_adjusted_close(
+            self._fund_daily,
+            self._fund_adj,
+            evaluation_dates[-1],
+        )
+        if adjusted.empty:
+            return {
+                "cash": cash,
+                "equal_weight_etf": cash.rename("equal_weight_etf"),
+                "510300.SH": pd.Series(float("nan"), index=index, name="510300.SH"),
+            }
+        adjusted = adjusted.copy()
+        adjusted.index = pd.Index([str(value) for value in adjusted.index])
+        adjusted = adjusted.sort_index()
+        returns = adjusted.pct_change(fill_method=None)
+
+        list_dates: dict[str, str] = {}
+        if not self._dim_fund.empty:
+            for _, row in self._dim_fund.iterrows():
+                code = str(row.get("ts_code", ""))
+                listed = str(row.get("list_date", ""))
+                if code:
+                    list_dates[code] = listed
+
+        equal_values = [1.0]
+        nav = 1.0
+        for position in range(1, len(evaluation_dates)):
+            date = evaluation_dates[position]
+            prior_date = evaluation_dates[position - 1]
+            if date not in returns.index:
+                equal_values.append(nav)
+                continue
+            eligible = [
+                code
+                for code in returns.columns
+                if list_dates.get(str(code), "99999999") <= prior_date
+            ]
+            period = (
+                returns.loc[date, eligible]
+                if eligible
+                else pd.Series(dtype=float)
+            )
+            if isinstance(period, pd.DataFrame):
+                period = period.iloc[0]
+            values = pd.to_numeric(period, errors="coerce").dropna()
+            period_return = float(values.mean()) if not values.empty else 0.0
+            nav *= 1.0 + period_return
+            equal_values.append(nav)
+        equal_weight = pd.Series(
+            equal_values,
+            index=index,
+            name="equal_weight_etf",
+        )
+
+        benchmark_code = "510300.SH"
+        buy_hold = pd.Series(
+            float("nan"),
+            index=index,
+            name=benchmark_code,
+        )
+        if benchmark_code in adjusted.columns:
+            prices = pd.to_numeric(
+                adjusted[benchmark_code].reindex(index),
+                errors="coerce",
+            ).ffill()
+            first_price = prices.iloc[0] if not prices.empty else float("nan")
+            if pd.notna(first_price) and float(first_price) > 0:
+                buy_hold = (
+                    prices / float(first_price) * (1.0 - execution.commission_rate)
+                )
+                buy_hold.name = benchmark_code
+        return {
+            "cash": cash,
+            "equal_weight_etf": equal_weight,
+            benchmark_code: buy_hold,
+        }
 
     @staticmethod
     def _check_schedule(
@@ -468,8 +589,6 @@ class FundRotationBacktestRunner:
         decision_start: str,
         evaluation_end: str,
     ) -> None:
-        """§6 — decision calendar: strictly increasing actual trading days
-        within [decision start, evaluation end]."""
         previous = ""
         for date in scheduled:
             date = str(date)
@@ -479,13 +598,13 @@ class FundRotationBacktestRunner:
                 )
             if date < decision_start:
                 raise StrategyContractViolation(
-                    f"scheduled decision date {date!r} is inside the pure warmup "
-                    f"period (before decision start {decision_start!r})"
+                    f"scheduled decision date {date!r} is inside the pure "
+                    f"warmup period before {decision_start!r}"
                 )
             if date > evaluation_end:
                 raise StrategyContractViolation(
-                    f"scheduled decision date {date!r} is after the evaluation end "
-                    f"({evaluation_end!r})"
+                    f"scheduled decision date {date!r} is after evaluation end "
+                    f"{evaluation_end!r}"
                 )
             if date <= previous:
                 raise StrategyContractViolation(
@@ -498,17 +617,114 @@ _QUALITY_ORDER = {"VALID": 0, "DEGRADED": 1, "INVALID": 2, "FAILED": 3}
 
 
 def _worst_quality_status(decisions: list) -> str:
-    """Return the worst research quality across all decisions (§9/§27)."""
     if not decisions:
         return "VALID"
     worst = max(
         decisions,
-        key=lambda d: _QUALITY_ORDER.get(
-            str(d.quality_status.value)
-            if hasattr(d.quality_status, "value")
-            else str(d.quality_status),
+        key=lambda decision: _QUALITY_ORDER.get(
+            str(decision.quality_status.value)
+            if hasattr(decision.quality_status, "value")
+            else str(decision.quality_status),
             0,
         ),
     )
-    val = worst.quality_status
-    return str(val.value) if hasattr(val, "value") else str(val)
+    value = worst.quality_status
+    return str(value.value) if hasattr(value, "value") else str(value)
+
+
+def _execution_diagnostics(
+    result: PipelineResult,
+    execution: ExecutionConfig,
+) -> dict[str, float]:
+    trades = [
+        event
+        for event in result.trade_events
+        if str(event.get("event_type", "")) != "CORPORATE_ACTION"
+    ]
+    requested = sum(
+        max(float(event.get("requested", 0) or 0), 0.0)
+        for event in trades
+    )
+    filled = sum(
+        max(float(event.get("filled", 0) or 0), 0.0)
+        for event in trades
+    )
+    notionals = [
+        abs(float(event.get("filled", 0) or 0))
+        * max(float(event.get("price", 0) or 0), 0.0)
+        for event in trades
+    ]
+    total_notional = float(sum(notionals))
+    commission = float(
+        sum(float(event.get("commission", 0) or 0) for event in trades)
+    )
+    slippage_cost = float(
+        sum(
+            notional
+            * max(float(event.get("slippage_bps", 0) or 0), 0.0)
+            / 10_000.0
+            for event, notional in zip(trades, notionals)
+        )
+    )
+    participation = [
+        float(event.get("participation_rate", 0) or 0)
+        for event in trades
+        if float(event.get("filled", 0) or 0) > 0
+    ]
+    blocked = sum(
+        1
+        for event in trades
+        if float(event.get("requested", 0) or 0) > 0
+        and float(event.get("filled", 0) or 0) <= 0
+    )
+    return {
+        "turnover": total_notional / execution.initial_capital,
+        "total_notional": total_notional,
+        "total_commission": commission,
+        "total_slippage_cost": slippage_cost,
+        "fill_rate": filled / requested if requested > 0 else 1.0,
+        "blocked_order_count": float(blocked),
+        "trade_count": float(sum(1 for value in notionals if value > 0)),
+        "average_participation_rate": (
+            float(sum(participation) / len(participation))
+            if participation
+            else 0.0
+        ),
+    }
+
+
+def _relative_metrics(
+    strategy: pd.Series,
+    benchmark: pd.Series | None,
+) -> dict[str, float]:
+    if benchmark is None or benchmark.empty or benchmark.isna().all():
+        return {}
+    aligned = pd.concat(
+        [strategy.rename("strategy"), benchmark.rename("benchmark")],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if aligned.empty:
+        return {}
+    strategy_returns = aligned["strategy"].pct_change(fill_method=None)
+    benchmark_returns = aligned["benchmark"].pct_change(fill_method=None)
+    active = (strategy_returns - benchmark_returns).dropna()
+    tracking_error = float(active.std(ddof=1) * math.sqrt(244)) if len(active) > 1 else 0.0
+    annualized_excess = float(active.mean() * 244) if not active.empty else 0.0
+    information_ratio = (
+        annualized_excess / tracking_error
+        if tracking_error > 0
+        else 0.0
+    )
+    strategy_total = float(aligned["strategy"].iloc[-1] / aligned["strategy"].iloc[0] - 1.0)
+    benchmark_total = float(aligned["benchmark"].iloc[-1] / aligned["benchmark"].iloc[0] - 1.0)
+    relative_nav = aligned["strategy"] / aligned["benchmark"]
+    relative_peak = relative_nav.cummax()
+    relative_drawdown = relative_nav / relative_peak - 1.0
+    return {
+        "excess_total_return": strategy_total - benchmark_total,
+        "annualized_excess_return": annualized_excess,
+        "tracking_error": tracking_error,
+        "information_ratio": float(information_ratio),
+        "relative_max_drawdown": float(relative_drawdown.min()),
+    }
