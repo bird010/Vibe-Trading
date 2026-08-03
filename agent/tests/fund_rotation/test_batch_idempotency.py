@@ -172,7 +172,31 @@ class TestVariantIdentity:
         identities = build_variant_identities(catalog, request.variants)
         assert identities[0].variant_key != identities[1].variant_key
 
-    def test_default_and_explicit_defaults_share_variant_key(self):
+    def test_explicit_default_params_share_variant_key_with_empty_params(self):
+        """Resolved config identity: omitting params and spelling out every
+        default must resolve to the SAME variant_key."""
+        from backtest.fund_rotation.strategies.correlation_all_members.config import (
+            CorrelationAllMembersConfig,
+        )
+
+        catalog = _catalog()
+        explicit_defaults = CorrelationAllMembersConfig().model_dump(mode="json")
+        payload = _payload(variants=[
+            {"strategy_id": "correlation_all_members", "params": {}},
+        ])
+        explicit_payload = _payload(variants=[
+            {"strategy_id": "correlation_all_members",
+             "params": explicit_defaults},
+        ])
+        omitted = build_variant_identities(
+            catalog, StrategyBatchRequest(**payload).variants,
+        )
+        explicit = build_variant_identities(
+            catalog, StrategyBatchRequest(**explicit_payload).variants,
+        )
+        assert omitted[0].variant_key == explicit[0].variant_key
+
+    def test_different_strategies_get_distinct_variant_keys(self):
         catalog = _catalog()
         payload = _payload(variants=[
             {"strategy_id": "correlation_all_members", "params": {}},
@@ -249,19 +273,28 @@ class TestIdempotency:
         assert stored["batch_id"] == first["batch_id"]
 
     def test_concurrent_same_key_single_winner(self, tmp_path):
+        """§21.1 — truly concurrent submissions of the same key must produce
+        exactly one created batch; every other thread observes the same
+        batch_id without unstructured errors."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
         request = StrategyBatchRequest(**_payload())
         payload_hash = canonical_payload_hash(request)
-        results = []
-        for _ in range(2):
+        barrier = threading.Barrier(4)
+
+        def race_submit():
+            barrier.wait()
             store = BatchPersistence(tmp_path)
-            try:
-                record, created = store.submit("key-1", payload_hash)
-                results.append((record["batch_id"], created))
-            except BatchIdempotencyError:
-                results.append((None, None))
-        created_flags = [r[1] for r in results]
+            return store.submit("key-race", payload_hash)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: race_submit(), range(4)))
+
+        created_flags = [created for _, created in results]
         assert created_flags.count(True) == 1
-        assert results[0][0] == results[1][0]
+        batch_ids = {record["batch_id"] for record, _ in results}
+        assert len(batch_ids) == 1
 
     def test_batch_request_and_identity_written_atomically(self, tmp_path):
         store = BatchPersistence(tmp_path)

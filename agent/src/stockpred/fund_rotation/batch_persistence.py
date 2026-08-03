@@ -67,17 +67,18 @@ def build_variant_identities(
     are rejected before any task is created (§21).
     """
     identities: list[VariantIdentity] = []
-    seen_keys: set[str] = set()
+    seen_configs: set[tuple[str, str]] = set()
     for variant in variants:
         binding = catalog.resolve(variant.strategy_id, dict(variant.params))
         spec = binding.spec
         variant_key = f"{variant.strategy_id}@{spec.resolved_config_hash[:12]}"
-        if variant_key in seen_keys:
+        identity_pair = (variant.strategy_id, spec.resolved_config_hash)
+        if identity_pair in seen_configs:
             raise ValueError(
                 f"duplicate variant: strategy {variant.strategy_id!r} with the "
                 f"same resolved config appears more than once ({variant_key})"
             )
-        seen_keys.add(variant_key)
+        seen_configs.add(identity_pair)
         identities.append(VariantIdentity(
             variant_key=variant_key,
             strategy_id=variant.strategy_id,
@@ -112,30 +113,74 @@ class BatchPersistence:
         Returns ``(record, created)``. Same key + same payload returns the
         existing record (``created=False``, no new task may be started);
         same key + different payload raises ``IDEMPOTENCY_CONFLICT``.
-        """
-        slot = self._slot_dir(idempotency_key)
-        try:
-            slot.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            record = json.loads(
-                (slot / "record.json").read_text(encoding="utf-8")
-            )
-            if record.get("payload_hash") != payload_hash:
-                raise BatchIdempotencyError(
-                    "IDEMPOTENCY_CONFLICT",
-                    f"idempotency_key {idempotency_key!r} is already bound to "
-                    "a different normalized request",
-                )
-            return record, False
 
-        record = {
-            "idempotency_key": idempotency_key,
-            "payload_hash": payload_hash,
-            "batch_id": uuid.uuid4().hex[:12],
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        atomic_write_json(slot / "record.json", record)
-        return record, True
+        The owner is decided by ``mkdir(exist_ok=False)``. Losers wait for the
+        winner's record; a half-created zombie slot (crash between mkdir and
+        write) is reclaimed and the ownership race is retried once.
+        """
+        for _attempt in range(2):
+            slot = self._slot_dir(idempotency_key)
+            try:
+                slot.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                record = self._read_record_with_retry(slot / "record.json")
+                if record is not None:
+                    if record.get("payload_hash") != payload_hash:
+                        raise BatchIdempotencyError(
+                            "IDEMPOTENCY_CONFLICT",
+                            f"idempotency_key {idempotency_key!r} is already "
+                            "bound to a different normalized request",
+                        )
+                    return record, False
+                # Zombie slot: created but never written (crash between mkdir
+                # and record write). Clear leftovers (empty dir only), then
+                # re-enter the race once.
+                try:
+                    for leftover in slot.iterdir():
+                        if leftover.is_file():
+                            leftover.unlink()
+                    slot.rmdir()
+                except OSError as exc:
+                    raise BatchIdempotencyError(
+                        "IDEMPOTENCY_CONFLICT",
+                        f"idempotency slot for {idempotency_key!r} is not "
+                        f"ready and cannot be reclaimed: {exc}",
+                    ) from exc
+                continue
+
+            record = {
+                "idempotency_key": idempotency_key,
+                "payload_hash": payload_hash,
+                "batch_id": uuid.uuid4().hex[:12],
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            try:
+                atomic_write_json(slot / "record.json", record)
+            except Exception:
+                # Do not leave a zombie slot behind when the write itself
+                # fails; the key stays retryable.
+                try:
+                    slot.rmdir()
+                except OSError:
+                    pass
+                raise
+            return record, True
+        raise BatchIdempotencyError(
+            "IDEMPOTENCY_CONFLICT",
+            f"idempotency slot for {idempotency_key!r} could not be acquired",
+        )
+
+    @staticmethod
+    def _read_record_with_retry(record_path: Path) -> dict[str, Any] | None:
+        """Wait briefly for a concurrent winner to finish writing its record."""
+        for _ in range(50):
+            try:
+                return json.loads(record_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                time.sleep(0.02)
+            except json.JSONDecodeError:
+                time.sleep(0.02)
+        return None
 
     # ── batch directory ──
 
