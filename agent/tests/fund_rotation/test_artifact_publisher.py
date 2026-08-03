@@ -65,6 +65,22 @@ def test_index_external_requires_existing_file(tmp_path):
         pub.index_external("clusters")
 
 
+def test_events_role_cannot_be_published_directly(tmp_path):
+    """The append-persisted event log can only be indexed, never rewritten."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    events_path = run_dir / "events.jsonl"
+    content = '{"stage": "RUNNING"}\n'
+    events_path.write_text(content, encoding="utf-8")
+
+    pub = _publisher(tmp_path)
+    with pytest.raises(ArtifactPublicationError, match="index_external"):
+        pub.publish(StrategyArtifact(
+            role="events", media_type="application/json", payload=[{"x": 1}],
+        ))
+    assert events_path.read_text(encoding="utf-8") == content
+
+
 def test_publish_common_roles_writes_files_and_index(tmp_path):
     pub = _publisher(tmp_path)
     pub.publish(StrategyArtifact(

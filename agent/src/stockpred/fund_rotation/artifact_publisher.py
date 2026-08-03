@@ -83,6 +83,11 @@ class ArtifactPublisher:
             raise ArtifactPublicationError(
                 "the manifest role is reserved for finalize(); it cannot be published"
             )
+        if role == "events":
+            raise ArtifactPublicationError(
+                "the events role is append-persisted externally (§29/§30.1); "
+                "use index_external() to include it without rewriting"
+            )
         if role in COMMON_ROLES and producer != "common":
             raise ArtifactPublicationError(
                 f"{role!r} is a common role; strategy {producer!r} cannot override it"
@@ -178,10 +183,14 @@ class ArtifactPublisher:
         if path.suffix == ".jsonl":
             with open(path, encoding="utf-8") as handle:
                 entry["rows"] = sum(1 for _ in handle)
+        media_type = {
+            ".jsonl": _MEDIA_JSONL,
+            ".csv": _MEDIA_CSV,
+        }.get(path.suffix, _MEDIA_JSON)
         entry.update({
             "file": filename,
             "role": role,
-            "media_type": _MEDIA_JSONL if path.suffix == ".jsonl" else _MEDIA_JSON,
+            "media_type": media_type,
             "producer": "common",
         })
         self._index[role] = entry
