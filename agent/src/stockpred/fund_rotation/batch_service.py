@@ -420,6 +420,8 @@ class BatchService:
                     evaluation=evaluation,
                     execution=execution_config,
                     cancellation=token,
+                    simulation_start_date=plan["simulation_start"],
+                    run_id=run_id,
                 )
                 status = result.status.value
                 run_results[variant_key] = result

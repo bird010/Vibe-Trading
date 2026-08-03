@@ -48,12 +48,15 @@ FAKE_DESCRIPTOR = FundRotationStrategyDescriptor(
 
 
 class FakeBatchSession:
-    def __init__(self, config, execution_log=None):
+    def __init__(self, config, execution_log=None, session_record=None):
         self.config = config
         self.execution_log = execution_log
+        self.session_record = session_record
         self.evaluate_count = 0
 
     def scheduled_dates(self, calendar, simulation_start_date, evaluation_end_date):
+        if self.session_record is not None:
+            self.session_record["simulation_start_date"] = simulation_start_date
         # Weekly cadence: every 5th trading day within the window.
         window = [
             d for d in calendar
@@ -82,6 +85,7 @@ class FakeBatchSession:
 class FakeBatchStrategy:
     descriptor = FAKE_DESCRIPTOR
     config_model = FakeBatchConfig
+    session_log = []
 
     def __init__(self, execution_log=None):
         self.execution_log = execution_log
@@ -96,7 +100,12 @@ class FakeBatchStrategy:
         )
 
     def create_session(self, initialization, config):
-        return FakeBatchSession(config, self.execution_log)
+        record = {
+            "run_id": initialization.run_id,
+            "lookback_days": config.lookback_days,
+        }
+        self.session_log.append(record)
+        return FakeBatchSession(config, self.execution_log, record)
 
 
 def _calendar_metadata():
@@ -122,6 +131,8 @@ def _frames_loader(data_start, data_end):
 
 def _service(tmp_path, *, frames_loader=None, fail_frames=False,
              auto_start=False):
+    FakeBatchStrategy.session_log = []
+
     def frames(data_start, data_end):
         if fail_frames:
             raise RuntimeError("snapshot read failed")
@@ -287,6 +298,32 @@ class TestPlanning:
 # ── execution ordering and isolation ──
 
 class TestExecution:
+    def test_each_variant_session_receives_its_planned_start_and_child_run_id(self, tmp_path):
+        service = _service(tmp_path)
+        request = _request([
+            {"strategy_id": "fake_batch", "params": {"lookback_days": 30}},
+            {"strategy_id": "fake_batch", "params": {"lookback_days": 40}},
+        ])
+
+        outcome = _submit_and_run(service, request)
+        resolved = _resolved(service, outcome["batch_id"])
+        child_run_ids = {variant["run_id"] for variant in resolved["variants"]}
+        execution_sessions = [
+            record for record in FakeBatchStrategy.session_log
+            if record["run_id"] != "planning"
+        ]
+
+        assert len(execution_sessions) == 2
+        assert {record["run_id"] for record in execution_sessions} == child_run_ids
+        assert len(child_run_ids) == 2
+        assert {
+            record["lookback_days"]: record["simulation_start_date"]
+            for record in execution_sessions
+        } == {
+            30: CALENDAR[65],
+            40: CALENDAR[55],
+        }
+
     def test_execution_ordered_by_variant_key_not_request_order(self, tmp_path):
         service = _service(tmp_path)
         request = _request([

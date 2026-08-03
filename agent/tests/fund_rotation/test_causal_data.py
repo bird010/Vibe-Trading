@@ -169,14 +169,25 @@ class TestQuerySurface:
 
 
 class TestAccessAudit:
-    def test_access_log_records_metadata_not_content(self):
+    def test_access_log_records_actual_read_fields_not_derived_placeholders(self):
         view = _view()
         view.daily_bars(["close"])
+        view.adjusted_closes()
+        view.returns("daily", 1)
         view.causal_adv()
+        view.fund_adjustments()
+        view.eligible_universe()
+        view.trading_calendar()
         log = view.access_log
-        assert len(log) == 2
-        assert log[0].method == "daily_bars"
-        assert log[0].fields == ("close",)
+        assert [(record.method, record.fields) for record in log] == [
+            ("daily_bars", ("ts_code", "trade_date", "close")),
+            ("adjusted_closes", ("ts_code", "trade_date", "close", "adj_factor")),
+            ("returns", ("ts_code", "trade_date", "close", "adj_factor")),
+            ("causal_adv", ("ts_code", "trade_date", "amount")),
+            ("fund_adjustments", ("ts_code", "trade_date", "adj_factor")),
+            ("eligible_universe", ("ts_code", "name", "list_date")),
+            ("trading_calendar", ("trade_date",)),
+        ]
         assert log[0].rows > 0
         # No whole-table content recorded.
         assert not hasattr(log[0], "data")

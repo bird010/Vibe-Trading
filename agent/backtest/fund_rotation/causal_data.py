@@ -176,7 +176,7 @@ class CausalDataView:
         df = self._causal_filter(self._fund_daily)
         df = df[[c for c in cols if c in df.columns]]
         df = self._tail_dates(df, lookback)
-        self._audit("daily_bars", fields, df)
+        self._audit("daily_bars", cols, df)
         return df.copy()
 
     def adjusted_closes(self, lookback: int | None = None) -> pd.DataFrame:
@@ -186,7 +186,7 @@ class CausalDataView:
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
-            self._audit("adjusted_closes", ("adj_close",), adj_close)
+            self._audit("adjusted_closes", self._METHOD_FIELDS["adjusted_closes"], adj_close)
             return adj_close.copy()
         # Restrict columns to the snapshot universe.
         cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
@@ -195,7 +195,11 @@ class CausalDataView:
             adj_close = adj_close.iloc[0:0]
         elif lookback is not None:
             adj_close = adj_close.iloc[-lookback:]
-        self._audit("adjusted_closes", ("adj_close",), adj_close.reset_index())
+        self._audit(
+            "adjusted_closes",
+            self._METHOD_FIELDS["adjusted_closes"],
+            adj_close.reset_index(),
+        )
         return adj_close.copy()
 
     def returns(
@@ -210,7 +214,7 @@ class CausalDataView:
         signal_str = self._signal_date.strftime("%Y%m%d")
         adj_close = compute_adjusted_close(self._fund_daily, self._fund_adj, signal_str)
         if adj_close.empty:
-            self._audit("returns", (frequency,), adj_close)
+            self._audit("returns", self._METHOD_FIELDS["returns"], adj_close)
             return adj_close.copy()
         cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
         adj_close = adj_close[cols]
@@ -233,7 +237,7 @@ class CausalDataView:
             rets = rets.iloc[0:0]
         else:
             rets = rets.iloc[-lookback:]
-        self._audit("returns", (frequency,), rets.reset_index())
+        self._audit("returns", self._METHOD_FIELDS["returns"], rets.reset_index())
         return rets.copy()
 
     def causal_adv(self, lookback_days: int = 20) -> pd.Series:
@@ -244,7 +248,7 @@ class CausalDataView:
         lookback_days = self._check_lookback("causal_adv", lookback_days, unit_days=1)
         df = self._causal_filter(self._fund_daily)
         if "amount" not in df.columns or df.empty:
-            self._audit("causal_adv", ("amount",), df)
+            self._audit("causal_adv", self._METHOD_FIELDS["causal_adv"], df)
             return pd.Series(dtype=float, name="adv")
         signal_str = self._signal_date.strftime("%Y%m%d")
         # Strictly before signal date (completed days only).
@@ -252,7 +256,7 @@ class CausalDataView:
         df = self._tail_dates(df, lookback_days)
         adv = df.groupby("ts_code")["amount"].mean()
         adv.name = "adv"
-        self._audit("causal_adv", ("amount",), df)
+        self._audit("causal_adv", self._METHOD_FIELDS["causal_adv"], df)
         return adv.copy()
 
     def fund_adjustments(self, lookback: int | None = None) -> pd.DataFrame:
@@ -261,7 +265,9 @@ class CausalDataView:
         lookback = self._check_lookback("fund_adjustments", lookback, unit_days=1)
         df = self._causal_filter(self._fund_adj)
         df = self._tail_dates(df, lookback)
-        self._audit("fund_adjustments", ("adj_factor",), df)
+        self._audit(
+            "fund_adjustments", self._METHOD_FIELDS["fund_adjustments"], df,
+        )
         return df.copy()
 
     def eligible_universe(self) -> tuple[FundInstrument, ...]:
@@ -279,7 +285,9 @@ class CausalDataView:
             )
             for _, row in dim.iterrows()
         )
-        self._audit("eligible_universe", ("ts_code", "name", "list_date"), dim)
+        self._audit(
+            "eligible_universe", self._METHOD_FIELDS["eligible_universe"], dim,
+        )
         return instruments
 
     def trading_calendar(self, lookback: int | None = None) -> tuple[pd.Timestamp, ...]:
@@ -292,5 +300,5 @@ class CausalDataView:
             dates = []
         elif lookback is not None:
             dates = dates[-lookback:]
-        self._audit("trading_calendar", ("trade_date",), df)
+        self._audit("trading_calendar", self._METHOD_FIELDS["trading_calendar"], df)
         return tuple(pd.Timestamp(d) for d in dates)
