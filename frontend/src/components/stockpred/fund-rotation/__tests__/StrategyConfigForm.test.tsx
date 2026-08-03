@@ -60,7 +60,6 @@ describe("StrategyConfigForm", () => {
         onChange={() => {}}
       />,
     );
-    // "k" is required, should have * indicator
     const kLabel = screen.getByText("聚类数 K");
     expect(kLabel.parentElement?.textContent).toContain("*");
   });
@@ -75,7 +74,6 @@ describe("StrategyConfigForm", () => {
         onChange={() => {}}
       />,
     );
-    // Should fall back to schema property description
     expect(screen.getByText("聚类数")).toBeDefined();
   });
 
@@ -104,9 +102,8 @@ describe("StrategyConfigForm", () => {
         onChange={() => {}}
       />,
     );
-    // Boolean field should render as a select
     const selects = screen.getAllByRole("combobox");
-    expect(selects.length).toBe(2); // mode (enum) + enable_filter (boolean)
+    expect(selects.length).toBe(2);
   });
 
   it("renders number input for integer fields", () => {
@@ -134,7 +131,6 @@ describe("StrategyConfigForm", () => {
         onChange={onChange}
       />,
     );
-    // Find the k input (first number input)
     const inputs = screen.getAllByRole("spinbutton");
     fireEvent.change(inputs[0], { target: { value: "12" } });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ k: 12 }));
@@ -150,7 +146,6 @@ describe("StrategyConfigForm", () => {
         onChange={() => {}}
       />,
     );
-    // Defaults should be used as placeholder values
     const inputs = screen.getAllByRole("spinbutton") as HTMLInputElement[];
     expect(inputs[0].placeholder).toBe("5");
   });
@@ -187,7 +182,7 @@ describe("StrategyConfigForm", () => {
         onChange={() => {}}
       />,
     );
-    expect(screen.getByText(/暂不支持以下配置项/)).toBeDefined();
+    expect(screen.getByText(/当前客户端无法安全编辑以下配置项/)).toBeDefined();
     expect(screen.getByText(/array_field/)).toBeDefined();
     expect(screen.getByText(/oneof_field/)).toBeDefined();
   });
