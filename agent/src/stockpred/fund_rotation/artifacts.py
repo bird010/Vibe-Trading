@@ -29,6 +29,35 @@ def compute_file_checksum(path: Path) -> str:
     return h.hexdigest()[:16]
 
 
+def describe_file(path: Path) -> dict:
+    """Manifest entry for one artifact file (checksum, rows, columns, ...).
+
+    Shared by the legacy writer and the common artifact publisher (§13.5) so
+    both record the identical file-detail schema.
+    """
+    return {
+        "checksum": compute_file_checksum(path),
+        "rows": _count_rows(path),
+        "schema_version": "v1",
+        "encoding": "utf-8",
+        "columns": _csv_columns(path),
+    }
+
+
+def cluster_history_to_rows(cluster_history: list[dict]) -> list[dict]:
+    """Flatten cluster history into (week, ts_code, cluster_id) rows.
+
+    The baseline strategy publishes its clustering diagnostics through this
+    shape so Phase 3 keeps the established clusters.csv format (§12).
+    """
+    rows: list[dict] = []
+    for entry in cluster_history:
+        week = entry.get("week", "")
+        for code, cid in sorted(entry.get("clusters", {}).items()):
+            rows.append({"week": week, "ts_code": code, "cluster_id": cid})
+    return rows
+
+
 def write_run_artifacts(
     run_dir: Path,
     *,
@@ -82,12 +111,7 @@ def write_run_artifacts(
 
     # clusters.csv — week, ts_code, cluster_id
     if cluster_history:
-        rows = []
-        for entry in cluster_history:
-            week = entry.get("week", "")
-            for code, cid in sorted(entry.get("clusters", {}).items()):
-                rows.append({"week": week, "ts_code": code, "cluster_id": cid})
-        clusters_df = pd.DataFrame(rows)
+        clusters_df = pd.DataFrame(cluster_history_to_rows(cluster_history))
         write_csv_atomic(run_dir / "clusters.csv", clusters_df)
         files_written.append("clusters.csv")
 
@@ -216,13 +240,7 @@ def write_run_artifacts(
     for fname in files_written:
         fpath = run_dir / fname
         if fpath.exists():
-            manifest_files[fname] = {
-                "checksum": compute_file_checksum(fpath),
-                "rows": _count_rows(fpath),
-                "schema_version": "v1",
-                "encoding": "utf-8",
-                "columns": _csv_columns(fpath),
-            }
+            manifest_files[fname] = describe_file(fpath)
 
     manifest = {
         "schema_version": "v1",
