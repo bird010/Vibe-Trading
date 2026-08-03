@@ -1,11 +1,11 @@
-/** Phase 5 Task 3 — multi-variant strategy editor (§21). */
+/** Multi-variant strategy editor. */
 
 import { Copy, Trash2, GripVertical } from "lucide-react";
 import { StrategyConfigForm } from "./StrategyConfigForm";
 import type { StrategyDetail } from "./types";
 
 export interface VariantDraft {
-  /** Temporary UI-only key (not the backend variant_key). */
+  /** Temporary UI-only key; never sent as backend variant identity. */
   uiKey: string;
   strategyId: string;
   label: string;
@@ -13,19 +13,15 @@ export interface VariantDraft {
 }
 
 interface Props {
-  /** All available strategies from Catalog. */
   strategies: StrategyDetail[];
-  /** Variants being edited. */
   variants: VariantDraft[];
-  /** Callback with full variant list on any change. */
   onChange: (variants: VariantDraft[]) => void;
   disabled?: boolean;
+  onUnsupportedChange?: (uiKey: string, unsupported: string[]) => void;
 }
 
-let _keyCounter = 0;
-function nextKey(): string {
-  _keyCounter += 1;
-  return `v${_keyCounter}`;
+export function createVariantUiKey(): string {
+  return crypto.randomUUID();
 }
 
 export function StrategyVariantsEditor({
@@ -33,16 +29,19 @@ export function StrategyVariantsEditor({
   variants,
   onChange,
   disabled = false,
+  onUnsupportedChange,
 }: Props) {
-  const strategyMap = new Map(strategies.map((s) => [s.strategy_id, s]));
+  const strategyMap = new Map(
+    strategies.map((strategy) => [strategy.strategy_id, strategy]),
+  );
 
-  const addVariant = (strategyId: string) => {
+  const addVariant = (strategyId: string): void => {
     const strategy = strategyMap.get(strategyId);
     if (!strategy) return;
     onChange([
       ...variants,
       {
-        uiKey: nextKey(),
+        uiKey: createVariantUiKey(),
         strategyId,
         label: "",
         params: { ...strategy.default_config },
@@ -50,63 +49,72 @@ export function StrategyVariantsEditor({
     ]);
   };
 
-  const updateVariant = (uiKey: string, patch: Partial<VariantDraft>) => {
-    onChange(variants.map((v) => (v.uiKey === uiKey ? { ...v, ...patch } : v)));
+  const updateVariant = (
+    uiKey: string,
+    patch: Partial<VariantDraft>,
+  ): void => {
+    onChange(
+      variants.map((variant) =>
+        variant.uiKey === uiKey ? { ...variant, ...patch } : variant,
+      ),
+    );
   };
 
-  const copyVariant = (uiKey: string) => {
-    const source = variants.find((v) => v.uiKey === uiKey);
+  const copyVariant = (uiKey: string): void => {
+    const source = variants.find((variant) => variant.uiKey === uiKey);
     if (!source) return;
     onChange([
       ...variants,
-      { ...source, uiKey: nextKey(), label: `${source.label} (副本)` },
+      {
+        ...source,
+        uiKey: createVariantUiKey(),
+        label: source.label ? `${source.label} (副本)` : "副本",
+        params: structuredClone(source.params),
+      },
     ]);
   };
 
-  const removeVariant = (uiKey: string) => {
-    if (variants.length <= 1) return; // keep at least one
-    onChange(variants.filter((v) => v.uiKey !== uiKey));
+  const removeVariant = (uiKey: string): void => {
+    if (variants.length <= 1) return;
+    onUnsupportedChange?.(uiKey, []);
+    onChange(variants.filter((variant) => variant.uiKey !== uiKey));
   };
 
   return (
     <div className="space-y-4">
-      {/* Variant cards */}
-      {variants.map((variant, idx) => {
+      {variants.map((variant, index) => {
         const strategy = strategyMap.get(variant.strategyId);
         return (
-          <div
-            key={variant.uiKey}
-            className="rounded-lg border p-4 space-y-3"
-          >
-            {/* Header: strategy selector + actions */}
+          <div key={variant.uiKey} className="rounded-lg border p-4 space-y-3">
             <div className="flex items-center gap-2">
               <GripVertical className="h-4 w-4 text-muted-foreground shrink-0" />
               <select
                 value={variant.strategyId}
-                onChange={(e) => {
-                  const newId = e.target.value;
-                  const newStrategy = strategyMap.get(newId);
+                onChange={(event) => {
+                  const strategyId = event.target.value;
+                  const nextStrategy = strategyMap.get(strategyId);
+                  onUnsupportedChange?.(variant.uiKey, []);
                   updateVariant(variant.uiKey, {
-                    strategyId: newId,
-                    params: newStrategy
-                      ? { ...newStrategy.default_config }
+                    strategyId,
+                    params: nextStrategy
+                      ? { ...nextStrategy.default_config }
                       : {},
                   });
                 }}
                 disabled={disabled}
                 className="flex-1 rounded border px-2 py-1.5 text-sm disabled:opacity-50"
               >
-                {strategies.map((s) => (
-                  <option key={s.strategy_id} value={s.strategy_id}>
-                    {s.name}
+                {strategies.map((item) => (
+                  <option key={item.strategy_id} value={item.strategy_id}>
+                    {item.name}
                   </option>
                 ))}
               </select>
               <input
                 type="text"
                 value={variant.label}
-                onChange={(e) =>
-                  updateVariant(variant.uiKey, { label: e.target.value })
+                onChange={(event) =>
+                  updateVariant(variant.uiKey, { label: event.target.value })
                 }
                 placeholder="变体标签（可选）"
                 disabled={disabled}
@@ -132,38 +140,38 @@ export function StrategyVariantsEditor({
               </button>
             </div>
 
-            {/* Per-variant strategy params */}
             {strategy ? (
               <StrategyConfigForm
                 schema={strategy.config_schema}
                 defaults={strategy.default_config}
                 descriptions={strategy.parameter_descriptions}
                 value={variant.params}
-                onChange={(params) => updateVariant(variant.uiKey, { params })}
+                onChange={(params) =>
+                  updateVariant(variant.uiKey, { params })
+                }
+                onUnsupportedChange={(unsupported) =>
+                  onUnsupportedChange?.(variant.uiKey, unsupported)
+                }
                 disabled={disabled}
               />
             ) : (
-              <div className="text-xs text-muted-foreground">
-                未选择策略
-              </div>
+              <div className="text-xs text-muted-foreground">未选择策略</div>
             )}
 
-            {/* Variant number */}
             <div className="text-xs text-muted-foreground">
-              变体 {idx + 1} · {strategy?.strategy_id ?? "—"}
+              变体 {index + 1} · {strategy?.strategy_id ?? "—"}
             </div>
           </div>
         );
       })}
 
-      {/* Add variant button */}
       <div className="flex gap-2">
         <select
           value=""
-          onChange={(e) => {
-            if (e.target.value) {
-              addVariant(e.target.value);
-              e.target.value = "";
+          onChange={(event) => {
+            if (event.target.value) {
+              addVariant(event.target.value);
+              event.target.value = "";
             }
           }}
           disabled={disabled}
@@ -172,9 +180,9 @@ export function StrategyVariantsEditor({
           <option value="" disabled>
             + 添加策略变体
           </option>
-          {strategies.map((s) => (
-            <option key={s.strategy_id} value={s.strategy_id}>
-              {s.name}
+          {strategies.map((strategy) => (
+            <option key={strategy.strategy_id} value={strategy.strategy_id}>
+              {strategy.name}
             </option>
           ))}
         </select>
