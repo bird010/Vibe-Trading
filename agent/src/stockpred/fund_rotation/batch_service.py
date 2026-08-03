@@ -1,17 +1,19 @@
 """Sequential strategy-batch orchestration — Phase 4 Task 4 (§22/§25/§26).
 
 One bounded single-worker executor runs variants strictly ordered by
-``variant_key``; every variant gets an isolated strategy/session/data
-view/run directory while sharing ONE pinned snapshot and evaluation context.
-Planning derives each variant's data start from its LAST pre-evaluation
-decision date traced back by its OWN warmup (never a simple
-``evaluation_start - max(warmup)``) and planning never scans market data.
+``variant_key``; every variant gets an isolated strategy/session/data view/run
+directory while sharing one pinned snapshot and evaluation context.
 
-A variant failure only fails that variant (PARTIAL_SUCCEEDED); a shared
-snapshot failure fails the whole batch. Cancellation is cooperative:
-unstarted variants never launch, the running one stops at the next
-checkpoint, finished children stay read-only, and a canceled batch publishes
-no comparison manifest. JSON/CSV persistence only — no resume promise.
+Planning keeps two different time boundaries explicit:
+
+* ``data_start`` is the earliest date loaded so the anchor decision has its
+  declared warmup history;
+* ``decision_start_date`` is the last scheduled decision before the formal
+  evaluation interval and is the first date on which the strategy may run.
+
+A variant failure only fails that variant (PARTIAL_SUCCEEDED); a shared snapshot
+failure fails the whole batch. Failed/canceled child runs publish the partial
+evidence already produced, but they are never eligible for comparison.
 """
 
 from __future__ import annotations
@@ -35,32 +37,27 @@ from backtest.fund_rotation.runner import (
     FundRotationBacktestRunner,
     SubRunStatus,
 )
-from backtest.fund_rotation.strategies.registry import (
-    default_fund_rotation_strategies,
-)
+from backtest.fund_rotation.strategies.registry import default_fund_rotation_strategies
+from src.stockpred.fund_rotation.artifact_publisher import read_valid_manifest
+from src.stockpred.fund_rotation.batch_child_runtime import BatchChildRuntime
 from src.stockpred.fund_rotation.batch_models import (
     StrategyBatchRequest,
     canonical_payload_hash,
-)
-from src.stockpred.fund_rotation.artifact_publisher import read_valid_manifest
-from src.stockpred.fund_rotation.batch_child_runtime import BatchChildRuntime
-from src.stockpred.fund_rotation.comparison import (
-    VariantComparisonInput,
-    build_comparison,
 )
 from src.stockpred.fund_rotation.batch_persistence import (
     BatchPersistence,
     build_variant_identities,
 )
-from src.stockpred.fund_rotation.persistence import (
-    BatchEventLog,
-    atomic_write_json,
+from src.stockpred.fund_rotation.comparison import (
+    VariantComparisonInput,
+    build_comparison,
 )
+from src.stockpred.fund_rotation.persistence import BatchEventLog, atomic_write_json
 from src.stockpred.fund_rotation.state_machine import (
-    BatchStateMachine,
-    BatchStage,
-    ChildStage,
     BATCH_TERMINAL_STAGES,
+    BatchStage,
+    BatchStateMachine,
+    ChildStage,
     detect_interrupted_state,
     mark_state_interrupted,
 )
@@ -68,7 +65,7 @@ from src.stockpred.fund_rotation.strategy_snapshot import snapshot_framework
 
 
 class BatchPlanningError(Exception):
-    """Structured planning failure (raised before any background task)."""
+    """Structured planning failure raised before any background task starts."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -77,14 +74,14 @@ class BatchPlanningError(Exception):
 
 
 def catalog_identity_hash(catalog) -> str:
-    """Stable hash over the catalog entries (version identity, §16)."""
+    """Stable hash over the startup-fixed catalog entries (§16)."""
     entries = [
         {
-            "strategy_id": e.strategy_id,
-            "interface_version": e.interface_version,
-            "implementation_hash": e.implementation_hash,
+            "strategy_id": entry.strategy_id,
+            "interface_version": entry.interface_version,
+            "implementation_hash": entry.implementation_hash,
         }
-        for e in catalog.list()
+        for entry in catalog.list()
     ]
     canonical = json.dumps(entries, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -115,17 +112,19 @@ class BatchService:
             list(default_fund_rotation_strategies())
         )
         self.framework_implementation_hash = snapshot_framework(
-            Path(__file__).resolve().parents[3],
+            Path(__file__).resolve().parents[3]
         )
         self.child_runtime = BatchChildRuntime(
-            self.runs_root, self.catalog, self.framework_implementation_hash,
+            self.runs_root,
+            self.catalog,
+            self.framework_implementation_hash,
         )
         self.metadata_loader = metadata_loader
         self.frames_loader = frames_loader
         self.auto_start = auto_start
-        # §25.1 — bounded queue; batches run one at a time.
         self.executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="fund-rotation-batch",
+            max_workers=1,
+            thread_name_prefix="fund-rotation-batch",
         )
         self._tokens: dict[str, CancellationToken] = {}
         self._prepared: dict[str, dict[str, Any]] = {}
@@ -133,15 +132,11 @@ class BatchService:
     # ── submission ──
 
     def submit_batch(self, request: StrategyBatchRequest) -> dict[str, Any]:
-        """Validate, plan and persist a batch BEFORE any background task.
-
-        Returns ``{batch_id, status}`` where status is QUEUED (new) or
-        EXISTING (idempotent replay — the original batch is returned and
-        never re-run).
-        """
+        """Validate, plan and persist a batch before any background task."""
         payload_hash = canonical_payload_hash(request)
         record, created = self.persistence.submit(
-            request.idempotency_key, payload_hash,
+            request.idempotency_key,
+            payload_hash,
         )
         batch_id = record["batch_id"]
         if not created:
@@ -158,19 +153,29 @@ class BatchService:
                 )
             plans, plan_summary = self._plan(request, identities, snapshot)
         except CatalogError as exc:
-            self._fail_batch(batch_id, stage="VALIDATING", error=f"{exc.code}: {exc.message}")
+            self._fail_batch(
+                batch_id,
+                stage="VALIDATING",
+                error=f"{exc.code}: {exc.message}",
+            )
             raise BatchPlanningError(exc.code, exc.message) from exc
         except BatchPlanningError as exc:
-            self._fail_batch(batch_id, stage="VALIDATING", error=f"{exc.code}: {exc.message}")
+            self._fail_batch(
+                batch_id,
+                stage="VALIDATING",
+                error=f"{exc.code}: {exc.message}",
+            )
             raise
         except Exception as exc:
-            # Any validation failure after the idempotency binding must leave a
-            # real FAILED batch behind — never a ghost EXISTING key (§21.1).
             self._fail_batch(
-                batch_id, stage="VALIDATING",
+                batch_id,
+                stage="VALIDATING",
                 error=f"variant validation failed: {exc}",
             )
-            raise BatchPlanningError("FUND_ROTATION_BATCH_INVALID", str(exc)) from exc
+            raise BatchPlanningError(
+                "FUND_ROTATION_BATCH_INVALID",
+                str(exc),
+            ) from exc
 
         token = CancellationToken()
         self._tokens[batch_id] = token
@@ -195,8 +200,11 @@ class BatchService:
                 {
                     **identity.__dict__,
                     "run_id": plan["run_id"],
-                    "status": "QUEUED",
+                    "status": ChildStage.QUEUED.value,
                     "snapshot_fingerprint": snapshot.fingerprint,
+                    "data_start": plan["data_start"],
+                    "decision_start_date": plan["decision_start_date"],
+                    "anchor_decision_date": plan["anchor_decision_date"],
                 }
                 for identity, plan in zip(identities, plans)
             ],
@@ -208,36 +216,43 @@ class BatchService:
             batch_id,
             request_payload=request.model_dump(mode="json"),
             identity=_resolved_identity(
-                batch_id, request, identities, self.framework_implementation_hash,
+                batch_id,
+                request,
+                identities,
+                self.framework_implementation_hash,
             ),
         )
-        # The extended resolved document (statuses/plan/executed_order) owns
-        # resolved_batch.json from here on.
         self._write_resolved(batch_dir, resolved)
-        self._write_state(batch_dir, "QUEUED", batch_id)
+        self._write_state(batch_dir, BatchStage.QUEUED.value, batch_id)
 
         if self.auto_start:
             self.executor.submit(self._safe_execute, batch_id)
-        return {"batch_id": batch_id, "status": "QUEUED"}
+        return {"batch_id": batch_id, "status": BatchStage.QUEUED.value}
 
     # ── planning (§22: calendar fixed, no market scan) ──
 
     def _plan(self, request, identities, snapshot):
-        calendar = sorted(str(d) for d in snapshot.trading_dates)
+        calendar = sorted(str(date) for date in snapshot.trading_dates)
         eval_start = request.evaluation_start_date
         eval_end = request.evaluation_end_date
-        eval_dates = [d for d in calendar if eval_start <= d <= eval_end]
+        eval_dates = [date for date in calendar if eval_start <= date <= eval_end]
+        if not eval_dates:
+            raise BatchPlanningError(
+                "FUND_ROTATION_EMPTY_EVALUATION_CALENDAR",
+                f"no trading date in [{eval_start}, {eval_end}]",
+            )
 
         plans: list[dict[str, Any]] = []
         for variant, identity in zip(request.variants, identities):
             binding = self.catalog.resolve(
-                variant.strategy_id, dict(variant.params),
+                variant.strategy_id,
+                dict(variant.params),
             )
             strategy = binding.strategy
             config = binding.registered.config_model.model_validate(
                 dict(binding.spec.resolved_config)
             )
-            requirements = strategy.resolve_requirements(config)
+            requirements = binding.spec.resolved_requirements
             warmup = int(requirements.warmup_trade_days)
 
             if len(calendar) <= warmup:
@@ -246,33 +261,35 @@ class BatchService:
                     f"variant {identity.variant_key}: calendar has "
                     f"{len(calendar)} trading days, warmup needs {warmup}",
                 )
-            provisional_start = calendar[warmup]
+            provisional_decision_start = calendar[warmup]
 
-            # Schedule-only session: never evaluated during planning.
             session = strategy.create_session(
                 StrategyInitializationContext(
-                    run_id="planning", evaluation_calendar=tuple(eval_dates),
+                    run_id="planning",
+                    evaluation_calendar=tuple(eval_dates),
                 ),
                 config,
             )
             scheduled = session.scheduled_dates(
-                tuple(calendar), provisional_start, eval_end,
+                tuple(calendar),
+                provisional_decision_start,
+                eval_end,
             )
             if not scheduled:
                 raise BatchPlanningError(
                     "FUND_ROTATION_INSUFFICIENT_HISTORY",
                     f"variant {identity.variant_key}: no decision date within "
-                    f"[{provisional_start}, {eval_end}]",
+                    f"[{provisional_decision_start}, {eval_end}]",
                 )
-            pre_evaluation = [d for d in scheduled if d < eval_start]
+
+            pre_evaluation = [date for date in scheduled if date < eval_start]
             if not pre_evaluation:
-                # §23 step 3: without a decision date before the evaluation
-                # start there is no first-day target — fail before launch.
                 raise BatchPlanningError(
                     "FUND_ROTATION_INSUFFICIENT_HISTORY",
                     f"variant {identity.variant_key}: no pre-evaluation "
                     f"decision date before {eval_start}",
                 )
+
             anchor = max(pre_evaluation)
             position = calendar.index(anchor)
             if position < warmup:
@@ -281,45 +298,48 @@ class BatchService:
                     f"variant {identity.variant_key}: anchor {anchor} leaves "
                     f"only {position} days before it, warmup needs {warmup}",
                 )
-            simulation_start = calendar[position - warmup]
-            plans.append({
-                "identity": identity,
-                "strategy": strategy,
-                "config": config,
-                "run_id": uuid.uuid4().hex[:12],
-                "anchor_decision_date": anchor,
-                "simulation_start": simulation_start,
-            })
 
-        data_start = min(p["simulation_start"] for p in plans)
-        anchor_plan = next(
-            p for p in plans if p["simulation_start"] == data_start
-        )
+            data_start = calendar[position - warmup]
+            plans.append(
+                {
+                    "identity": identity,
+                    "binding": binding,
+                    "strategy": strategy,
+                    "config": config,
+                    "resolved_requirements": requirements,
+                    "run_id": uuid.uuid4().hex[:12],
+                    "anchor_decision_date": anchor,
+                    "decision_start_date": anchor,
+                    "data_start": data_start,
+                }
+            )
+
+        batch_data_start = min(plan["data_start"] for plan in plans)
         plan_summary = {
-            "data_start": data_start,
-            "anchor_decision_date": anchor_plan["anchor_decision_date"],
-            "simulation_start": anchor_plan["simulation_start"],
+            "data_start": batch_data_start,
+            "earliest_decision_start_date": min(
+                plan["decision_start_date"] for plan in plans
+            ),
             "evaluation_start_date": eval_start,
             "evaluation_end_date": eval_end,
             "variants": [
                 {
-                    "variant_key": p["identity"].variant_key,
-                    "anchor_decision_date": p["anchor_decision_date"],
-                    "simulation_start": p["simulation_start"],
+                    "variant_key": plan["identity"].variant_key,
+                    "data_start": plan["data_start"],
+                    "decision_start_date": plan["decision_start_date"],
+                    "anchor_decision_date": plan["anchor_decision_date"],
                 }
-                for p in plans
+                for plan in plans
             ],
         }
         return plans, plan_summary
 
     def _load_frames(self, snapshot, data_start: str, data_end: str):
-        """Read every table through the already-pinned snapshot."""
         return self.frames_loader(snapshot, data_start, data_end)
 
     # ── execution ──
 
     def run_batch_sync(self, batch_id: str) -> None:
-        """Run a prepared batch on the calling thread (tests / foreground)."""
         self._execute_batch(batch_id)
 
     def cancel_batch(self, batch_id: str) -> bool:
@@ -329,7 +349,9 @@ class BatchService:
         state_path = self.persistence.batch_dir(batch_id) / "state.json"
         if state_path.exists():
             state = json.loads(state_path.read_text(encoding="utf-8"))
-            if state.get("stage") in {stage.value for stage in BATCH_TERMINAL_STAGES}:
+            if state.get("stage") in {
+                stage.value for stage in BATCH_TERMINAL_STAGES
+            }:
                 return False
         token.cancel()
         return True
@@ -342,7 +364,8 @@ class BatchService:
             self._execute_batch(batch_id)
         except Exception as exc:  # pragma: no cover - defensive
             self._fail_batch(
-                batch_id, stage="RUNNING_STRATEGIES",
+                batch_id,
+                stage=BatchStage.RUNNING_STRATEGIES.value,
                 error=f"unexpected orchestrator failure: {exc}",
             )
 
@@ -356,13 +379,15 @@ class BatchService:
         batch_dir = self.persistence.batch_dir(batch_id)
         batch_dir.mkdir(parents=True, exist_ok=True)
         events = BatchEventLog(batch_dir, batch_id=batch_id)
-        sm = BatchStateMachine()
+        state_machine = BatchStateMachine()
 
         def advance(stage: BatchStage) -> None:
-            sm.transition(stage)
-            self._write_state(batch_dir, sm.stage.value, batch_id)
+            state_machine.transition(stage)
+            self._write_state(batch_dir, state_machine.stage.value, batch_id)
             events.append(
-                event_type="BATCH_STAGE", scope="BATCH", stage=sm.stage.value,
+                event_type="BATCH_STAGE",
+                scope="BATCH",
+                stage=state_machine.stage.value,
             )
 
         advance(BatchStage.VALIDATING)
@@ -370,34 +395,38 @@ class BatchService:
 
         if token.is_cancelled:
             run_ids = {
-                plan["identity"].variant_key: plan["run_id"] for plan in plans
+                plan["identity"].variant_key: plan["run_id"]
+                for plan in plans
             }
             self._persist_parent_terminal(
                 batch_dir=batch_dir,
                 batch_id=batch_id,
                 events=events,
                 final_stage=BatchStage.CANCELED.value,
-                statuses={key: ChildStage.CANCELED.value for key in run_ids},
+                statuses={
+                    key: ChildStage.CANCELED.value for key in run_ids
+                },
                 run_ids=run_ids,
                 executed_order=[],
             )
             return
 
-        # Shared snapshot: the exact object resolved once before planning drives
-        # the only frame read for every variant.
-        data_start = min(p["simulation_start"] for p in plans)
+        data_start = min(plan["data_start"] for plan in plans)
         try:
             fund_daily, fund_adj, dim_fund = self._load_frames(
-                snapshot, data_start, request.evaluation_end_date,
+                snapshot,
+                data_start,
+                request.evaluation_end_date,
             )
         except Exception as exc:
             self._fail_batch(
-                batch_id, stage="SNAPSHOTTING_DATA",
+                batch_id,
+                stage=BatchStage.SNAPSHOTTING_DATA.value,
                 error=f"shared snapshot failed: {exc}",
             )
             return
 
-        calendar = sorted(str(d) for d in snapshot.trading_dates)
+        calendar = sorted(str(date) for date in snapshot.trading_dates)
         atomic_write_json(batch_dir / "data_snapshot.json", asdict(snapshot))
         evaluation = EvaluationContext.from_range(
             calendar,
@@ -409,9 +438,7 @@ class BatchService:
 
         advance(BatchStage.RUNNING_STRATEGIES)
 
-        # Strict stable execution order: variant_key ascending, independent
-        # of the request order (§21).
-        ordered = sorted(plans, key=lambda p: p["identity"].variant_key)
+        ordered = sorted(plans, key=lambda plan: plan["identity"].variant_key)
         statuses: dict[str, str] = {}
         executed_order: list[dict[str, Any]] = []
         run_results: dict[str, object] = {}
@@ -419,9 +446,6 @@ class BatchService:
             plan["identity"].variant_key: plan["run_id"] for plan in ordered
         }
 
-        # Once the shared snapshot succeeds, every child has durable QUEUED
-        # state before any strategy is launched. Recovery can now account for
-        # a crash between variants.
         for plan in ordered:
             identity = plan["identity"]
             run_id = plan["run_id"]
@@ -434,9 +458,12 @@ class BatchService:
                 stage=ChildStage.QUEUED.value,
             )
             events.append(
-                event_type="VARIANT_STAGE", scope="VARIANT",
-                run_id=run_id, variant_key=identity.variant_key,
-                strategy_id=identity.strategy_id, stage=ChildStage.QUEUED.value,
+                event_type="VARIANT_STAGE",
+                scope="VARIANT",
+                run_id=run_id,
+                variant_key=identity.variant_key,
+                strategy_id=identity.strategy_id,
+                stage=ChildStage.QUEUED.value,
             )
 
         for plan in ordered:
@@ -444,19 +471,24 @@ class BatchService:
             variant_key = identity.variant_key
             run_id = plan["run_id"]
             if token.is_cancelled:
-                # §26.1 — unstarted variants never launch.
-                statuses[variant_key] = "CANCELED"
+                statuses[variant_key] = SubRunStatus.CANCELED.value
                 executed_order.append({"variant_key": variant_key})
                 self._record_child_stage(
-                    batch_id=batch_id, request=request, identity=identity,
-                    run_id=run_id, snapshot=snapshot,
+                    batch_id=batch_id,
+                    request=request,
+                    identity=identity,
+                    run_id=run_id,
+                    snapshot=snapshot,
                     stage=ChildStage.CANCELED.value,
                     message="CANCELED before start",
                 )
                 events.append(
-                    event_type="TERMINAL", scope="VARIANT",
-                    run_id=run_id, variant_key=variant_key,
-                    strategy_id=identity.strategy_id, stage=ChildStage.CANCELED.value,
+                    event_type="TERMINAL",
+                    scope="VARIANT",
+                    run_id=run_id,
+                    variant_key=variant_key,
+                    strategy_id=identity.strategy_id,
+                    stage=ChildStage.CANCELED.value,
                     message="CANCELED before start",
                 )
                 continue
@@ -467,14 +499,23 @@ class BatchService:
                 ChildStage.EXECUTING,
             ):
                 self._record_child_stage(
-                    batch_id=batch_id, request=request, identity=identity,
-                    run_id=run_id, snapshot=snapshot, stage=child_stage.value,
+                    batch_id=batch_id,
+                    request=request,
+                    identity=identity,
+                    run_id=run_id,
+                    snapshot=snapshot,
+                    stage=child_stage.value,
                 )
                 events.append(
-                    event_type="VARIANT_STAGE", scope="VARIANT",
-                    run_id=run_id, variant_key=variant_key,
-                    strategy_id=identity.strategy_id, stage=child_stage.value,
+                    event_type="VARIANT_STAGE",
+                    scope="VARIANT",
+                    run_id=run_id,
+                    variant_key=variant_key,
+                    strategy_id=identity.strategy_id,
+                    stage=child_stage.value,
                 )
+
+            result = None
             try:
                 result = runner.run(
                     strategy=plan["strategy"],
@@ -483,38 +524,48 @@ class BatchService:
                     evaluation=evaluation,
                     execution=execution_config,
                     cancellation=token,
-                    simulation_start_date=plan["simulation_start"],
+                    decision_start_date=plan["decision_start_date"],
+                    resolved_requirements=plan["resolved_requirements"],
                     run_id=run_id,
                 )
                 status = result.status.value
                 run_results[variant_key] = result
-                # §26.1: a run that finished SUCCEEDED before cancellation
-                # landed stays read-only SUCCEEDED — no rewrite needed.
             except Exception as exc:
                 status = SubRunStatus.FAILED.value
                 events.append(
-                    event_type="ERROR", scope="VARIANT",
-                    run_id=run_id, variant_key=variant_key,
-                    strategy_id=identity.strategy_id, error=str(exc),
+                    event_type="ERROR",
+                    scope="VARIANT",
+                    run_id=run_id,
+                    variant_key=variant_key,
+                    strategy_id=identity.strategy_id,
+                    error=str(exc),
                 )
 
             if status == SubRunStatus.SUCCEEDED.value and token.is_cancelled:
                 status = SubRunStatus.CANCELED.value
 
-            if status == SubRunStatus.SUCCEEDED.value:
-                for child_stage in (
-                    ChildStage.COMPUTING_METRICS,
-                    ChildStage.WRITING_RESULTS,
-                ):
-                    self._record_child_stage(
-                        batch_id=batch_id, request=request, identity=identity,
-                        run_id=run_id, snapshot=snapshot, stage=child_stage.value,
-                    )
-                    events.append(
-                        event_type="VARIANT_STAGE", scope="VARIANT",
-                        run_id=run_id, variant_key=variant_key,
-                        strategy_id=identity.strategy_id, stage=child_stage.value,
-                    )
+            if result is not None:
+                if status == SubRunStatus.SUCCEEDED.value:
+                    for child_stage in (
+                        ChildStage.COMPUTING_METRICS,
+                        ChildStage.WRITING_RESULTS,
+                    ):
+                        self._record_child_stage(
+                            batch_id=batch_id,
+                            request=request,
+                            identity=identity,
+                            run_id=run_id,
+                            snapshot=snapshot,
+                            stage=child_stage.value,
+                        )
+                        events.append(
+                            event_type="VARIANT_STAGE",
+                            scope="VARIANT",
+                            run_id=run_id,
+                            variant_key=variant_key,
+                            strategy_id=identity.strategy_id,
+                            stage=child_stage.value,
+                        )
                 try:
                     self.child_runtime.publish_result(
                         batch_id=batch_id,
@@ -523,12 +574,16 @@ class BatchService:
                         snapshot=snapshot,
                         evaluation=evaluation,
                         result=result,
+                        terminal_stage=status,
+                        execution_config=execution_config,
                     )
                 except Exception as exc:
                     status = SubRunStatus.FAILED.value
                     events.append(
-                        event_type="ERROR", scope="VARIANT",
-                        run_id=run_id, variant_key=variant_key,
+                        event_type="ERROR",
+                        scope="VARIANT",
+                        run_id=run_id,
+                        variant_key=variant_key,
                         strategy_id=identity.strategy_id,
                         error=f"child publication failed: {exc}",
                     )
@@ -541,60 +596,66 @@ class BatchService:
                         error=f"child publication failed: {exc}",
                     )
             else:
-                terminal_stage = (
-                    ChildStage.CANCELED.value
-                    if status == SubRunStatus.CANCELED.value
-                    else ChildStage.FAILED.value
-                )
-                result_error = getattr(run_results.get(variant_key), "error_message", "")
                 self._record_child_stage(
-                    batch_id=batch_id, request=request, identity=identity,
-                    run_id=run_id, snapshot=snapshot, stage=terminal_stage,
-                    error=result_error or None,
+                    batch_id=batch_id,
+                    request=request,
+                    identity=identity,
+                    run_id=run_id,
+                    snapshot=snapshot,
+                    stage=ChildStage.FAILED.value,
+                    error="runner raised before returning a result",
                 )
 
             statuses[variant_key] = status
             executed_order.append({"variant_key": variant_key})
             events.append(
-                event_type="TERMINAL", scope="VARIANT",
-                run_id=run_id, variant_key=variant_key,
-                strategy_id=identity.strategy_id, stage=status, message=status,
+                event_type="TERMINAL",
+                scope="VARIANT",
+                run_id=run_id,
+                variant_key=variant_key,
+                strategy_id=identity.strategy_id,
+                stage=status,
+                message=status,
             )
 
         if not token.is_cancelled:
             advance(BatchStage.COMPARING)
-
-            # §27 — strict common-calendar comparison: only sub-runs whose
-            # equity index EXACTLY equals the evaluation calendar participate.
             eval_dates = [
-                d for d in calendar
-                if request.evaluation_start_date <= d <= request.evaluation_end_date
+                date
+                for date in calendar
+                if request.evaluation_start_date
+                <= date
+                <= request.evaluation_end_date
             ]
             comparison_inputs: list[VariantComparisonInput] = []
             for plan in ordered:
                 identity = plan["identity"]
-                vk = identity.variant_key
-                result = run_results.get(vk)
+                variant_key = identity.variant_key
+                result = run_results.get(variant_key)
                 if result is None:
                     continue
                 has_invalid = any(
-                    d.action.value == "INVALID" for d in result.decisions
+                    decision.action.value == "INVALID"
+                    for decision in result.decisions
                 )
-                comparison_inputs.append(VariantComparisonInput(
-                    variant_key=vk,
-                    strategy_id=identity.strategy_id,
-                    run_id=run_ids.get(vk, ""),
-                    status=statuses.get(vk, "UNKNOWN"),
-                    equity=result.executed_equity,
-                    decision_quality=result.quality_status,
-                    has_invalid_action=has_invalid,
-                ))
+                comparison_inputs.append(
+                    VariantComparisonInput(
+                        variant_key=variant_key,
+                        strategy_id=identity.strategy_id,
+                        run_id=run_ids.get(variant_key, ""),
+                        status=statuses.get(variant_key, "UNKNOWN"),
+                        equity=result.executed_equity,
+                        decision_quality=result.quality_status,
+                        has_invalid_action=has_invalid,
+                    )
+                )
 
             outcome = build_comparison(
                 comparison_inputs,
                 evaluation_calendar=eval_dates,
                 framework_implementation_hash=self.framework_implementation_hash,
                 data_snapshot_fingerprint=snapshot.fingerprint,
+                execution_contract=execution_config.model_dump(mode="json"),
             )
 
             comparable_count = len(outcome.equity_frame.columns)
@@ -607,6 +668,7 @@ class BatchService:
                     "components": outcome.contract_components,
                 },
                 "ranking": outcome.ranking if comparison_available else [],
+                "metrics": outcome.metrics,
                 "excluded": outcome.excluded,
                 "quality_warnings": outcome.quality_warnings,
             }
@@ -616,25 +678,26 @@ class BatchService:
                 tmp = batch_dir / "comparison_equity.csv.tmp"
                 outcome.equity_frame.to_csv(tmp)
                 os.replace(str(tmp), str(batch_dir / "comparison_equity.csv"))
-                import pandas as _pd
+
+                import pandas as pd
 
                 tmp = batch_dir / "comparison_metrics.csv.tmp"
-                _pd.DataFrame(outcome.metrics).T.to_csv(tmp)
+                pd.DataFrame(outcome.metrics).T.to_csv(tmp)
                 os.replace(str(tmp), str(batch_dir / "comparison_metrics.csv"))
 
             advance(BatchStage.WRITING_RESULTS)
 
-        # §26 parent aggregation.
         if token.is_cancelled:
-            final_stage = "CANCELED"
+            final_stage = BatchStage.CANCELED.value
         else:
             values = set(statuses.values())
-            if values <= {"SUCCEEDED"}:
-                final_stage = "SUCCEEDED"
-            elif "SUCCEEDED" in values:
-                final_stage = "PARTIAL_SUCCEEDED"
+            if values <= {SubRunStatus.SUCCEEDED.value}:
+                final_stage = BatchStage.SUCCEEDED.value
+            elif SubRunStatus.SUCCEEDED.value in values:
+                final_stage = BatchStage.PARTIAL_SUCCEEDED.value
             else:
-                final_stage = "FAILED"
+                final_stage = BatchStage.FAILED.value
+
         resolved = self._persist_parent_terminal(
             batch_dir=batch_dir,
             batch_id=batch_id,
@@ -645,15 +708,22 @@ class BatchService:
             executed_order=executed_order,
         )
 
-        # §27 — manifest.json is the sole atomic publish point; only written
-        # for non-cancelled batches that completed comparison.
-        if not token.is_cancelled and final_stage in ("SUCCEEDED", "PARTIAL_SUCCEEDED"):
+        if (
+            not token.is_cancelled
+            and final_stage
+            in (BatchStage.SUCCEEDED.value, BatchStage.PARTIAL_SUCCEEDED.value)
+        ):
             from src.stockpred.fund_rotation.artifacts import compute_file_checksum
 
             artifact_names = [
-                "request.json", "resolved_batch.json", "state.json",
-                "events.jsonl", "data_snapshot.json", "reports.json",
-                "comparison_equity.csv", "comparison_metrics.csv",
+                "request.json",
+                "resolved_batch.json",
+                "state.json",
+                "events.jsonl",
+                "data_snapshot.json",
+                "reports.json",
+                "comparison_equity.csv",
+                "comparison_metrics.csv",
             ]
             files = []
             file_details = {}
@@ -673,18 +743,17 @@ class BatchService:
                 "data_snapshot_fingerprint": snapshot.fingerprint,
                 "variants": [
                     {
-                        "variant_key": v["variant_key"],
-                        "strategy_id": v.get("strategy_id", ""),
-                        "run_id": v.get("run_id"),
-                        "status": v.get("status"),
+                        "variant_key": variant["variant_key"],
+                        "strategy_id": variant.get("strategy_id", ""),
+                        "run_id": variant.get("run_id"),
+                        "status": variant.get("status"),
                     }
-                    for v in resolved.get("variants", [])
+                    for variant in resolved.get("variants", [])
                 ],
                 "files": files,
                 "file_details": file_details,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            # manifest.json is the final mutation of the published batch.
             atomic_write_json(batch_dir / "manifest.json", manifest)
 
     # ── child-run persistence/publication (§25/§29) ──
@@ -717,10 +786,6 @@ class BatchService:
     # ── recovery (§26.1) ──
 
     def recover_interrupted(self) -> list[str]:
-        """Mark every non-terminal batch (and child run) FAILED_INTERRUPTED.
-
-        Finished artifacts stay readable; nothing is auto-resumed.
-        """
         recovered: list[str] = []
         root = self.persistence.batches_dir
         if root.exists():
@@ -744,14 +809,18 @@ class BatchService:
                     continue
                 if (
                     detect_interrupted_state(state)
-                    or state.get("stage") in {
+                    or state.get("stage")
+                    in {
                         BatchStage.SUCCEEDED.value,
                         BatchStage.PARTIAL_SUCCEEDED.value,
                     }
                 ):
                     interrupted = mark_state_interrupted(state)
                     atomic_write_json(state_path, interrupted)
-                    BatchEventLog(batch_dir, batch_id=batch_dir.name).append(
+                    BatchEventLog(
+                        batch_dir,
+                        batch_id=batch_dir.name,
+                    ).append(
                         event_type="TERMINAL",
                         scope="BATCH",
                         stage=BatchStage.FAILED_INTERRUPTED.value,
@@ -765,12 +834,15 @@ class BatchService:
     # ── helpers ──
 
     def _write_state(self, batch_dir: Path, stage: str, batch_id: str) -> None:
-        atomic_write_json(batch_dir / "state.json", {
-            "schema_version": "2",
-            "stage": stage,
-            "batch_id": batch_id,
-            "mode": "RESEARCH_ONLY",
-        })
+        atomic_write_json(
+            batch_dir / "state.json",
+            {
+                "schema_version": "2",
+                "stage": stage,
+                "batch_id": batch_id,
+                "mode": "RESEARCH_ONLY",
+            },
+        )
 
     def _persist_parent_terminal(
         self,
@@ -787,7 +859,8 @@ class BatchService:
         resolved = self._read_resolved(batch_dir)
         for variant in resolved.get("variants", []):
             variant["status"] = statuses.get(
-                variant["variant_key"], ChildStage.CANCELED.value,
+                variant["variant_key"],
+                ChildStage.CANCELED.value,
             )
             variant["run_id"] = run_ids.get(variant["variant_key"])
         resolved["executed_order"] = executed_order
@@ -848,10 +921,10 @@ def catalog_identity_hash_from_identities(identities) -> str:
     canonical = json.dumps(
         [
             {
-                "variant_key": i.variant_key,
-                "implementation_hash": i.implementation_hash,
+                "variant_key": identity.variant_key,
+                "implementation_hash": identity.implementation_hash,
             }
-            for i in identities
+            for identity in identities
         ],
         sort_keys=True,
         ensure_ascii=False,
