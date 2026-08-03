@@ -1,4 +1,4 @@
-"""Lifecycle, publication and recovery for strategy-batch child runs."""
+"""Lifecycle, evidence publication and recovery for batch child runs."""
 
 from __future__ import annotations
 
@@ -34,8 +34,6 @@ from src.stockpred.fund_rotation.strategy_snapshot import (
 
 
 class BatchChildRuntime:
-    """Own child state transitions, artifacts and crash recovery."""
-
     def __init__(self, runs_root: Path, catalog, framework_hash: str) -> None:
         self.runs_root = Path(runs_root)
         self.catalog = catalog
@@ -55,19 +53,16 @@ class BatchChildRuntime:
         error: str | None = None,
         quality_status: str | None = None,
     ) -> None:
-        """Validate a child transition before atomically replacing its state."""
         target = ChildStage(stage)
         run_dir = self.runs_root / run_id
         state_path = run_dir / "state.json"
         if state_path.exists():
             current = json.loads(state_path.read_text(encoding="utf-8"))
-            machine = ChildStateMachine(initial=ChildStage(current["stage"]))
-            machine.transition(target)
+            ChildStateMachine(initial=ChildStage(current["stage"])).transition(target)
         elif target is not ChildStage.QUEUED:
             raise InvalidTransitionError(
                 f"First child stage must be QUEUED, got {target.value}"
             )
-
         state = {
             "schema_version": "2",
             "stage": target.value,
@@ -105,12 +100,6 @@ class BatchChildRuntime:
         terminal_stage: str = ChildStage.SUCCEEDED.value,
         execution_config=None,
     ) -> None:
-        """Publish complete or partial evidence and write the manifest last.
-
-        FAILED and CANCELED runs preserve all evidence produced before their
-        terminal checkpoint. Their manifests are explicitly marked partial and
-        non-comparable; they are never accepted by success readers.
-        """
         terminal = ChildStage(terminal_stage)
         if terminal not in {
             ChildStage.SUCCEEDED,
@@ -124,11 +113,10 @@ class BatchChildRuntime:
         run_dir = self.runs_root / run_id
         publisher = ArtifactPublisher(run_dir)
         registered = self.catalog.require(identity.strategy_id)
-
         resolved_execution = (
             execution_config.model_dump(mode="json")
             if execution_config is not None
-            else dict(request.execution)
+            else request.execution.model_dump(mode="json")
         )
         resolved_execution_hash = _canonical_hash(resolved_execution)
         research_contract = {
@@ -151,7 +139,7 @@ class BatchChildRuntime:
         )
         partial = terminal is not ChildStage.SUCCEEDED
 
-        publisher.publish(
+        for artifact in (
             StrategyArtifact(
                 role="resolved_spec",
                 media_type="application/json",
@@ -161,11 +149,7 @@ class BatchChildRuntime:
                     "run_id": run_id,
                     "schema_version": request.schema_version,
                     "mode": request.mode,
-                    "data_start": plan["data_start"],
-                    "decision_start_date": plan["decision_start_date"],
-                    "anchor_decision_date": plan["anchor_decision_date"],
-                    "evaluation_start_date": request.evaluation_start_date,
-                    "evaluation_end_date": request.evaluation_end_date,
+                    **research_contract,
                     "execution": resolved_execution,
                     "resolved_execution_hash": resolved_execution_hash,
                     "framework_implementation_hash": self.framework_hash,
@@ -177,9 +161,7 @@ class BatchChildRuntime:
                     "partial": partial,
                     "publishable_for_comparison": not partial,
                 },
-            )
-        )
-        publisher.publish(
+            ),
             StrategyArtifact(
                 role="strategy_snapshot",
                 media_type="application/json",
@@ -194,16 +176,12 @@ class BatchChildRuntime:
                     ),
                     "descriptor": asdict(registered.descriptor),
                 },
-            )
-        )
-        publisher.publish(
+            ),
             StrategyArtifact(
                 role="data_snapshot",
                 media_type="application/json",
                 payload=asdict(snapshot),
-            )
-        )
-        publisher.publish(
+            ),
             StrategyArtifact(
                 role="evaluation_calendar",
                 media_type="application/json",
@@ -211,8 +189,9 @@ class BatchChildRuntime:
                     date.strftime("%Y%m%d")
                     for date in evaluation.trading_dates
                 ],
-            )
-        )
+            ),
+        ):
+            publisher.publish(artifact)
 
         decisions = pd.DataFrame(
             [
@@ -262,9 +241,7 @@ class BatchChildRuntime:
         )
         orders = pd.DataFrame(result.orders)
         if orders.empty:
-            orders = pd.DataFrame(
-                columns=["order_id", "ts_code", "status"]
-            )
+            orders = pd.DataFrame(columns=["order_id", "ts_code", "status"])
         fills = pd.DataFrame(result.trade_events)
         if fills.empty:
             fills = pd.DataFrame(
@@ -281,7 +258,23 @@ class BatchChildRuntime:
                     "cash",
                 ]
             )
+        equity = pd.DataFrame({"strategy": result.executed_equity})
+        for name, series in result.benchmark_equity.items():
+            equity[name] = series
 
+        metrics_payload = {
+            "strategy": dict(result.strategy_metrics),
+            "benchmarks": {
+                name: dict(metrics)
+                for name, metrics in result.benchmark_metrics.items()
+            },
+            "execution": dict(result.execution_diagnostics),
+            "quality_status": result.quality_status,
+            "status": terminal.value,
+            "partial": partial,
+            "error_code": getattr(result, "error_code", ""),
+            "error_message": getattr(result, "error_message", ""),
+        }
         summary = {
             "mode": request.mode,
             "run_id": run_id,
@@ -297,6 +290,7 @@ class BatchChildRuntime:
             "max_drawdown": result.strategy_metrics.get("max_drawdown", 0.0),
             "sharpe": result.strategy_metrics.get("sharpe", 0.0),
             "total_return": result.strategy_metrics.get("total_return", 0.0),
+            "turnover": result.execution_diagnostics.get("turnover", 0.0),
             "run_identity_hash": run_identity_hash,
         }
         for role, media_type, payload in (
@@ -305,19 +299,9 @@ class BatchChildRuntime:
             ("orders", "text/csv", orders),
             ("fills", "text/csv", fills),
             ("positions", "text/csv", positions),
-            ("equity", "text/csv", result.executed_equity.rename("strategy")),
-            (
-                "metrics",
-                "application/json",
-                {
-                    "strategy": dict(result.strategy_metrics),
-                    "quality_status": result.quality_status,
-                    "status": terminal.value,
-                    "partial": partial,
-                    "error_code": getattr(result, "error_code", ""),
-                    "error_message": getattr(result, "error_message", ""),
-                },
-            ),
+            ("equity", "text/csv", equity),
+            ("metrics", "application/json", metrics_payload),
+            ("execution_diagnostics", "application/json", dict(result.execution_diagnostics)),
             ("summary", "application/json", summary),
         ):
             publisher.publish(
@@ -339,7 +323,7 @@ class BatchChildRuntime:
             snapshot=snapshot,
             stage=terminal.value,
             error=(
-                getattr(result, "error_message", "") or None
+                (getattr(result, "error_message", "") or None)
                 if partial
                 else None
             ),
@@ -380,18 +364,14 @@ class BatchChildRuntime:
                     "strategy_implementation_hash": identity.implementation_hash,
                     "data_snapshot_fingerprint": snapshot.fingerprint,
                     "run_identity_hash": run_identity_hash,
-                    "state_checksum": compute_file_checksum(
-                        run_dir / "state.json"
-                    ),
+                    "state_checksum": compute_file_checksum(run_dir / "state.json"),
                     "file_details": file_details,
                 },
             )
         except Exception as exc:
             self._mark_interrupted(
                 run_dir,
-                json.loads(
-                    (run_dir / "state.json").read_text(encoding="utf-8")
-                ),
+                json.loads((run_dir / "state.json").read_text(encoding="utf-8")),
                 error=f"child publication failed: {exc}",
             )
             raise
@@ -439,10 +419,7 @@ class BatchChildRuntime:
             )
             if manifest is not None:
                 continue
-            if (
-                detect_interrupted_state(state)
-                or state.get("stage") == ChildStage.SUCCEEDED.value
-            ):
+            if detect_interrupted_state(state) or state.get("stage") == ChildStage.SUCCEEDED.value:
                 self._mark_interrupted(child_dir, state)
 
     @staticmethod
@@ -454,14 +431,9 @@ class BatchChildRuntime:
         message: str | None = None,
         error: str | None = None,
     ) -> None:
-        BatchEventLog(
-            child_dir,
-            batch_id=str(state["batch_id"]),
-        ).append(
+        BatchEventLog(child_dir, batch_id=str(state["batch_id"])).append(
             event_type=(
-                "TERMINAL"
-                if stage in CHILD_TERMINAL_STAGES
-                else "VARIANT_STAGE"
+                "TERMINAL" if stage in CHILD_TERMINAL_STAGES else "VARIANT_STAGE"
             ),
             scope="VARIANT",
             run_id=str(state.get("run_id", child_dir.name)),
