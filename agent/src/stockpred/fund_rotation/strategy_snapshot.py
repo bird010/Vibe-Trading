@@ -1,9 +1,8 @@
 """Strategy and framework source snapshots plus deterministic run identity.
 
-The snapshot boundary is deliberately explicit and fail-fast: every declared
-framework source must exist, and a strategy snapshot includes its package plus
-cross-package strategy helpers that are imported into the strategy module.
-Runtime library versions are recorded for audit but are not identity inputs.
+Every declared framework source must exist. A strategy snapshot contains its
+whole package and any imported sibling strategy helpers, while preserving
+stable package-local paths for standalone/test strategies.
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ FRAMEWORK_SOURCE_FILES: tuple[str, ...] = (
 
 
 class FrameworkSnapshotError(RuntimeError):
-    """Raised when a declared framework source cannot be snapshotted."""
+    """Raised when a declared source snapshot cannot be produced."""
 
 
 @dataclass(frozen=True)
@@ -77,13 +76,6 @@ def _hash_file_contents(paths_with_rel: list[tuple[str, bytes]]) -> str:
 
 
 def _strategy_dependency_files(strategy_cls: type) -> set[Path]:
-    """Collect package files and imported strategy helper modules.
-
-    The recursive module walk is constrained to
-    ``backtest.fund_rotation.strategies``. It captures explicit imports such as
-    the representative strategy's use of baseline signal helpers without
-    making unrelated framework modules part of the strategy identity.
-    """
     strategy_file = Path(inspect.getfile(strategy_cls)).resolve()
     package_dir = strategy_file.parent
     files = {
@@ -117,12 +109,18 @@ def _strategy_dependency_files(strategy_cls: type) -> set[Path]:
                 dependency_module = value
             else:
                 candidate_name = getattr(value, "__module__", "")
-                if candidate_name.startswith("backtest.fund_rotation.strategies"):
+                if candidate_name.startswith(
+                    "backtest.fund_rotation.strategies"
+                ):
                     dependency_module = sys.modules.get(candidate_name)
             if dependency_module is not None:
                 queue.append(dependency_module)
 
-    for dependency in getattr(strategy_cls, "implementation_dependencies", ()):
+    for dependency in getattr(
+        strategy_cls,
+        "implementation_dependencies",
+        (),
+    ):
         try:
             path = Path(inspect.getfile(dependency)).resolve()
         except (TypeError, OSError) as exc:
@@ -136,7 +134,8 @@ def _strategy_dependency_files(strategy_cls: type) -> set[Path]:
 
 def snapshot_strategy_package(strategy_cls: type) -> StrategySourceSnapshot:
     strategy_file = Path(inspect.getfile(strategy_cls)).resolve()
-    strategies_root = strategy_file.parent.parent
+    package_dir = strategy_file.parent
+    strategies_root = package_dir.parent
     files = _strategy_dependency_files(strategy_cls)
     if not files:
         raise FrameworkSnapshotError(
@@ -154,9 +153,13 @@ def snapshot_strategy_package(strategy_cls: type) -> StrategySourceSnapshot:
                 f"cannot read strategy source {path}: {exc}"
             ) from exc
         try:
-            relative_path = path.relative_to(strategies_root).as_posix()
+            relative_path = path.relative_to(package_dir).as_posix()
         except ValueError:
-            relative_path = f"external/{path.name}"
+            try:
+                sibling_path = path.relative_to(strategies_root).as_posix()
+                relative_path = f"dependencies/{sibling_path}"
+            except ValueError:
+                relative_path = f"external/{path.name}"
         relative_paths.append(relative_path)
         pairs.append((relative_path, content))
         file_hashes.append(
