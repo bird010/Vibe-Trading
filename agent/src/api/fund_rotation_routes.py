@@ -647,19 +647,12 @@ def register_fund_rotation_routes(
                         seq = event.get("seq", 0)
                         if seq <= last_seq:
                             continue
-                        stage = event.get("stage", "")
-                        if stage == "SUCCEEDED":
-                            try:
-                                _published_manifest(run_id)
-                            except HTTPException:
-                                return
-                            last_seq = seq
-                            yield (
-                                f"id: {seq}\nevent: done\ndata: "
-                                f"{json.dumps(event, ensure_ascii=False)}\n\n"
-                            )
-                            return
-                        if stage in (
+                        terminal_stage = str(
+                            event.get("stage") or event.get("message") or ""
+                        )
+                        is_terminal = event.get("event_type") == "TERMINAL"
+                        if is_terminal and terminal_stage in (
+                            "SUCCEEDED",
                             "FAILED",
                             "FAILED_INTERRUPTED",
                             "CANCELED",
