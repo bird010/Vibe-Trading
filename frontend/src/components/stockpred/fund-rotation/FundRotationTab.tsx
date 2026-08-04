@@ -8,12 +8,15 @@ import {
   XCircle,
 } from "lucide-react";
 import { useFundRotation } from "./useFundRotation";
+import { useBacktestDetail } from "./useBacktestDetail";
 import {
   StrategyVariantsEditor,
   createVariantUiKey,
   type VariantDraft,
 } from "./StrategyVariantsEditor";
 import { StrategyComparison } from "./StrategyComparison";
+import { VariantRunsTable } from "./VariantRunsTable";
+import { BacktestDetailPanel } from "./BacktestDetailPanel";
 import type { StrategyDetail } from "./types";
 
 const RESEARCH_WARNING = "RESEARCH_ONLY · 仅供研究，不构成投资建议";
@@ -58,6 +61,11 @@ export function FundRotationTab() {
     selectBatch,
     cancelActiveBatch,
   } = useFundRotation();
+  const {
+    selectedVariantKey,
+    openRun,
+    closeRun,
+  } = useBacktestDetail();
 
   const [variants, setVariants] = useState<VariantDraft[]>([]);
   const [startDate, setStartDate] = useState("");
@@ -75,6 +83,10 @@ export function FundRotationTab() {
     void fetchCatalog();
     void fetchBatches();
   }, [fetchCatalog, fetchBatches]);
+
+  useEffect(() => {
+    closeRun();
+  }, [activeBatchId, closeRun]);
 
   useEffect(() => {
     if (strategies.length > 0 && variants.length === 0) {
@@ -154,6 +166,18 @@ export function FundRotationTab() {
     }
   };
 
+  const handleSelectVariant = (variantKey: string): void => {
+    if (!activeBatch) return;
+    const variant = activeBatch.resolved.variants.find(
+      (entry) => entry.variant_key === variantKey,
+    );
+    const child = activeBatch.child_runs.find(
+      (entry) => entry.variant_key === variantKey,
+    );
+    const runId = child?.run_id ?? variant?.run_id;
+    if (runId) void openRun(variantKey, runId);
+  };
+
   const latestBatchStage = [...events]
     .reverse()
     .find((event) => event.scope === "BATCH" && event.stage)?.stage;
@@ -182,7 +206,7 @@ export function FundRotationTab() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,30fr)_minmax(0,25fr)_minmax(0,45fr)]">
         <div className="space-y-4 rounded-lg border p-4">
           <h3 className="font-semibold text-sm">策略批次配置</h3>
           <div className="grid grid-cols-3 gap-2">
@@ -359,7 +383,7 @@ export function FundRotationTab() {
           )}
         </div>
 
-        <div className="space-y-4 rounded-lg border p-4">
+        <div className="space-y-4 rounded-lg border p-4 min-w-0">
           <h3 className="font-semibold text-sm flex items-center gap-2">
             <TrendingUp className="h-4 w-4" />
             策略比较
@@ -368,6 +392,7 @@ export function FundRotationTab() {
             <StrategyComparison
               reports={comparison}
               equity={comparisonEquity}
+              onSelectVariant={handleSelectVariant}
             />
           ) : activeBatch ? (
             <div className="text-xs text-muted-foreground">
@@ -384,6 +409,17 @@ export function FundRotationTab() {
           )}
         </div>
       </div>
+
+      {activeBatch && (
+        <VariantRunsTable
+          batch={activeBatch}
+          reports={comparison}
+          selectedVariantKey={selectedVariantKey}
+          onViewDetail={(variantKey, runId) => void openRun(variantKey, runId)}
+        />
+      )}
+
+      <BacktestDetailPanel />
     </div>
   );
 }
