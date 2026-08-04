@@ -1,11 +1,12 @@
-"""Fund-rotation API response models — Phase 4 Task 1 (design §16/§18).
+"""Fund-rotation API response models.
 
-Thin Pydantic shapes for the catalog read endpoints. Every value is derived
-from the Catalog at request time; nothing is duplicated or cached in the
-route layer.
+The catalog models describe strategy discovery. Run-detail models describe the
+checksum-gated child-run read APIs used by the research UI.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,7 +27,6 @@ class StrategySummary(BaseModel):
     interface_version: str
     implementation_hash: str
     supported_universe: tuple[str, ...]
-    # Requirements resolved from the default config.
     warmup_trade_days: int
     required_datasets: tuple[str, ...]
     required_fields: tuple[str, ...]
@@ -40,7 +40,7 @@ class StrategyListResponse(BaseModel):
 
 
 class StrategyDetail(StrategySummary):
-    """Full detail for the dynamic configuration form (§18)."""
+    """Full detail for the dynamic configuration form."""
 
     mode: str = "RESEARCH_ONLY"
     config_schema: dict
@@ -50,3 +50,75 @@ class StrategyDetail(StrategySummary):
     parameter_descriptions: dict[str, str]
     artifact_roles: list[str]
     research_mode_warning: str = RESEARCH_MODE_WARNING
+
+
+class BacktestPeriod(BaseModel):
+    data_start: str | None = None
+    decision_start_date: str | None = None
+    anchor_decision_date: str | None = None
+    evaluation_start_date: str | None = None
+    evaluation_end_date: str | None = None
+
+
+class BacktestIdentity(BaseModel):
+    implementation_hash: str | None = None
+    framework_implementation_hash: str | None = None
+    resolved_config_hash: str | None = None
+    resolved_requirements_hash: str | None = None
+    snapshot_fingerprint: str | None = None
+    run_identity_hash: str | None = None
+
+
+class BacktestArtifact(BaseModel):
+    role: str
+    file: str
+    media_type: str
+    producer: str
+    checksum: str | None = None
+    rows: int | None = None
+    columns: list[str] = Field(default_factory=list)
+
+
+class BacktestInstrument(BaseModel):
+    ts_code: str
+    has_signal: bool = False
+    has_order: bool = False
+    has_trade: bool = False
+    has_position: bool = False
+
+
+class BacktestDetailResponse(BaseModel):
+    schema_version: str
+    run_id: str
+    batch_id: str | None = None
+    variant_key: str | None = None
+    strategy_id: str | None = None
+    label: str | None = None
+    status: str
+    quality_status: str | None = None
+    mode: str = "RESEARCH_ONLY"
+    message: str | None = None
+    error: str | None = None
+    result_published: bool = False
+    partial: bool = False
+    publishable_for_comparison: bool = False
+    period: BacktestPeriod = Field(default_factory=BacktestPeriod)
+    identity: BacktestIdentity = Field(default_factory=BacktestIdentity)
+    resolved_config: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, float] = Field(default_factory=dict)
+    instruments: list[BacktestInstrument] = Field(default_factory=list)
+    artifacts: list[BacktestArtifact] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class InstrumentChartResponse(BaseModel):
+    ts_code: str
+    run_id: str
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+    trades: list[dict[str, Any]] = Field(default_factory=list)
+    ohlcv: list[dict[str, Any]] = Field(default_factory=list)
+    positions: list[dict[str, Any]] = Field(default_factory=list)
+    orders: list[dict[str, Any]] = Field(default_factory=list)
+    ohlcv_source: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "RESEARCH_ONLY"
