@@ -126,18 +126,18 @@ export function FundRotationEquityChart({ equity, height = 420 }: Props) {
       series: [
         ...normalized.map((entry, index) => ({
           name: entry.name,
-          type: "line",
+          type: "line" as const,
           xAxisIndex: 0,
           yAxisIndex: 0,
           data: entry.values,
           showSymbol: false,
           connectNulls: false,
           lineStyle: { width: index === 0 || entry.name === "strategy" ? 2.2 : 1.3 },
-          emphasis: { focus: "series" },
+          emphasis: { focus: "series" as const },
         })),
         {
           name: `${strategy.name} 回撤`,
-          type: "line",
+          type: "line" as const,
           xAxisIndex: 1,
           yAxisIndex: 1,
           data: drawdown,
