@@ -74,6 +74,7 @@ export function VariantRunsTable({
               const exclusion = excludedByVariant.get(variant.variant_key);
               const stage = child?.stage ?? variant.status ?? "QUEUED";
               const runId = child?.run_id ?? variant.run_id ?? null;
+              const canView = Boolean(child && runId);
               const quality = child?.quality_status ?? ranking?.quality_status;
               const selected = selectedVariantKey === variant.variant_key;
               return (
@@ -114,14 +115,16 @@ export function VariantRunsTable({
                   <td className="py-2">
                     <button
                       type="button"
-                      disabled={!runId}
-                      onClick={() => runId && onViewDetail(variant.variant_key, runId)}
+                      disabled={!canView}
+                      onClick={() => canView && runId && onViewDetail(variant.variant_key, runId)}
                       className="inline-flex items-center gap-1 rounded border px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <Eye className="h-3.5 w-3.5" />
                       {stage === "FAILED" || stage === "FAILED_INTERRUPTED"
                         ? "查看错误"
-                        : "查看详情"}
+                        : canView
+                          ? "查看详情"
+                          : "等待运行"}
                     </button>
                   </td>
                 </tr>
