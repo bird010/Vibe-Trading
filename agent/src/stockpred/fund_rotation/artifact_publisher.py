@@ -18,8 +18,12 @@ Strategies declare artifacts; they never write file paths themselves (§12).
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Collection
 
@@ -61,6 +65,52 @@ class ArtifactPublicationError(Exception):
     """Raised on any publication failure; the run never gets a success manifest."""
 
     code = "ARTIFACT_PUBLICATION_ERROR"
+
+
+def _json_compatible(value: object, *, path: str = "$" ) -> object:
+    """Normalize supported value objects to strict JSON-compatible values.
+
+    Strategy diagnostics may expose immutable domain value objects such as
+    dataclasses and string enums. The publisher owns serialization, so those
+    types are converted recursively at this boundary. Unknown objects still
+    fail closed instead of being stringified implicitly.
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError(f"{path} contains a non-finite float")
+        return value
+    if isinstance(value, Enum):
+        return _json_compatible(value.value, path=path)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_compatible(
+                getattr(value, field.name),
+                path=f"{path}.{field.name}",
+            )
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"{path} contains non-string mapping key {key!r}"
+                )
+            normalized[key] = _json_compatible(
+                item,
+                path=f"{path}.{key}",
+            )
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_compatible(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(
+        f"{path} contains unsupported type {type(value).__name__}"
+    )
 
 
 class ArtifactPublisher:
@@ -137,12 +187,17 @@ class ArtifactPublisher:
         path = self._run_dir / filename
         if artifact.media_type == _MEDIA_JSON:
             try:
-                json.dumps(artifact.payload, ensure_ascii=False, default=None)
+                normalized = _json_compatible(artifact.payload)
+                json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
             except (TypeError, ValueError) as exc:
                 raise ArtifactPublicationError(
                     f"payload for role {artifact.role!r} is not JSON serializable: {exc}"
                 ) from exc
-            atomic_write_json(path, artifact.payload)
+            atomic_write_json(path, normalized)
             return path
         if artifact.media_type == _MEDIA_CSV:
             df = self._to_dataframe(artifact)
