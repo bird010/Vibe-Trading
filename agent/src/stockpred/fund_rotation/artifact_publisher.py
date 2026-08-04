@@ -67,7 +67,7 @@ class ArtifactPublicationError(Exception):
     code = "ARTIFACT_PUBLICATION_ERROR"
 
 
-def _json_compatible(value: object, *, path: str = "$" ) -> object:
+def _json_compatible(value: object, *, path: str = "$") -> object:
     """Normalize supported value objects to strict JSON-compatible values.
 
     Strategy diagnostics may expose immutable domain value objects such as
@@ -75,14 +75,14 @@ def _json_compatible(value: object, *, path: str = "$" ) -> object:
     types are converted recursively at this boundary. Unknown objects still
     fail closed instead of being stringified implicitly.
     """
+    if isinstance(value, Enum):
+        return _json_compatible(value.value, path=path)
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise TypeError(f"{path} contains a non-finite float")
         return value
-    if isinstance(value, Enum):
-        return _json_compatible(value.value, path=path)
     if is_dataclass(value) and not isinstance(value, type):
         return {
             field.name: _json_compatible(
