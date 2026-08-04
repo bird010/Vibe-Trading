@@ -1,4 +1,4 @@
-/** Fund-rotation batch domain types. */
+/** Fund-rotation batch and child-run domain types. */
 
 export interface StrategySummary {
   strategy_id: string;
@@ -232,6 +232,121 @@ export interface ComparisonEquityData {
   dates: string[];
   series: Record<string, number[]>;
 }
+
+export interface BacktestPeriod {
+  data_start?: string | null;
+  decision_start_date?: string | null;
+  anchor_decision_date?: string | null;
+  evaluation_start_date?: string | null;
+  evaluation_end_date?: string | null;
+}
+
+export interface BacktestIdentity {
+  implementation_hash?: string | null;
+  framework_implementation_hash?: string | null;
+  resolved_config_hash?: string | null;
+  resolved_requirements_hash?: string | null;
+  snapshot_fingerprint?: string | null;
+  run_identity_hash?: string | null;
+}
+
+export interface BacktestArtifact {
+  role: string;
+  file: string;
+  media_type: string;
+  producer: string;
+  checksum?: string | null;
+  rows?: number | null;
+  columns: string[];
+}
+
+export interface BacktestInstrument {
+  ts_code: string;
+  has_signal: boolean;
+  has_order: boolean;
+  has_trade: boolean;
+  has_position: boolean;
+}
+
+export interface BacktestDetailResponse {
+  schema_version: string;
+  run_id: string;
+  batch_id?: string | null;
+  variant_key?: string | null;
+  strategy_id?: string | null;
+  label?: string | null;
+  status: string;
+  quality_status?: string | null;
+  mode: "RESEARCH_ONLY" | string;
+  message?: string | null;
+  error?: string | null;
+  result_published: boolean;
+  partial: boolean;
+  publishable_for_comparison: boolean;
+  period: BacktestPeriod;
+  identity: BacktestIdentity;
+  resolved_config: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  metrics: Record<string, number>;
+  instruments: BacktestInstrument[];
+  artifacts: BacktestArtifact[];
+  events: Array<Record<string, unknown>>;
+}
+
+export interface InstrumentOHLCVBar {
+  trade_date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vol: number;
+}
+
+export interface InstrumentSignal {
+  date?: string;
+  week_ending?: string;
+  target_weight: number;
+  ts_code?: string;
+}
+
+export interface InstrumentTrade {
+  trade_date: string;
+  ts_code?: string;
+  code?: string;
+  name?: string;
+  action: "BUY" | "SELL";
+  status?: string;
+  filled: number;
+  price: number;
+  amount?: number;
+  commission?: number;
+  fee?: number;
+  signal_date?: string;
+  target_weight?: number;
+  reason?: string;
+  blocked_reason?: string;
+}
+
+export interface InstrumentChartResponse {
+  ts_code: string;
+  run_id: string;
+  signals: InstrumentSignal[];
+  trades: InstrumentTrade[];
+  ohlcv: InstrumentOHLCVBar[];
+  positions: Array<Record<string, unknown>>;
+  orders: Array<Record<string, unknown>>;
+  ohlcv_source: {
+    available?: boolean;
+    dataset?: string;
+    version?: number | string | null;
+    snapshot_fingerprint?: string | null;
+    reason?: string;
+    [key: string]: unknown;
+  };
+  mode: "RESEARCH_ONLY";
+}
+
+export type BacktestDetailTab = "overview" | "equity" | "chart";
 
 export interface FileDetail {
   checksum: string;
