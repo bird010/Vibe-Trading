@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 RESEARCH_MODE_WARNING = (
     "RESEARCH_ONLY：基金轮动回测仅用于研究与策略比较，不构成投资建议，"
@@ -122,3 +122,15 @@ class InstrumentChartResponse(BaseModel):
     orders: list[dict[str, Any]] = Field(default_factory=list)
     ohlcv_source: dict[str, Any] = Field(default_factory=dict)
     mode: str = "RESEARCH_ONLY"
+
+    @field_validator("trades", mode="before")
+    @classmethod
+    def retain_trade_markers(cls, value: object) -> list[dict[str, Any]]:
+        """Expose only BUY/SELL rows to the candlestick marker component."""
+        if not isinstance(value, list):
+            return []
+        return [
+            dict(row)
+            for row in value
+            if isinstance(row, dict) and row.get("action") in {"BUY", "SELL"}
+        ]
