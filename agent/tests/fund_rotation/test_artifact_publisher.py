@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from backtest.fund_rotation.contracts import StrategyArtifact
+from backtest.fund_rotation.universe import ExclusionReason, ExclusionRecord
 from src.stockpred.fund_rotation.artifact_publisher import (
     COMMON_ROLES,
     ArtifactPublicationError,
@@ -135,6 +136,38 @@ def test_strategy_artifact_is_namespaced_and_format_compatible(tmp_path):
     assert entry["file"] == "strategy_cluster_history.csv"
     assert entry["producer"] == "correlation_all_members"
     assert entry["rows"] == 2
+
+
+def test_json_artifact_normalizes_dataclasses_and_enums(tmp_path):
+    pub = _publisher(tmp_path)
+    pub.publish(
+        StrategyArtifact(
+            role="exclusions",
+            media_type="application/json",
+            payload=[
+                ExclusionRecord(
+                    ts_code="510001.SH",
+                    reason=ExclusionReason.INSUFFICIENT_ADJ_COVERAGE,
+                    details="missing adjustment factors",
+                    signal_date="20240105",
+                )
+            ],
+        ),
+        producer="correlation_representative",
+    )
+
+    path = tmp_path / "run" / "strategy_exclusions.json"
+    assert json.loads(path.read_text(encoding="utf-8")) == [
+        {
+            "ts_code": "510001.SH",
+            "reason": "insufficient_adj_coverage",
+            "details": "missing adjustment factors",
+            "signal_date": "20240105",
+        }
+    ]
+    assert pub.artifact_index()["exclusions"]["producer"] == (
+        "correlation_representative"
+    )
 
 
 def test_strategy_role_cannot_override_common_role(tmp_path):
