@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from backtest.fund_rotation.catalog import CatalogError, FundRotationStrategyCatalog
@@ -19,11 +21,19 @@ from backtest.fund_rotation.strategies.registry import (
     default_fund_rotation_strategies,
 )
 from src.stockpred.fund_rotation.api_models import (
+    BacktestArtifact,
+    BacktestDetailResponse,
+    BacktestIdentity,
+    BacktestInstrument,
+    BacktestPeriod,
+    InstrumentChartResponse,
     StrategyDetail,
     StrategyListResponse,
     StrategySummary,
 )
 from src.stockpred.fund_rotation.service import FundRotationBacktestService
+
+_SAFE_TS_CODE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 
 
 def register_fund_rotation_routes(
@@ -56,13 +66,10 @@ def register_fund_rotation_routes(
         ).encode("utf-8")
     ).hexdigest()
 
-    def _published_manifest(run_id: str) -> tuple[Path, dict[str, Any]]:
-        """Read a checksum-bound terminal child manifest.
-
-        Failed/canceled v2 runs are readable for audit but remain explicitly
-        non-comparable in their manifests. Historical readers without a valid
-        manifest continue to fail closed.
-        """
+    def _try_published_manifest(
+        run_id: str,
+    ) -> tuple[Path, dict[str, Any]] | None:
+        """Read a checksum-bound terminal child manifest when available."""
         run_dir = runs_dir / "fund_rotation" / run_id
         from src.stockpred.fund_rotation.artifact_publisher import (
             read_valid_manifest,
@@ -74,12 +81,17 @@ def register_fund_rotation_routes(
             expected_identity=run_id,
             allowed_statuses={"SUCCEEDED", "FAILED", "CANCELED"},
         )
-        if manifest is None:
+        return (run_dir, manifest) if manifest is not None else None
+
+    def _published_manifest(run_id: str) -> tuple[Path, dict[str, Any]]:
+        """Read a published child result or fail closed."""
+        published = _try_published_manifest(run_id)
+        if published is None:
             raise HTTPException(
                 status_code=404,
                 detail="Run has no published terminal result",
             )
-        return run_dir, manifest
+        return published
 
     def _published_batch_manifest(
         batch_dir: Path,
@@ -128,6 +140,280 @@ def register_fund_rotation_routes(
                 detail=f"Artifact checksum mismatch: {name}",
             )
         return path
+
+    @staticmethod
+    def _read_json_object(path: Path | None) -> dict[str, Any]:
+        if path is None:
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _read_events(run_dir: Path, *, limit: int = 100) -> list[dict[str, Any]]:
+        path = run_dir / "events.jsonl"
+        if not path.is_file():
+            return []
+        events: list[dict[str, Any]] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines[-max(limit, 0):]:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                events.append(value)
+        return events
+
+    @staticmethod
+    def _numeric_metrics(value: object) -> dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key, raw in value.items():
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                continue
+            number = float(raw)
+            if math.isfinite(number):
+                result[str(key)] = number
+        return result
+
+    def _manifest_artifacts(
+        manifest: dict[str, Any],
+    ) -> list[BacktestArtifact]:
+        artifacts: list[BacktestArtifact] = []
+        raw_artifacts = manifest.get("artifacts", {})
+        file_details = manifest.get("file_details", {})
+        if not isinstance(raw_artifacts, dict):
+            return artifacts
+        for role, raw_entry in raw_artifacts.items():
+            if not isinstance(raw_entry, dict):
+                continue
+            filename = str(raw_entry.get("file", ""))
+            if not filename:
+                continue
+            details = file_details.get(filename, {})
+            columns = details.get("columns", []) if isinstance(details, dict) else []
+            artifacts.append(
+                BacktestArtifact(
+                    role=str(raw_entry.get("role", role)),
+                    file=filename,
+                    media_type=str(raw_entry.get("media_type", "application/octet-stream")),
+                    producer=str(raw_entry.get("producer", "common")),
+                    checksum=(
+                        str(details.get("checksum"))
+                        if isinstance(details, dict) and details.get("checksum")
+                        else None
+                    ),
+                    rows=(
+                        int(details.get("rows"))
+                        if isinstance(details, dict)
+                        and isinstance(details.get("rows"), int)
+                        else None
+                    ),
+                    columns=[str(column) for column in columns]
+                    if isinstance(columns, list)
+                    else [],
+                )
+            )
+        return sorted(artifacts, key=lambda artifact: (artifact.producer, artifact.role))
+
+    def _manifest_instruments(
+        run_dir: Path,
+        manifest: dict[str, Any],
+    ) -> list[BacktestInstrument]:
+        import pandas as pd
+
+        presence: dict[str, dict[str, bool]] = {}
+        sources = (
+            ("targets.csv", "has_signal"),
+            ("orders.csv", "has_order"),
+            ("trade_events.csv", "has_trade"),
+            ("positions.csv", "has_position"),
+        )
+        for filename, flag in sources:
+            path = _validated_artifact(run_dir, manifest, filename)
+            if path is None:
+                continue
+            try:
+                frame = pd.read_csv(path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Published artifact unreadable: {filename}",
+                ) from exc
+            code_column = (
+                "ts_code"
+                if "ts_code" in frame.columns
+                else "code"
+                if "code" in frame.columns
+                else None
+            )
+            if code_column is None:
+                continue
+            for raw_code in frame[code_column].dropna().astype(str).unique():
+                code = str(raw_code).strip()
+                if not code or code.lower() == "nan":
+                    continue
+                flags = presence.setdefault(
+                    code,
+                    {
+                        "has_signal": False,
+                        "has_order": False,
+                        "has_trade": False,
+                        "has_position": False,
+                    },
+                )
+                flags[flag] = True
+        return [
+            BacktestInstrument(ts_code=code, **flags)
+            for code, flags in sorted(
+                presence.items(),
+                key=lambda item: (
+                    not item[1]["has_trade"],
+                    not item[1]["has_signal"],
+                    item[0],
+                ),
+            )
+        ]
+
+    def _build_v2_backtest_detail(
+        run_id: str,
+        state: dict[str, Any],
+    ) -> BacktestDetailResponse:
+        run_dir = runs_dir / "fund_rotation" / run_id
+        published = _try_published_manifest(run_id)
+        if published is None:
+            return BacktestDetailResponse(
+                schema_version=str(state.get("schema_version", "2")),
+                run_id=run_id,
+                batch_id=state.get("batch_id"),
+                variant_key=state.get("variant_key"),
+                strategy_id=state.get("strategy_id"),
+                status=str(state.get("stage", "UNKNOWN")),
+                quality_status=state.get("quality_status"),
+                mode=str(state.get("mode", "RESEARCH_ONLY")),
+                message=state.get("message"),
+                error=state.get("error"),
+                result_published=False,
+                partial=True,
+                publishable_for_comparison=False,
+                events=_read_events(run_dir),
+            )
+
+        run_dir, manifest = published
+        resolved = _read_json_object(
+            _validated_artifact(run_dir, manifest, "resolved_spec.json")
+        )
+        summary = _read_json_object(
+            _validated_artifact(run_dir, manifest, "summary.json")
+        )
+        metrics_payload = _read_json_object(
+            _validated_artifact(run_dir, manifest, "metrics.json")
+        )
+        strategy_metrics = _numeric_metrics(metrics_payload.get("strategy", {}))
+        status = str(state.get("stage") or manifest.get("status") or "UNKNOWN")
+        quality_status = (
+            state.get("quality_status")
+            or manifest.get("quality_status")
+            or summary.get("quality_status")
+        )
+        return BacktestDetailResponse(
+            schema_version=str(state.get("schema_version", "2")),
+            run_id=run_id,
+            batch_id=resolved.get("batch_id") or manifest.get("batch_id"),
+            variant_key=resolved.get("variant_key") or manifest.get("variant_key"),
+            strategy_id=resolved.get("strategy_id") or manifest.get("strategy_id"),
+            label=resolved.get("label"),
+            status=status,
+            quality_status=str(quality_status) if quality_status is not None else None,
+            mode=str(resolved.get("mode") or manifest.get("mode") or "RESEARCH_ONLY"),
+            message=state.get("message"),
+            error=state.get("error") or summary.get("error_message") or None,
+            result_published=True,
+            partial=bool(manifest.get("partial", summary.get("partial", False))),
+            publishable_for_comparison=bool(
+                manifest.get(
+                    "publishable_for_comparison",
+                    summary.get("publishable_for_comparison", False),
+                )
+            ),
+            period=BacktestPeriod(
+                data_start=resolved.get("data_start"),
+                decision_start_date=resolved.get("decision_start_date"),
+                anchor_decision_date=resolved.get("anchor_decision_date"),
+                evaluation_start_date=resolved.get("evaluation_start_date"),
+                evaluation_end_date=resolved.get("evaluation_end_date"),
+            ),
+            identity=BacktestIdentity(
+                implementation_hash=(
+                    resolved.get("strategy_implementation_hash")
+                    or resolved.get("implementation_hash")
+                    or manifest.get("strategy_implementation_hash")
+                ),
+                framework_implementation_hash=(
+                    resolved.get("framework_implementation_hash")
+                    or manifest.get("framework_implementation_hash")
+                ),
+                resolved_config_hash=(
+                    resolved.get("resolved_config_hash")
+                    or manifest.get("params_fingerprint")
+                ),
+                resolved_requirements_hash=resolved.get("resolved_requirements_hash"),
+                snapshot_fingerprint=(
+                    resolved.get("data_snapshot_fingerprint")
+                    or manifest.get("data_snapshot_fingerprint")
+                ),
+                run_identity_hash=(
+                    resolved.get("run_identity_hash")
+                    or manifest.get("run_identity_hash")
+                ),
+            ),
+            resolved_config=(
+                dict(resolved.get("resolved_config", {}))
+                if isinstance(resolved.get("resolved_config", {}), dict)
+                else {}
+            ),
+            summary=summary,
+            metrics=strategy_metrics,
+            instruments=_manifest_instruments(run_dir, manifest),
+            artifacts=_manifest_artifacts(manifest),
+            events=_read_events(run_dir),
+        )
+
+    def _build_legacy_backtest_detail(
+        run_id: str,
+        legacy: dict[str, Any],
+    ) -> BacktestDetailResponse:
+        summary = legacy.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        status = str(legacy.get("stage") or legacy.get("status") or "UNKNOWN")
+        return BacktestDetailResponse(
+            schema_version=str(legacy.get("schema_version", "1")),
+            run_id=run_id,
+            batch_id=legacy.get("batch_id"),
+            variant_key=legacy.get("variant_key"),
+            strategy_id=legacy.get("strategy_id"),
+            status=status,
+            quality_status=legacy.get("quality_status"),
+            mode=str(legacy.get("mode", "RESEARCH_ONLY")),
+            message=legacy.get("message"),
+            error=legacy.get("error"),
+            result_published=bool(
+                legacy.get("result_published", status == "SUCCEEDED")
+            ),
+            partial=status != "SUCCEEDED",
+            publishable_for_comparison=status == "SUCCEEDED",
+            summary=summary,
+            metrics=_numeric_metrics(summary),
+            events=_read_events(runs_dir / "fund_rotation" / run_id),
+        )
 
     def _last_event_sequence(request: Request) -> int:
         """Resolve browser header or explicit query-param replay cursor."""
@@ -603,13 +889,24 @@ def register_fund_rotation_routes(
 
     @app.get(
         "/stockpred/fund-rotation/backtests/{run_id}",
+        response_model=BacktestDetailResponse,
         dependencies=[Depends(require_auth)],
     )
-    def get_backtest(run_id: str) -> dict:
-        result = service.get_backtest(run_id)
-        if result is None:
+    def get_backtest(run_id: str) -> dict[str, Any]:
+        run_dir = runs_dir / "fund_rotation" / run_id
+        state_path = run_dir / "state.json"
+        if not state_path.is_file():
             raise HTTPException(status_code=404, detail="Run not found")
-        return result
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="Run state is invalid") from exc
+        if str(state.get("schema_version")) in {"2", "v2"}:
+            return _build_v2_backtest_detail(run_id, state).model_dump(mode="json")
+        legacy = service.get_backtest(run_id)
+        if legacy is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return _build_legacy_backtest_detail(run_id, legacy).model_dump(mode="json")
 
     @app.get(
         "/stockpred/fund-rotation/backtests/{run_id}/events",
@@ -722,14 +1019,17 @@ def register_fund_rotation_routes(
 
     @app.get(
         "/stockpred/fund-rotation/backtests/{run_id}/instruments/{ts_code}/chart",
+        response_model=InstrumentChartResponse,
         dependencies=[Depends(require_auth)],
     )
     def get_instrument_chart(
         run_id: str,
         ts_code: str,
-        limit: int = 500,
-    ) -> dict:
+        limit: int = Query(default=500, ge=20, le=2000),
+    ) -> dict[str, Any]:
         """Return pinned OHLCV, targets, executions, positions and orders."""
+        if not _SAFE_TS_CODE.fullmatch(ts_code):
+            raise HTTPException(status_code=422, detail="Invalid instrument code")
         run_dir, manifest = _published_manifest(run_id)
         targets_path = _validated_artifact(
             run_dir,
@@ -770,12 +1070,22 @@ def register_fund_rotation_routes(
                 ].to_dict(orient="records")
 
         ohlcv: list[dict[str, Any]] = []
+        ohlcv_source: dict[str, Any] = {
+            "available": False,
+            "dataset": "fund.lance",
+            "version": None,
+            "snapshot_fingerprint": manifest.get("data_snapshot_fingerprint"),
+        }
         snapshot_path = _validated_artifact(
             run_dir,
             manifest,
             "data_snapshot.json",
         )
-        if snapshot_path is not None and stockpred_root:
+        if snapshot_path is None:
+            ohlcv_source["reason"] = "data_snapshot_missing"
+        elif stockpred_root is None:
+            ohlcv_source["reason"] = "stockpred_root_unavailable"
+        else:
             try:
                 with open(snapshot_path, encoding="utf-8") as handle:
                     snapshot = json.load(handle)
@@ -794,6 +1104,7 @@ def register_fund_rotation_routes(
                     )
                     fund_lance_path = fund_meta.get("path")
                     fund_version = fund_meta.get("version")
+                ohlcv_source["version"] = fund_version
                 if fund_lance_path and fund_version is not None:
                     import lance
 
@@ -817,10 +1128,13 @@ def register_fund_rotation_routes(
                                 "vol",
                             ]
                         ].to_dict(orient="records")
-            except Exception:
-                # OHLCV is optional; the immutable run evidence remains usable
-                # even when the local Lance store is temporarily unavailable.
-                pass
+                    ohlcv_source["available"] = bool(ohlcv)
+                    if not ohlcv:
+                        ohlcv_source["reason"] = "instrument_not_in_snapshot"
+                else:
+                    ohlcv_source["reason"] = "fund_snapshot_version_missing"
+            except Exception as exc:
+                ohlcv_source["reason"] = type(exc).__name__
 
         positions: list[dict[str, Any]] = []
         positions_path = _validated_artifact(
@@ -852,13 +1166,13 @@ def register_fund_rotation_routes(
                     orders_df["ts_code"].astype(str) == ts_code
                 ].to_dict(orient="records")
 
-        return {
-            "ts_code": ts_code,
-            "run_id": run_id,
-            "signals": signals,
-            "trades": trades,
-            "ohlcv": ohlcv,
-            "positions": positions,
-            "orders": orders,
-            "mode": "RESEARCH_ONLY",
-        }
+        return InstrumentChartResponse(
+            ts_code=ts_code,
+            run_id=run_id,
+            signals=signals,
+            trades=trades,
+            ohlcv=ohlcv,
+            positions=positions,
+            orders=orders,
+            ohlcv_source=ohlcv_source,
+        ).model_dump(mode="json")
