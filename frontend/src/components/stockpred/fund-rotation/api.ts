@@ -2,12 +2,14 @@
 
 import { authHeaders, withAuthQuery } from "@/lib/apiAuth";
 import type {
+  BacktestDetailResponse,
   BatchDetail,
   BatchListItem,
   BatchSubmitResponse,
   CatalogListResponse,
   ComparisonEquityData,
   ComparisonReports,
+  InstrumentChartResponse,
   StrategyBatchRequest,
   StrategyDetail,
 } from "./types";
@@ -193,23 +195,29 @@ export async function fetchBatchComparisonEquity(
 
 export async function fetchBacktestDetail(
   runId: string,
-): Promise<Record<string, unknown>> {
-  const res = await fetch(withAuthQuery(`${BASE}/backtests/${runId}`), {
-    headers: authHeaders(),
-  });
+  signal?: AbortSignal,
+): Promise<BacktestDetailResponse> {
+  const res = await fetch(
+    withAuthQuery(`${BASE}/backtests/${encodeURIComponent(runId)}`),
+    { headers: authHeaders(), signal },
+  );
   if (!res.ok) throw await responseError(res, "fetchBacktestDetail");
   return res.json();
 }
 
 export function backtestArtifactUrl(runId: string, artifactName: string): string {
-  return withAuthQuery(`${BASE}/backtests/${runId}/artifacts/${artifactName}`);
+  return withAuthQuery(
+    `${BASE}/backtests/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}`,
+  );
 }
 
 export async function fetchBacktestEquity(
   runId: string,
+  signal?: AbortSignal,
 ): Promise<ComparisonEquityData | null> {
   const res = await fetch(backtestArtifactUrl(runId, "equity.csv"), {
     headers: authHeaders(),
+    signal,
   });
   if (res.status === 404) return null;
   if (!res.ok) throw await responseError(res, "fetchBacktestEquity");
@@ -222,6 +230,20 @@ export function backtestChartUrl(
   limit = 500,
 ): string {
   return withAuthQuery(
-    `${BASE}/backtests/${runId}/instruments/${tsCode}/chart?limit=${limit}`,
+    `${BASE}/backtests/${encodeURIComponent(runId)}/instruments/${encodeURIComponent(tsCode)}/chart?limit=${encodeURIComponent(String(limit))}`,
   );
+}
+
+export async function fetchInstrumentChart(
+  runId: string,
+  tsCode: string,
+  limit = 500,
+  signal?: AbortSignal,
+): Promise<InstrumentChartResponse> {
+  const res = await fetch(backtestChartUrl(runId, tsCode, limit), {
+    headers: authHeaders(),
+    signal,
+  });
+  if (!res.ok) throw await responseError(res, "fetchInstrumentChart");
+  return res.json();
 }
