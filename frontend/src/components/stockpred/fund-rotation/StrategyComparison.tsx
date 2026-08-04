@@ -1,6 +1,6 @@
 /** Fair strategy comparison with common-calendar equity curves. */
 
-import { AlertTriangle, Medal, XCircle } from "lucide-react";
+import { AlertTriangle, Eye, Medal, XCircle } from "lucide-react";
 import type {
   ComparisonEquityData,
   ComparisonReports,
@@ -246,7 +246,8 @@ export function StrategyComparison({
                   <th className="py-1 pr-2">年化收益</th>
                   <th className="py-1 pr-2">Sharpe</th>
                   <th className="py-1 pr-2">最大回撤</th>
-                  <th className="py-1">Calmar</th>
+                  <th className="py-1 pr-2">Calmar</th>
+                  {onSelectVariant && <th className="py-1">操作</th>}
                 </tr>
               </thead>
               <tbody>
@@ -255,8 +256,14 @@ export function StrategyComparison({
                   return (
                     <tr
                       key={entry.variant_key}
-                      className="border-b hover:bg-muted/50 cursor-pointer"
-                      onClick={() => onSelectVariant?.(entry.variant_key)}
+                      className={`border-b hover:bg-muted/50 ${
+                        onSelectVariant ? "cursor-pointer" : ""
+                      }`}
+                      onClick={
+                        onSelectVariant
+                          ? () => onSelectVariant(entry.variant_key)
+                          : undefined
+                      }
                     >
                       <td className="py-1 pr-2 font-medium">
                         {comparisonAvailable && entry.rank === 1 && (
@@ -295,9 +302,24 @@ export function StrategyComparison({
                           entry.max_drawdown ?? variantMetrics.max_drawdown,
                         )}
                       </td>
-                      <td className="py-1 font-mono">
+                      <td className="py-1 pr-2 font-mono">
                         {fmtNumber(entry.calmar ?? variantMetrics.calmar)}
                       </td>
+                      {onSelectVariant && (
+                        <td className="py-1">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onSelectVariant(entry.variant_key);
+                            }}
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-blue-700 hover:bg-blue-50"
+                          >
+                            <Eye className="h-3 w-3" />
+                            查看详情
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
