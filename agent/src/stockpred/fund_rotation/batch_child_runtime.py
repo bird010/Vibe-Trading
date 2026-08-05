@@ -211,7 +211,7 @@ class BatchChildRuntime:
                         dict(decision.diagnostics),
                         sort_keys=True,
                         ensure_ascii=False,
-                        default=str,
+                        allow_nan=False,
                     ),
                 }
                 for decision in result.decisions
@@ -301,7 +301,11 @@ class BatchChildRuntime:
             ("positions", "text/csv", positions),
             ("equity", "text/csv", equity),
             ("metrics", "application/json", metrics_payload),
-            ("execution_diagnostics", "application/json", dict(result.execution_diagnostics)),
+            (
+                "execution_diagnostics",
+                "application/json",
+                dict(result.execution_diagnostics),
+            ),
             ("summary", "application/json", summary),
         ):
             publisher.publish(
@@ -419,7 +423,10 @@ class BatchChildRuntime:
             )
             if manifest is not None:
                 continue
-            if detect_interrupted_state(state) or state.get("stage") == ChildStage.SUCCEEDED.value:
+            if (
+                detect_interrupted_state(state)
+                or state.get("stage") == ChildStage.SUCCEEDED.value
+            ):
                 self._mark_interrupted(child_dir, state)
 
     @staticmethod
