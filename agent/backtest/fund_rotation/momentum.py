@@ -6,6 +6,8 @@ Selection: Top-N with absolute threshold, fixed slots.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -26,34 +28,39 @@ def compute_cluster_momentum(
         momentum_window: Number of trailing weeks to use.
 
     Returns:
-        Dict cluster_id -> momentum value.
+        Dict cluster_id -> momentum value. A non-finite value means the
+        cluster has no comparable momentum over the complete window.
     """
-    # Use only the last momentum_window weeks
-    recent = weekly_returns.iloc[-momentum_window:] if len(weekly_returns) >= momentum_window else weekly_returns
+    recent = (
+        weekly_returns.iloc[-momentum_window:]
+        if len(weekly_returns) >= momentum_window
+        else weekly_returns
+    )
 
-    # Group members by cluster
     cluster_ids = sorted(set(clusters.values()))
     result: dict[int, float] = {}
 
     for cid in cluster_ids:
-        members = [code for code, c in clusters.items() if c == cid and code in recent.columns]
+        members = [
+            code
+            for code, cluster_id in clusters.items()
+            if cluster_id == cid and code in recent.columns
+        ]
         if not members:
             result[cid] = np.nan
             continue
 
-        # Equal-weight mean per week (ignoring NaN)
         member_returns = recent[members]
         weekly_mean = member_returns.mean(axis=1, skipna=True)
 
-        # If any week has NO valid members (all NaN), the cluster lacks
-        # comparable momentum for this period -> mark as invalid (NaN).
+        # A cluster is not comparable when any week in the requested window
+        # has no valid member return. Keep NaN as an internal calculation
+        # sentinel; strategy diagnostics must translate it to explicit null.
         if weekly_mean.isna().any():
             result[cid] = np.nan
             continue
 
-        # Compound: product(1 + r) - 1
-        momentum = float(np.prod(1.0 + weekly_mean.values) - 1.0)
-        result[cid] = momentum
+        result[cid] = float(np.prod(1.0 + weekly_mean.values) - 1.0)
 
     return result
 
@@ -66,25 +73,29 @@ def select_top_clusters(
 ) -> list[int]:
     """§10.2 — Select top-N clusters by momentum with absolute threshold.
 
-    Only clusters with momentum strictly > threshold qualify.
-    Ties broken by minimum ts_code in cluster (smaller wins).
-
-    Args:
-        momentum: cluster_id -> momentum value.
-        top_n: Maximum number of clusters to select.
-        threshold: Absolute momentum threshold (strict >).
-        cluster_members: Optional cluster_id -> member codes for tie-breaking.
-
-    Returns:
-        List of selected cluster_ids in descending momentum order.
+    Only finite clusters with momentum strictly above ``threshold`` qualify.
+    Ties are broken by the minimum ts_code in each cluster.
     """
-    # Filter by threshold (strict >)
-    qualified = {cid: mom for cid, mom in momentum.items() if mom > threshold and not np.isnan(mom)}
+    qualified: dict[int, float] = {}
+    for cluster_id, raw_momentum in momentum.items():
+        if (
+            isinstance(raw_momentum, bool)
+            or not isinstance(
+                raw_momentum,
+                (int, float, np.integer, np.floating),
+            )
+        ):
+            raise TypeError(
+                f"momentum for cluster {cluster_id} must be numeric, "
+                f"got {type(raw_momentum).__name__}"
+            )
+        value = float(raw_momentum)
+        if math.isfinite(value) and value > threshold:
+            qualified[cluster_id] = value
 
     if not qualified:
         return []
 
-    # Sort by (-momentum, min_ts_code) for deterministic ordering
     def sort_key(item: tuple[int, float]) -> tuple[float, str]:
         cid, mom = item
         min_code = ""
@@ -107,14 +118,6 @@ def build_target_weights(
     Each selected cluster gets 1/top_n of the portfolio.
     Within each cluster, members are equal-weighted.
     Unallocated weight is implicit cash.
-
-    Args:
-        selected_clusters: List of selected cluster IDs.
-        cluster_members: cluster_id -> list of eligible member ts_codes.
-        top_n: Total number of slots (fixed denominator).
-
-    Returns:
-        Dict ts_code -> target_weight. Empty dict if no clusters selected.
     """
     if not selected_clusters:
         return {}
