@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AbstractSet, Mapping, Protocol, Sequence, runtime_checkable
+from typing import AbstractSet, Protocol, Sequence, runtime_checkable
 
 import pandas as pd
 from pydantic import BaseModel
@@ -124,6 +125,47 @@ class StrategyContractViolation(Exception):
     code = "STRATEGY_CONTRACT_VIOLATION"
 
 
+def _validate_diagnostic_value(
+    value: object,
+    *,
+    path: str,
+) -> None:
+    """Validate the strict JSON subset allowed in decision diagnostics."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise StrategyContractViolation(
+                f"{path} contains a non-finite float"
+            )
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise StrategyContractViolation(
+                    f"{path} contains non-string mapping key {key!r}"
+                )
+            _validate_diagnostic_value(item, path=f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_diagnostic_value(
+                item,
+                path=f"{path}[{index}]",
+            )
+        return
+    raise StrategyContractViolation(
+        f"{path} contains unsupported type {type(value).__name__}"
+    )
+
+
+def validate_diagnostics(
+    diagnostics: Mapping[str, object],
+) -> None:
+    """Fail at the decision boundary when diagnostics cannot be strict JSON."""
+    _validate_diagnostic_value(diagnostics, path="$.diagnostics")
+
+
 def validate_target_decision(
     decision: TargetWeightDecision,
     eligible_codes: AbstractSet[str],
@@ -137,6 +179,12 @@ def validate_target_decision(
         raise StrategyContractViolation(
             "decision action must be one of SET_TARGETS, HOLD_TARGETS, INVALID"
         )
+
+    # Diagnostics are part of every decision action, including HOLD_TARGETS
+    # and INVALID. Validate before either action's early return so malformed
+    # research evidence fails at the signal date rather than during publication.
+    validate_diagnostics(decision.diagnostics)
+
     if decision.decision_id in seen_decision_ids:
         raise StrategyContractViolation(
             f"duplicate decision_id within sub-run: {decision.decision_id}"
