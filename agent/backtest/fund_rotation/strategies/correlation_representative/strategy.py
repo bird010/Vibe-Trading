@@ -7,6 +7,7 @@ kept unless a hard tradability or liquidity failure occurs.
 
 from __future__ import annotations
 
+import math
 from typing import Mapping
 
 import pandas as pd
@@ -89,6 +90,22 @@ def build_slot_weights(
             vacant.append(cluster_id)
     cash_weight = max(0.0, 1.0 - sum(weights.values()))
     return weights, filled, vacant, cash_weight
+
+
+def _momentum_diagnostics(
+    momentum: Mapping[int, float],
+) -> tuple[dict[str, float | None], list[int]]:
+    """Translate internal non-finite momentum sentinels to strict JSON facts."""
+    values: dict[str, float | None] = {}
+    unavailable: list[int] = []
+    for cluster_id, raw_value in sorted(momentum.items()):
+        value = float(raw_value)
+        if math.isfinite(value):
+            values[str(cluster_id)] = value
+        else:
+            values[str(cluster_id)] = None
+            unavailable.append(cluster_id)
+    return values, unavailable
 
 
 class CorrelationRepresentativeSession:
@@ -207,6 +224,9 @@ class CorrelationRepresentativeSession:
             self._representatives,
             cfg.top_n,
         )
+        momentum_values, unavailable_clusters = _momentum_diagnostics(
+            momentum
+        )
         quality = (
             QualityStatus.DEGRADED
             if self._last_gate_overall is GateStatus.WARN
@@ -222,10 +242,15 @@ class CorrelationRepresentativeSession:
             diagnostics={
                 "filled_slots": filled,
                 "vacant_slots": vacant,
-                "momentum": {
-                    str(cluster_id): value
-                    for cluster_id, value in momentum.items()
-                },
+                "momentum": momentum_values,
+                "momentum_status": (
+                    "PARTIAL" if unavailable_clusters else "COMPLETE"
+                ),
+                "momentum_unavailable_clusters": unavailable_clusters,
+                "momentum_available_cluster_count": (
+                    len(momentum) - len(unavailable_clusters)
+                ),
+                "momentum_total_cluster_count": len(momentum),
                 "num_clusters": len(self._clusters),
                 "signal_information_cutoff": _SIGNAL_INFORMATION_CUTOFF,
             },
