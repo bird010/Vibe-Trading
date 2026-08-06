@@ -16,6 +16,34 @@ RESEARCH_MODE_WARNING = (
 )
 
 
+def _canonical_date(value: object) -> str:
+    """Normalize CSV/Lance date values to the UI's YYYYMMDD key format."""
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    digits = "".join(character for character in text if character.isdigit())
+    return digits[:8] if len(digits) >= 8 else text
+
+
+def _normalize_date_fields(
+    value: object,
+    fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        for field in fields:
+            field_value = item.get(field)
+            if field_value is not None and str(field_value).strip():
+                item[field] = _canonical_date(field_value)
+        normalized.append(item)
+    return normalized
+
+
 class StrategySummary(BaseModel):
     """One catalog entry as shown in the strategy list."""
 
@@ -123,14 +151,45 @@ class InstrumentChartResponse(BaseModel):
     ohlcv_source: dict[str, Any] = Field(default_factory=dict)
     mode: str = "RESEARCH_ONLY"
 
+    @field_validator("signals", mode="before")
+    @classmethod
+    def normalize_signal_dates(cls, value: object) -> list[dict[str, Any]]:
+        return _normalize_date_fields(
+            value,
+            ("date", "week_ending", "trade_date", "signal_date"),
+        )
+
     @field_validator("trades", mode="before")
     @classmethod
     def retain_trade_markers(cls, value: object) -> list[dict[str, Any]]:
-        """Expose only BUY/SELL rows to the candlestick marker component."""
-        if not isinstance(value, list):
-            return []
-        return [
-            dict(row)
-            for row in value
-            if isinstance(row, dict) and row.get("action") in {"BUY", "SELL"}
-        ]
+        """Expose only BUY/SELL rows with canonical date keys."""
+        rows = _normalize_date_fields(
+            value,
+            ("trade_date", "signal_date"),
+        )
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            action = str(row.get("action", "")).upper()
+            if action not in {"BUY", "SELL"}:
+                continue
+            row["action"] = action
+            normalized.append(row)
+        return normalized
+
+    @field_validator("ohlcv", mode="before")
+    @classmethod
+    def normalize_ohlcv_dates(cls, value: object) -> list[dict[str, Any]]:
+        return _normalize_date_fields(value, ("trade_date",))
+
+    @field_validator("positions", mode="before")
+    @classmethod
+    def normalize_position_dates(cls, value: object) -> list[dict[str, Any]]:
+        return _normalize_date_fields(value, ("trade_date",))
+
+    @field_validator("orders", mode="before")
+    @classmethod
+    def normalize_order_dates(cls, value: object) -> list[dict[str, Any]]:
+        return _normalize_date_fields(
+            value,
+            ("trade_date", "signal_date", "created_date"),
+        )
