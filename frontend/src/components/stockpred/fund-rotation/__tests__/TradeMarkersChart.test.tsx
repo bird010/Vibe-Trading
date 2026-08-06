@@ -8,7 +8,7 @@ import {
 
 function dateAt(offset: number): string {
   const date = new Date(Date.UTC(2024, 0, 1 + offset));
-  return date.toISOString().slice(0, 10).replaceAll("-", "");
+  return date.toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 function bars(count: number): OHLCVBar[] {
