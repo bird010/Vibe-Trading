@@ -49,14 +49,22 @@ const RIGHT = 18;
 const TOP = 18;
 const BOTTOM = 40;
 const MAX_BARS = 180;
+const POST_EVIDENCE_BARS = 20;
 
 function finite(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function canonicalDate(value: unknown): string {
+  const text = String(value ?? "").trim();
+  const withoutDecimal = /^\d+\.0$/.test(text) ? text.slice(0, -2) : text;
+  const digits = withoutDecimal.replace(/\D/g, "");
+  return digits.length >= 8 ? digits.slice(0, 8) : withoutDecimal;
+}
+
 function dateOfSignal(signal: SignalMarker): string {
-  return String(signal.date ?? signal.week_ending ?? "");
+  return canonicalDate(signal.date ?? signal.week_ending ?? "");
 }
 
 export function TradeMarkersChart({
@@ -65,9 +73,24 @@ export function TradeMarkersChart({
   signals = [],
   tsCode,
 }: Props) {
-  const bars = ohlcv
+  const normalizedTrades = trades.map((trade) => ({
+    ...trade,
+    trade_date: canonicalDate(trade.trade_date),
+    signal_date: trade.signal_date
+      ? canonicalDate(trade.signal_date)
+      : trade.signal_date,
+  }));
+  const normalizedSignals = signals.map((signal) => ({
+    ...signal,
+    date: signal.date ? canonicalDate(signal.date) : signal.date,
+    week_ending: signal.week_ending
+      ? canonicalDate(signal.week_ending)
+      : signal.week_ending,
+  }));
+  const allBars = ohlcv
     .map((bar) => ({
       ...bar,
+      trade_date: canonicalDate(bar.trade_date),
       open: Number(bar.open),
       high: Number(bar.high),
       low: Number(bar.low),
@@ -79,8 +102,33 @@ export function TradeMarkersChart({
         bar.trade_date &&
         [bar.open, bar.high, bar.low, bar.close].every(Number.isFinite),
     )
-    .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
-    .slice(-MAX_BARS);
+    .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+
+  const allBarIndex = new Map(
+    allBars.map((bar, index) => [bar.trade_date, index]),
+  );
+  const preferredEvidenceDates =
+    normalizedTrades.length > 0
+      ? normalizedTrades.map((trade) => trade.trade_date)
+      : normalizedSignals.map(dateOfSignal);
+  const evidenceIndexes = preferredEvidenceDates
+    .map((date) => allBarIndex.get(date))
+    .filter((index): index is number => index !== undefined);
+
+  let bars = allBars;
+  if (allBars.length > MAX_BARS) {
+    if (evidenceIndexes.length > 0) {
+      const latestEvidenceIndex = Math.max(...evidenceIndexes);
+      const end = Math.min(
+        allBars.length,
+        latestEvidenceIndex + POST_EVIDENCE_BARS + 1,
+      );
+      const start = Math.max(0, end - MAX_BARS);
+      bars = allBars.slice(start, end);
+    } else {
+      bars = allBars.slice(-MAX_BARS);
+    }
+  }
 
   const drawableWidth = WIDTH - LEFT - RIGHT;
   const drawableHeight = HEIGHT - TOP - BOTTOM;
@@ -94,14 +142,20 @@ export function TradeMarkersChart({
   const priceSpan = Math.max(maxPrice - minPrice, 1e-9);
   const step = bars.length > 0 ? drawableWidth / bars.length : drawableWidth;
   const candleWidth = Math.max(2, Math.min(step * 0.62, 9));
-  const barIndex = new Map(bars.map((bar, index) => [bar.trade_date, index]));
+  const barIndex = new Map(
+    bars.map((bar, index) => [bar.trade_date, index]),
+  );
 
   const xFor = (index: number): number => LEFT + step * (index + 0.5);
   const yFor = (price: number): number =>
     TOP + ((maxPrice - price) / priceSpan) * drawableHeight;
 
-  const visibleTrades = trades.filter((trade) => barIndex.has(trade.trade_date));
-  const visibleSignals = signals.filter((signal) => barIndex.has(dateOfSignal(signal)));
+  const visibleTrades = normalizedTrades.filter((trade) =>
+    barIndex.has(trade.trade_date),
+  );
+  const visibleSignals = normalizedSignals.filter((signal) =>
+    barIndex.has(dateOfSignal(signal)),
+  );
   const priceTicks = Array.from({ length: 5 }, (_, index) => {
     const ratio = index / 4;
     const price = maxPrice - priceSpan * ratio;
@@ -110,7 +164,15 @@ export function TradeMarkersChart({
 
   return (
     <div className="space-y-4">
-      <h4 className="text-sm font-semibold">{tsCode} · K 线与交易证据</h4>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h4 className="text-sm font-semibold">{tsCode} · K 线与交易证据</h4>
+        {(normalizedTrades.length > 0 || normalizedSignals.length > 0) && (
+          <span className="text-xs text-muted-foreground">
+            当前窗口显示 {visibleTrades.length}/{normalizedTrades.length} 笔成交、
+            {visibleSignals.length}/{normalizedSignals.length} 条信号
+          </span>
+        )}
+      </div>
 
       {bars.length === 0 ? (
         <div className="rounded border bg-muted/30 px-3 py-4 text-center text-sm text-muted-foreground">
@@ -203,7 +265,6 @@ export function TradeMarkersChart({
               const price = finite(trade.price) ?? bars[barPosition].close;
               const blocked = Boolean(
                 trade.blocked_reason ||
-                  trade.reason ||
                   trade.status === "BLOCKED" ||
                   Number(trade.filled) <= 0,
               );
@@ -278,11 +339,11 @@ export function TradeMarkersChart({
         </div>
       )}
 
-      {signals.length > 0 && (
+      {normalizedSignals.length > 0 && (
         <div className="space-y-1">
           <h5 className="text-xs font-medium text-muted-foreground">信号记录</h5>
           <div className="max-h-40 overflow-y-auto space-y-0.5">
-            {signals.map((signal, index) => (
+            {normalizedSignals.map((signal, index) => (
               <div
                 key={`${dateOfSignal(signal)}-${index}`}
                 className="text-xs flex justify-between border-b py-0.5"
@@ -295,18 +356,18 @@ export function TradeMarkersChart({
         </div>
       )}
 
-      {trades.length === 0 && signals.length === 0 && (
+      {normalizedTrades.length === 0 && normalizedSignals.length === 0 && (
         <div className="text-xs text-muted-foreground">暂无信号或交易记录。</div>
       )}
 
-      {trades.length > 0 && (
+      {normalizedTrades.length > 0 && (
         <div className="space-y-1">
           <h5 className="text-xs font-medium text-muted-foreground">成交与阻断记录</h5>
           <div className="max-h-96 overflow-y-auto space-y-0.5">
-            {trades.map((trade, index) => {
+            {normalizedTrades.map((trade, index) => {
               const blockedReason = trade.blocked_reason ?? trade.reason;
               const blocked = Boolean(
-                blockedReason ||
+                trade.blocked_reason ||
                   trade.status === "BLOCKED" ||
                   Number(trade.filled) <= 0,
               );
