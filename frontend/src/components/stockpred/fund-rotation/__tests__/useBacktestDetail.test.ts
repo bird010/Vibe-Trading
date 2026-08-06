@@ -67,6 +67,31 @@ describe("useBacktestDetail", () => {
     expect(state.equity?.series.strategy).toEqual([1, 1.01]);
   });
 
+  it("prefers an instrument with actual trades over signal-only instruments", async () => {
+    const runDetail = detail("run-1");
+    runDetail.instruments = [
+      {
+        ts_code: "510050.SH",
+        has_signal: true,
+        has_order: false,
+        has_trade: false,
+        has_position: false,
+      },
+      {
+        ts_code: "159915.SZ",
+        has_signal: true,
+        has_order: true,
+        has_trade: true,
+        has_position: true,
+      },
+    ];
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+
+    expect(useBacktestDetail.getState().selectedInstrument).toBe("159915.SZ");
+  });
+
   it("discards a late response from the previously selected run", async () => {
     let resolveFirst: ((value: BacktestDetailResponse) => void) | null = null;
     api.fetchBacktestDetail.mockImplementation((runId: string) => {
@@ -109,7 +134,7 @@ describe("useBacktestDetail", () => {
     expect(api.fetchInstrumentChart).toHaveBeenCalledWith(
       "run-1",
       "510300.SH",
-      500,
+      2000,
       expect.any(AbortSignal),
     );
     expect(useBacktestDetail.getState().chart?.ts_code).toBe("510300.SH");
