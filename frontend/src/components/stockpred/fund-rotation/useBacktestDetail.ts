@@ -18,8 +18,19 @@ let chartAbortController: AbortController | null = null;
 let detailRequestId = 0;
 let chartRequestId = 0;
 
+const CHART_BAR_LIMIT = 2000;
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function defaultInstrument(detail: BacktestDetailResponse): string | null {
+  return (
+    detail.instruments.find((instrument) => instrument.has_trade)?.ts_code ??
+    detail.instruments.find((instrument) => instrument.has_signal)?.ts_code ??
+    detail.instruments[0]?.ts_code ??
+    null
+  );
 }
 
 export interface BacktestDetailState {
@@ -83,7 +94,7 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
       set({
         detail,
         equity,
-        selectedInstrument: detail.instruments[0]?.ts_code ?? null,
+        selectedInstrument: defaultInstrument(detail),
         loading: false,
       });
     } catch (error) {
@@ -135,7 +146,7 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
       const chart = await fetchInstrumentChart(
         runId,
         tsCode,
-        500,
+        CHART_BAR_LIMIT,
         chartAbortController.signal,
       );
       if (
