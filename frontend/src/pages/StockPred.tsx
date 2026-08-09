@@ -309,16 +309,6 @@ export function StockPred() {
                       {status.message || status.error_code}
                     </p>
                   ) : null}
-                  {status?.tables.length ? (
-                    <div className="mt-4 divide-y rounded-md border">
-                      {status.tables.map((table) => (
-                        <div key={table.name} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                          <span className="font-mono">{table.name}</span>
-                          <span className="text-muted-foreground">{table.max_date || table.status}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
                 </>
               )}
             </section>
@@ -611,6 +601,16 @@ export function StockPred() {
                   <DataItem label={t("stockPred.asOf")} value={status?.as_of} />
                   <DataItem label={t("stockPred.dataRoot")} value={status?.root} wide />
                 </dl>
+                {status?.tables.length ? (
+                  <div className="mt-4 divide-y rounded-md border">
+                    {status.tables.map((table) => (
+                      <div key={table.name} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                        <span className="font-mono">{table.name}</span>
+                        <span className="text-muted-foreground">{table.max_date || table.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </>
             )}
           </section>
