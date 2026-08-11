@@ -91,6 +91,8 @@ Cluster 选择决定方向，ETF Quality 决定用什么产品表达，质量分
 
 永久保留 Equal Weight。第一阶段只增加 Inverse Volatility，第二阶段再研究 Risk Parity；首版不引入均值—方差优化。
 
+在消融契约中，“关闭 Portfolio Weighting”不是取消权重，而是回退到固定 Equal Weight；开启后才使用 Inverse Volatility 等候选。两种 Variant 使用相同选中资产、现金原因和下游执行契约。
+
 约束包括 `max_etf_weight / max_cluster_weight / max_asset_class_weight / minimum_cash_weight / maximum_one_way_turnover_per_rebalance`。其中 one-way turnover 使用执行诊断契约定义的 half-gross 公式；权重只使用信号日前数据。
 
 **为什么改：** 名义等权不等于风险等权，高波动资产可能主导组合回撤。
@@ -118,6 +120,8 @@ Volatility Target 使用 `target_volatility / estimated_portfolio_volatility`，
 **不改的后果：** 高波动期风险被动放大，无法区分 Alpha 失效和仓位过高。
 
 Regime 不得混入 momentum score，否则无法归因。
+
+在消融契约中，“关闭 Portfolio Risk Layer”定义为恒等变换：`gross_exposure = 1`、`scaled_weights = raw_target_weights`。它只关闭 volatility target 或 regime scaling，必须保留动量门槛、代表缺失、数据门禁等上游原因产生的现金，禁止为实现“关闭”而强制满仓。
 
 ## 8. 统一决策流水线
 
@@ -153,5 +157,6 @@ raw_signal_scores
 - ETF Quality 不改变 Cluster Momentum，小幅质量变化不突破 lock。
 - 等权、逆波动使用同一选中资产并满足全部约束。
 - Volatility Target 只缩放敞口，Regime 不改写 Alpha score。
+- Weighting 关闭时确定性回退 Equal Weight；Risk Layer 关闭时执行恒等缩放且不抹掉上游现金。
 - 每项增强有独立消融 Variant，可单独关闭。
 - 当前单窗口、固定等权策略始终可运行，作为永久基线。

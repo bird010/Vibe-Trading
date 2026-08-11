@@ -46,10 +46,13 @@ S1：ETF 直接动量排名
 S2：S1 + 相关性聚类
 S3：S2 + 代表 ETF
 S4：S3 + ETF 质量选择
-S5：S4 + 组合权重与 Portfolio Risk Layer
+S5：S4 + Portfolio Weighting
+S6：S5 + Portfolio Risk Layer
 ```
 
-只有 S1→S2 的差异才能近似回答聚类贡献。S0→S5 全部使用相同的最终可执行契约；市场规则、容量、滑点和费用的影响由归因设计中的 X0→X5 Execution Ladder 单独测量，禁止把执行约束同时当作策略组件。
+只有 S1→S2 的差异才能近似回答聚类贡献；S4→S5 回答相对权重变化的条件边际效果，S5→S6 回答总风险敞口缩放的条件边际效果。S0→S6 全部共享相同的 execution contract/version；市场规则、容量、滑点和费用的影响由归因设计中的 X0→X5 Execution Ladder 单独测量，禁止把执行约束同时当作策略组件。
+
+S0→S6 是稳定的架构层，不随每个新参数或功能继续扩展编号。Coverage gate、Momentum Family、Hysteresis 等层内增强通过预注册的 `VariantSpec.component_toggles` 做 one-change-at-a-time 对照；每项必须声明 baseline、enabled variant、唯一变化项和独立 OOS evidence。
 
 ## 3. 动量家族
 
@@ -116,7 +119,7 @@ residual_orders / corporate_action_state
 last_valuation_date / last_nav
 ```
 
-Fold n 的结束状态成为 Fold n+1 的开始状态。新 fold 参数只在下一个正常计划信号生效，并通过相同执行契约再平衡；禁止在 fold 边界无成本清仓、换仓或重置 NAV。未完成 residual 按预先声明的 active-order policy 延续，直到正常成交、到期，或被新决策取消并替换。
+Fold n 的结束状态成为 Fold n+1 的开始状态。全部 fold 共享同一 `accounting_contract_version` 和 `DailyAccountingEventOrder`。新 fold 参数只在下一个正常计划信号生效，并通过相同执行契约再平衡；禁止在 fold 边界无成本清仓、换仓或重置 NAV。未完成 residual 按预先声明的 active-order policy 延续，直到正常成交、到期，或被新决策取消并替换。
 
 ## 6. 参数选择
 
@@ -188,7 +191,9 @@ Deflated Sharpe Ratio 和 Probability of Backtest Overfitting 属于第二阶段
 - 相同输入生成相同选择，参数空间变化改变实验身份。
 - OOS 不足时不能生成 `QUALIFIED_OOS_EVIDENCE`。
 - 直接 ETF 动量不调用聚类模块。
-- S0→S5 使用相同 Universe 和最终执行条件，Execution Ladder 不混入策略组件链。
+- S0→S6 使用相同 Universe 和 execution contract/version，Execution Ladder 不混入策略组件链。
+- S4 与 S5 只能在 weighting policy 上不同；S5 与 S6 只能在 risk policy 上不同。
+- Coverage、Momentum Family 和 Hysteresis 分别拥有预注册的 baseline、enabled variant 与独立 OOS evidence。
 - Fold 边界完整传递 cash、positions、cost basis、residual 和公司行为状态，新参数通过正常交易生效。
 - Sealed OOS Evidence Table 不进入选择函数，也不产生 winner；候选身份变化会生成新实验。
 - OOS 或 post-hoc regime 结论用于新版本时，消费记录可追溯到派生实验。

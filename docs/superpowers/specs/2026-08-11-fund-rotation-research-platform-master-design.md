@@ -161,6 +161,7 @@ resolved_config_hash
 data_snapshot_fingerprint
 knowledge_cutoff
 execution_contract_version
+accounting_contract_version
 market_rule_contract_version
 evaluation_calendar_hash
 benchmark_policy_hash

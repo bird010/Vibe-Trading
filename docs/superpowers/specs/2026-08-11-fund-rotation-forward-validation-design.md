@@ -22,6 +22,7 @@ class FrozenStrategyVersion:
     config_hash: str
     data_contract_version: str
     execution_contract_version: str
+    accounting_contract_version: str
     qualification_policy_hash: str
     frozen_at: str
     effective_from: str
@@ -112,7 +113,7 @@ Decision 阶段只输出当前持仓、现金、NAV、原始信号、入选簇�
 
 Execution 阶段输入已封存的 `shadow_decision_id`、到期 parent/residual orders、`execution_as_of_time` 和届时已到达的市场数据；输出 attempts、shadow fills、显式成本、机会成本诊断以及更新后的账户状态。
 
-Shadow 是持续账户：本期结束状态成为下期开始状态，持仓、现金、residual order 和公司行为必须连续继承。
+Shadow 是持续账户：本期结束状态成为下期开始状态，持仓、现金、residual order 和公司行为必须连续继承。账户状态转换和 P&L 必须使用 FrozenStrategyVersion 绑定的 `accounting_contract_version`，不能在 Shadow 中另写一套日级事件顺序。
 
 ## 6. 数据到达与因果性
 
@@ -150,7 +151,7 @@ class ShadowExecutionService:
         ...
 ```
 
-调度器只负责唤醒。Decision 阶段在未来执行价格出现前封存信号、目标、输入快照和 `decision_idempotency_key`；Execution 阶段只能在预期执行日的市场数据实际到达后，使用独立的 `execution_idempotency_key` 生成 attempts 和 fills。两阶段复用正式 PIT Resolver、策略实现、目标权重契约、市场规则、成本模型、Execution Ledger 和指标定义，禁止另写简化 Shadow 策略。
+调度器只负责唤醒。Decision 阶段在未来执行价格出现前封存信号、目标、输入快照和 `decision_idempotency_key`；Execution 阶段只能在预期执行日的市场数据实际到达后，使用独立的 `execution_idempotency_key` 生成 attempts 和 fills。两阶段复用正式 PIT Resolver、策略实现、目标权重契约、市场规则、成本模型、Execution Ledger、`DailyAccountingEventOrder` 和指标定义，禁止另写简化 Shadow 策略或账本。
 
 ## 8. Shadow 成交与双净值
 
@@ -242,6 +243,7 @@ shadow_manifest.json
 - Execution 在相应市场数据到达前不能产生 attempt 或 fill。
 - 数据未到齐保持旧目标，Shadow 账户跨周期连续。
 - residual、公司行为和持仓在重启后连续。
+- Backtest、Walk-forward 与 Shadow 对同一事件序列使用相同 `accounting_contract_version` 时，产生相同现金、持仓、P&L 和 NAV。
 - ideal 与 executable 净值独立维护。
 - 历史决策不可覆盖，更正只追加记录。
 - 触发阈值后对应 Shadow deployment 进入 SUSPENDED，不能通过直接调参恢复。

@@ -20,25 +20,44 @@
 
 ### 2.1 Parent Order
 
-保存 `order_id / decision_id / ts_code / direction / created_date / original_requested_quantity / current_economic_quantity / cumulative_filled_quantity / remaining_quantity / status / completed_date / cancel_reason / reject_reason`。
+保存 `order_id / decision_id / ts_code / direction / created_date / original_requested_quantity / cumulative_filled_quantity / remaining_quantity / quantity_basis_id / replacement_of_order_id / replacement_chain_id / corporate_action_id / status / completed_date / cancel_reason / reject_reason`。
 
 状态限定为 `OPEN / PARTIALLY_FILLED / FILLED / CANCELED / EXPIRED / REJECTED`。`BLOCKED` 只描述某次 execution attempt，不能成为 parent order 状态；一次尝试被阻塞后，只要仍可重试，parent 保持 `OPEN` 或 `PARTIALLY_FILLED`。
 
-`original_requested_quantity` 创建后不可变，是 parent fill rate 的固定分母。公司行为需要调整经济数量时只更新 `current_economic_quantity` 并保留独立 adjustment 记录。新决策改变目标时取消旧 parent，再创建新 parent，禁止原地改写原始请求量。
+`original_requested_quantity` 创建后不可变。一个 Parent 内的 `original_requested_quantity / cumulative_filled_quantity / remaining_quantity` 必须始终属于创建时的同一个 `quantity_basis_id`，并满足 `remaining_quantity = original_requested_quantity - cumulative_filled_quantity`。历史 attempt 和 fill 永不因后来公司行为而重述。新决策改变目标时取消旧 parent，再创建新 parent，禁止原地改写原始请求量。
 
 ### 2.2 Execution Attempt
 
-保存 `attempt_id / order_id / attempt_number / trade_date / requested_quantity / filled_quantity / unfilled_quantity / raw_price / executed_price / commission / explicit_fee / slippage_cost / participation_rate / status / reason_code`。
+保存 `attempt_id / order_id / attempt_number / trade_date / requested_quantity / filled_quantity / unfilled_quantity / quantity_basis_id / raw_price / executed_price / commission / explicit_fee / slippage_cost / participation_rate / status / reason_code`。
 
 Attempt 状态限定为 `PENDING / FILLED / PARTIALLY_FILLED / BLOCKED / INVALID`。同一 parent order 可有多个 attempt；每个交易日最多一个 active attempt。
 
 ### 2.3 Executed Trade
 
-只有 `filled_quantity > 0` 才形成 trade，保存 `trade_id / attempt_id / order_id / ts_code / direction / quantity / price / notional / commission / explicit_fee / slippage_cost / trade_date`。
+只有 `filled_quantity > 0` 才形成 trade，保存 `trade_id / attempt_id / order_id / ts_code / direction / quantity / quantity_basis_id / price / notional / commission / explicit_fee / slippage_cost / trade_date`。
 
 ### 2.4 Corporate Action
 
-独立保存 `corporate_action_id / ts_code / action_type / effective_date / old_quantity / new_quantity / old_cost_basis / new_cost_basis / adjustment_factor`。它可以调整持仓，但不得进入订单数、成交数、fill rate 或 turnover。
+独立保存 `corporate_action_id / ts_code / action_type / effective_date / old_quantity / new_quantity / old_cost_basis / new_cost_basis / adjustment_factor`。Corporate Action 事件本身不冒充订单或成交，也不进入 fill rate 或 turnover；由份额单位变化触发的 linked replacement 是真实 Parent Order，必须单独计数并标记来源。
+
+只有拆分、合并、份额折算等会改变 share unit 的公司行为才替换未完成订单：
+
+```text
+旧 Parent：
+  保留原始数量和全部 attempts
+  status = CANCELED
+  cancel_reason = CORPORATE_ACTION_REPLACED
+
+新 Parent：
+  original_requested_quantity =
+      旧 Parent 剩余经济数量按 adjustment factor 转换并按市场规则取整
+  replacement_of_order_id = 旧 Parent
+  replacement_chain_id = 沿用同一经济意图链
+  corporate_action_id = 触发替换的事件
+  quantity_basis_id = 公司行为后的份额单位
+```
+
+Replacement 只承接剩余经济数量，不能重新提交完整原单。现金分红不改变份额单位，不触发 replacement；仅有 `adj_factor` 而没有可信 `action_type` 时，正式执行不能假定发生了真实份额调整。零碎份额和 `cash_in_lieu` 记录在 Corporate Action ledger，不伪装成成交。
 
 ## 3. Execution Ledger
 
@@ -67,25 +86,28 @@ buy_cash_out = quantity × executed_price + commission + explicit_fee
 
 ### 4.1 Parent-order 指标
 
-输出 `order_count / fully_filled_order_count / partially_filled_order_count / open_order_count / canceled_order_count / expired_order_count / rejected_order_count`。不存在 `blocked_order_count`；阻塞只进入 attempt 指标。
+输出 `order_count / replacement_order_count / fully_filled_order_count / partially_filled_order_count / open_order_count / canceled_order_count / expired_order_count / rejected_order_count`。不存在 `blocked_order_count`；阻塞只进入 attempt 指标。
+
+每张 Parent 独立计算：
 
 ```text
-order_quantity_fill_rate =
-    Σ 每个 order 的最终累计成交数量
-    ÷ Σ 每个 order 的原始请求数量
+parent_quantity_fill_rate(order_id) =
+    final_cumulative_filled_quantity
+    ÷ original_requested_quantity
 ```
 
-计算前必须按 `order_id` 聚合，不能对 attempt 展开行求和。
+计算前必须按 `order_id` 聚合，不能对 attempt 展开行求和。不同 `quantity_basis_id` 的裸份额不能相加；因此跨产品、跨份额调整的正式汇总报告 `mean/median/quantile_parent_fill_rate` 和订单完成率，不再用裸数量求一个全局 `order_quantity_fill_rate`。首版不发布 replacement chain 的“经济意图完成率”；未来如需要，必须使用预先定义的标准化名义金额或原始单位归一化公式。
 
 ### 4.2 Attempt 指标
 
 输出 `attempt_count / filled_attempt_count / partial_attempt_count / blocked_attempt_count / attempt_quantity_fill_rate / blocked_attempt_rate`。
 
 ```text
-attempt_quantity_fill_rate =
-    Σ attempt.filled_quantity
-    ÷ Σ attempt.requested_quantity
+attempt_quantity_fill_rate(attempt_id) =
+    attempt.filled_quantity ÷ attempt.requested_quantity
 ```
+
+同一 Parent、同一 `quantity_basis_id` 内可以用 `Σ filled ÷ Σ requested` 计算 residual retry 的汇总 attempt fill rate。跨产品或跨 quantity basis 只报告 per-attempt 比率分布和 blocked attempt rate，禁止直接相加裸份额。
 
 ### 4.3 Trade 与成本指标
 
@@ -167,11 +189,13 @@ class ExecutionCostModel:
    └─ 已成交：Executed Trade → 更新现金和持仓
 
 Corporate Action → 独立调整持仓 → 不进入交易统计
+                 └→ 若份额单位变化：取消 residual parent → 创建 linked replacement parent
 ```
 
 ## 8. 失败与降级
 
 - attempt 找不到 parent、attempt 重复、累计成交超限、FILLED 后继续尝试：运行失败。
+- Parent 内数量字段的 `quantity_basis_id` 不一致，或 replacement 没有完整 lineage：运行失败。
 - 公司行为进入 trade ledger：运行失败。
 - ETF 类型或规则无法解析：该产品不执行并记录稳定原因码。
 - 成本、价格或数量非有限：attempt INVALID，不能默认为零。
@@ -180,7 +204,7 @@ Corporate Action → 独立调整持仓 → 不进入交易统计
 
 ## 9. 兼容迁移
 
-并行产出 `legacy_execution_diagnostics / execution_diagnostics_v2 / diagnostics_difference`。前端按“订单、尝试、成交、成本、公司行为”分组；废弃裸 `fill_rate` 和裸 `turnover`，将旧 `blocked_order_count` 映射为 `blocked_attempt_count`，旧 `trade_count` 映射为 `executed_trade_count`。历史产物保留契约版本，不得与 v2 直接排名。
+并行产出 `legacy_execution_diagnostics / execution_diagnostics_v2 / diagnostics_difference`。现有“公司行为原地缩放 parent requested/filled”的行为只作为 legacy 对照；v2 必须保留旧 Parent 并创建 linked replacement。前端按“订单、尝试、成交、成本、公司行为”分组；废弃裸 `fill_rate` 和裸 `turnover`，将旧 `blocked_order_count` 映射为 `blocked_attempt_count`，旧 `trade_count` 映射为 `executed_trade_count`。历史产物保留契约版本，不得与 v2 直接排名。
 
 ## 10. 测试
 
@@ -188,8 +212,10 @@ Corporate Action → 独立调整持仓 → 不进入交易统计
 - 两日完成1000股：order fill rate 100%，attempt fill rate 66.7%。
 - 连续三日阻塞：一张保持 OPEN 的 parent、三次 blocked attempt；到期后 parent 才进入 EXPIRED。
 - 部分成交后取消；新决策取消旧 residual。
-- `original_requested_quantity` 不因 residual、公司行为或新决策而被覆盖；公司行为调整 `current_economic_quantity` 并保留调整记录。
-- 公司行为不改变订单、成交和换手指标，但正确调整持仓。
+- `original_requested_quantity` 不因 residual、公司行为或新决策而被覆盖；改变份额单位的公司行为取消旧 residual 并只为剩余经济数量创建 replacement parent。
+- 2:1 份额调整前已成交一半：旧 Parent 保持50%并以 `CORPORATE_ACTION_REPLACED` 取消，新 Parent 使用新单位且自身 fill rate 不超过100%。
+- 现金分红不替换 Parent；缺少可信 action type 时不得仅凭 adj_factor 创建 replacement。
+- Corporate Action 事件不冒充订单或成交，也不进入换手；份额单位变化产生的 replacement parent 在订单指标中单独披露。
 - 多日成交产生多笔 trade，但只属于一个 parent。
 - `lot_size` 等 PIT 市场规则按版本生效；研究配置只能施加更严格的约束，不能放宽交易所硬规则。
 - 不同 ETF 类型解析不同规则，未知类型拒绝执行。
@@ -200,8 +226,10 @@ Corporate Action → 独立调整持仓 → 不进入交易统计
 ## 11. 验收
 
 - 所有指标名称唯一对应一种实体，并可从 Ledger 复算。
-- 公司行为不进入订单、尝试、成交或换手指标。
+- Corporate Action 事件不进入尝试、成交或换手指标；由其触发的 replacement parent 以独立订单和稳定原因码披露。
 - parent 与 attempt 在 residual 场景下输出不同但正确的结果。
+- 每张 Parent 的数量字段使用单一 `quantity_basis_id`；不同 basis 的裸数量不会被汇总为全局 fill rate。
+- Replacement lineage 可追溯到旧 Parent 和 Corporate Action，且历史 attempts 永不重写。
 - Parent 不存在 BLOCKED 状态，所有阻塞均可追溯到具体 attempt。
 - 换手指标均使用明确名称、固定公式和 average NAV 分母。
 - `ExecutionConfig` 不存在声明可配置但实际无效的字段。
