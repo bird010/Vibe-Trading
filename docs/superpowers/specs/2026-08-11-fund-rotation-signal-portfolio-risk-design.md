@@ -63,7 +63,11 @@ Entry：进入 Top-N 才新建仓
 Exit：跌出 Top-(N + buffer) 才退出
 ```
 
-支持 `minimum_holding_weeks / minimum_score_improvement / expected_benefit_over_cost`。顺序为强制退出检查、保留 buffer 内持仓、计算空 slot、选择 Entry 候选、检查改善与成本后决定换仓。
+首版支持 `minimum_holding_weeks / minimum_score_improvement`。顺序为强制退出检查、保留 buffer 内持仓、计算空 slot、选择 Entry 候选、检查分数改善后决定换仓。
+
+Hysteresis 只在同一个 `clustering_cycle_id` 内继承。每次重新聚类产生新的 cycle id，并重置旧簇的 Entry/Exit 状态；当次生成的 cluster label 不得被视为跨周期永久身份。首版不实现 cluster lineage，因为簇的分裂、合并和成员大幅变化没有唯一匹配答案。
+
+`expected_benefit_over_cost` 延后到第二阶段。只有在独立 `ExpectedBenefitModel` 明确定义预测目标、预测周期、单位、校准数据、冻结方式并完整进入 Train/Validation/Sealed OOS 后，才能重新加入换仓判断；禁止直接把 score 差任意映射为预期收益。
 
 **为什么改：** 排名第3和第4通常没有实质差异，小波动不应立即变成交易。
 
@@ -87,7 +91,7 @@ Cluster 选择决定方向，ETF Quality 决定用什么产品表达，质量分
 
 永久保留 Equal Weight。第一阶段只增加 Inverse Volatility，第二阶段再研究 Risk Parity；首版不引入均值—方差优化。
 
-约束包括 `max_etf_weight / max_cluster_weight / max_asset_class_weight / minimum_cash_weight / maximum_turnover_per_rebalance`。权重只使用信号日前数据。
+约束包括 `max_etf_weight / max_cluster_weight / max_asset_class_weight / minimum_cash_weight / maximum_one_way_turnover_per_rebalance`。其中 one-way turnover 使用执行诊断契约定义的 half-gross 公式；权重只使用信号日前数据。
 
 **为什么改：** 名义等权不等于风险等权，高波动资产可能主导组合回撤。
 
@@ -144,7 +148,8 @@ raw_signal_scores
 - 20个成员只有1个有效时 coverage gate 拒绝；未上市成员不进分母。
 - 多周期排名可重复，零波动不产生无限分数。
 - 持仓位于 Exit Buffer 内时不换仓；强制失效可绕过持有期。
-- 分数改善不足或收益不覆盖成本时不交易。
+- 同一 `clustering_cycle_id` 内迟滞连续；recluster 后重置，旧 label 不继承状态。
+- 分数改善不足时不交易；首版配置和接口不出现未定义的 `expected_benefit_over_cost`。
 - ETF Quality 不改变 Cluster Momentum，小幅质量变化不突破 lock。
 - 等权、逆波动使用同一选中资产并满足全部约束。
 - Volatility Target 只缩放敞口，Regime 不改写 Alpha score。

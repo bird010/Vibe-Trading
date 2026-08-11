@@ -33,10 +33,11 @@
 
 ### 2.2 不可变约束
 
-- 任一 `signal_date` 不得读取该时点之后才生效或才可获得的信息。
+- 任一 `signal_date` 必须同时受事实生效时间与 `knowledge_cutoff` 约束，不得读取该时点之后才生效或才被系统知晓的信息。
 - 正式比较必须共享数据快照、评价日历、执行契约、成本假设和 OOS fold。
+- Sealed OOS 只能评估预先登记并冻结身份的候选；OOS 结果不得用于候选淘汰、选优、调参或放宽资格门禁。
 - 已冻结版本不可原地修改；核心逻辑或参数变化必须生成新版本。
-- 任何归因必须可以还原真实 NAV，无法对账时拒绝发布。
+- 真实资金账使用实际成交价记账；滑点只作为相对参考价格的机会成本归因，不得再次从现金或 NAV 扣除。任何归因必须可以还原真实 NAV，无法对账时拒绝发布。
 - 本阶段只建立研究和决策参考资格，不连接真实资金自动交易。
 
 ## 3. 可信度分层
@@ -85,26 +86,37 @@ PIT 审计未通过时，结果状态为 `RESEARCH_ONLY_UNVERIFIED_UNIVERSE`。
 
 ### 4.4 前向验证门禁
 
-只有完成 OOS、参数冻结、Shadow Portfolio 最低观察期和人工审批，策略才可进入 `DECISION_ELIGIBLE`。
+只有完成 OOS、参数冻结、Shadow Portfolio 最低观察期和人工审批，策略版本才可获得 `DecisionQualification.ELIGIBLE`。
 
 **通俗解释：** 回测是看录像，Shadow Portfolio 是在未来价格出现前先提交答案。
 
 **不修改的后果：** 新历史会不断被用于调参，所谓前向表现再次退化为样本内结果。
 
-## 5. 生命周期
+## 5. 分离的生命周期与资格评估
+
+单一状态链会把数据快照、一次运行、研究实验、不可变策略版本和可暂停的 Shadow 实例混成同一个对象，因此改为分别管理：
 
 ```text
-DRAFT
-→ DATA_VERIFIED
-→ BACKTEST_VALID
-→ OOS_VALIDATED
-→ FROZEN
-→ SHADOW_RUNNING
-→ DECISION_ELIGIBLE
-→ RETIRED
+DataSnapshotQualification：UNVERIFIED / VERIFIED / DEGRADED / INVALID
+BacktestRunStatus：PENDING / RUNNING / SUCCEEDED / FAILED / CANCELED
+RunQualification：RESEARCH_ONLY / BACKTEST_VALID / INVALID
+ResearchExperimentLifecycle：DRAFT / REGISTERED / RUNNING / COMPLETED / INVALIDATED
+StrategyVersionLifecycle：CANDIDATE / FROZEN / RETIRED / INVALIDATED
+ShadowDeploymentStatus：CREATED / RUNNING / SUSPENDED / COMPLETED / FAILED
+DecisionQualification：INELIGIBLE / ELIGIBLE / REVOKED
 ```
 
-异常状态为 `SUSPENDED` 和 `INVALIDATED`。状态升级必须绑定可审计证据；数据、代码、配置或执行契约变化必须生成新版本。
+这些状态不能互相代替。例如，`FROZEN` 描述策略版本不可变，不表示某个 Shadow deployment 正在运行；`DataSnapshotQualification.VERIFIED` 是快照资格，不是策略版本状态。
+
+状态转换由三类不可变对象支撑：
+
+```text
+QualificationEvidence：记录快照、运行、实验、归因、Shadow 和审批等事实证据
+QualificationPolicy：记录预先冻结的 hard gates、warnings、阈值和适用转换
+QualificationAssessment：记录某次转换评估所用 policy、evidence、结论和原因码
+```
+
+政策或证据变化时追加新的 assessment；禁止用会随证据变化而过期的 `can_freeze=true` 一类可变布尔字段代替审计记录。
 
 ## 6. 子设计与依赖
 
@@ -118,16 +130,23 @@ DRAFT
 | 6 | [策略冻结与 Forward Test](2026-08-11-fund-rotation-forward-validation-design.md) | 未知未来能否持续运行 | Frozen 版本、Shadow 账本、前向证据 |
 
 ```text
-PIT 数据 ──────┬──→ 独立基线与 OOS
-               │          ↓
-执行与统计 ────┘    信号、组合与风险
-                          ↓
-                    收益归因
-                          ↓
-                    Forward Test
+Bitemporal PIT Data
+→ DataSnapshotQualification
+→ Versioned Market Rules + Execution Ledger
+→ Reproducible Run Contract
+→ ResearchExperiment（Train / Validation / Walk-forward / Sealed OOS）
+→ Candidate StrategyVersion
+→ Accounting / Strategy / Execution Attribution
+→ QualificationAssessment（CAN_FREEZE）
+→ Frozen StrategyVersion
+→ Shadow Decision Seal
+→ Shadow Execution + Forward Evidence
+→ QualificationAssessment（CAN_GRANT_DECISION_ELIGIBILITY）
+→ Human Approval
+→ DecisionQualification.ELIGIBLE
 ```
 
-PIT 数据和执行统计可以部分并行；OOS 必须建立在可信数据与稳定执行契约上；新信号和组合模型不得绕过 OOS；Forward Test 只接收冻结版本。
+PIT 数据建设和执行契约可以部分并行，但正式实验必须建立在已定版的数据、规则和记账契约上；新信号和组合模型不得绕过 Sealed OOS；Forward Test 只接收经过冻结 assessment 的不可变策略版本。
 
 ## 7. 共同架构约束
 
@@ -140,8 +159,12 @@ strategy_implementation_hash
 framework_implementation_hash
 resolved_config_hash
 data_snapshot_fingerprint
+knowledge_cutoff
 execution_contract_version
+market_rule_contract_version
 evaluation_calendar_hash
+benchmark_policy_hash
+qualification_policy_hash
 research_experiment_id
 ```
 
@@ -151,7 +174,7 @@ research_experiment_id
 
 ### 7.3 统一比较规则
 
-只有共享 PIT 快照、日历、成本、执行规则、OOS fold 和基准的结果才能排名。探索性比较和正式 OOS 榜单必须分开。
+只有共享 PIT 快照、知识截止时间、日历、成本、执行规则、fold 和基准政策的 Validation 结果才能进入候选选择排名。探索性比较与 `Validation Selection Ranking` 必须分开；Sealed OOS 只生成描述性 Evidence Table，不产生用于选优的正式榜单。
 
 ### 7.4 统一可追溯性
 
@@ -174,15 +197,15 @@ research_experiment_id
 - 建立 Execution Ledger v2 与唯一统计定义。
 - 产出 legacy 与新契约的差异报告。
 
-通过后可升级到 `BACKTEST_VALID`，但仍不得称为已验证 Alpha。
+通过后对应 run 可获得 `RunQualification.BACKTEST_VALID`，但策略版本仍不得称为已验证 Alpha。
 
 ### 阶段 B：建立研究有效性
 
 - 增加不聚类的独立策略基线。
 - 建立固定 OOS 和 rolling walk-forward。
-- 保存全部尝试、参数稳定性和 OOS 榜单。
+- 保存全部尝试、参数稳定性、Validation 选择记录和 Sealed OOS 描述性证据。
 
-通过后可升级到 `OOS_VALIDATED`。
+通过后 ResearchExperiment 可形成合格 OOS evidence，供后续 StrategyVersion 冻结评估使用；它不直接改写数据或运行状态。
 
 ### 阶段 C：逐项增强并消融
 
@@ -194,17 +217,18 @@ research_experiment_id
 
 - 建立可对账收益归因和固定组件消融链。
 - 冻结策略版本并持续运行 Shadow Portfolio。
-- 满足观察期和人工审批后，才能进入 `DECISION_ELIGIBLE`。
+- 满足观察期并通过独立资格 assessment 和人工审批后，才能获得 `DecisionQualification.ELIGIBLE`。
 
 ## 9. 总体验收标准
 
 - 任一历史代码都能被解释为当时合格、明确排除或数据缺陷。
+- 任一正式 PIT 查询都同时指定 `signal_date`、`knowledge_cutoff` 和不可变快照；无法证明历史知识时间的区间明确降级。
 - 任一执行指标都能唯一对应订单、尝试、成交或公司行为。
 - 至少一个不聚类的正式策略完成相同契约下的 OOS 比较。
-- OOS 数据不能进入当前 fold 的参数选择。
+- Sealed OOS 数据不能进入候选选择、参数选择或资格阈值调整；被后续设计使用的区间必须记录为已消费研究输入。
 - 每个策略增强都可独立关闭并拥有消融证据。
 - 每日及全区间归因在数值容差内还原 NAV。
-- Frozen 版本不可修改，Shadow 决策在未来价格出现前固化。
+- Frozen 版本不可修改；Shadow 决策在未来价格出现前固化，执行只能在相应市场数据到达后发生。
 - 未满足门禁的结果在 API、产物和 UI 中都不能被描述为正式 Alpha 或实际决策资格。
 
 ## 10. 明确不做

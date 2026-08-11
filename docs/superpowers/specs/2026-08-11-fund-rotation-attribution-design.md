@@ -24,31 +24,53 @@
 
 ## 3. 真实账本恒等式
 
-每日必须满足：
+真实账户只按实际成交价记账。每日必须先复算资产负债表：
 
 ```text
-Ending NAV
-= Beginning NAV
-+ Position P&L
+Ending Cash
+= Beginning Cash
 + Cash Income
++ Sell Quantity × Sell Executed Price
+- Buy Quantity × Buy Executed Price
 - Commission
-- Slippage Cost
-- Other Explicit Cost
+- Other Explicit Fee
+
+Ending NAV
+= Ending Cash
++ Σ Ending Position Quantity × Ending Valuation Price
 ```
 
-公司行为调整份额和成本基础，但调整前后经济价值必须连续，份额调整本身不创造收益。
+损益桥接再满足：
+
+```text
+Ending NAV - Beginning NAV
+= Position And Trading P&L
++ Cash Income
+- Commission
+- Other Explicit Fee
+```
+
+`executed_price` 已包含相对参考价格的滑点，真实现金和 NAV 不再单独扣 `Slippage Cost`。公司行为调整份额和成本基础，但调整前后经济价值必须连续，份额调整本身不创造收益。
 
 每只 ETF、每个交易日保存 begin quantity、begin/end price、market P&L、weight 和 P&L contribution。现金收益即使假设为零也显式记录。
 
 ## 4. 执行拖累
 
-直接核算：
+真实账本直接核算：
 
 ```text
 commission_drag
-slippage_drag
 other_fee_drag
 ```
+
+滑点按参考执行与实际执行之间的反事实机会成本核算：
+
+```text
+slippage_effect_return = actual_executed_account_return - reference_price_account_return
+slippage_drag_return = reference_price_account_return - actual_executed_account_return
+```
+
+`effect` 保留带符号贡献，`drag` 正数表示拖累。它们解释实际成交价相对 reference/raw price 带来的差异，但不得再次进入真实现金扣减。
 
 通过反事实执行计算：
 
@@ -69,19 +91,35 @@ attribution_residual =
 
 每日和全区间均计算残差。超过数值容差时输出 `ATTRIBUTION_RECONCILIATION_FAILED`，正式归因报告拒绝发布；禁止把残差强制塞入“其他”。
 
-## 6. 固定组件消融链
+## 6. 两条固定消融链
+
+### 6.1 Strategy Component Chain
 
 ```text
-A：Direct ETF Momentum
-B：A + Correlation Clustering
-C：B + Representative ETF
-D：C + ETF Quality Selection
-E：D + Portfolio Weighting
-F：E + Portfolio Risk Layer
-G：F + Execution Constraints
+S0：Cash / 无 Alpha 基线
+S1：Direct ETF Momentum
+S2：S1 + Correlation Clustering
+S3：S2 + Representative ETF
+S4：S3 + ETF Quality Selection
+S5：S4 + Portfolio Weighting + Portfolio Risk Layer
 ```
 
-边际效果定义为相邻版本收益差，例如 `clustering_effect = Return(B) - Return(A)`，依次得到 representative、quality、weighting、risk 和 execution effect。
+边际效果定义为相邻版本收益差，例如 `clustering_effect = Return(S2) - Return(S1)`。S0→S5 全部使用相同的最终可执行契约，依次回答 signal、clustering、representative、quality、portfolio/risk 的边际效果。
+
+### 6.2 Execution Ladder
+
+对固定策略目标单独启用执行现实：
+
+```text
+X0：Reference-price ideal target
+X1：+ Eligibility / price-limit / settlement hard rules
+X2：+ Lot-size / tick-size rounding
+X3：+ Capacity / participation / residual retry
+X4：+ Spread / slippage / market impact
+X5：+ Commission / taxes / explicit fees
+```
+
+`execution_effect(Xn) = Return(Xn) - Return(X0)`；相邻层差异用于解释具体摩擦。市场规则和成本模型采用不同版本字段，不能把调整成本情景等同于放宽硬规则。
 
 **为什么使用固定链：** 组件顺序会影响边际贡献，固定链能保证每次采用同一解释规则。
 
@@ -89,7 +127,7 @@ G：F + Execution Constraints
 
 ## 7. 反事实公平性
 
-所有消融 Variant 必须共享 PIT Universe、快照、日历、信号日、规则、成本、初始资金、OOS fold 和随机种子。计算 clustering effect 时，A 和 B 只能在是否聚类上不同；同时改变动量、权重或费用时拒绝归因。
+所有消融 Variant 必须共享 PIT Universe、快照、日历、信号日、规则、成本、初始资金、OOS fold 和随机种子。计算 clustering effect 时，S1 和 S2 只能在是否聚类上不同；同时改变动量、权重或费用时拒绝归因。计算 X ladder 时策略目标必须固定，且 Xn 只能新增该层声明的执行现实。
 
 ## 8. 理论与可执行双净值
 
@@ -103,8 +141,11 @@ executable_equity
 理论账户假设按规定参考价格无摩擦实现目标；可执行账户经过交易规则、容量、滑点、费用和 residual retry。
 
 ```text
-total_execution_drag = executable_return - ideal_target_return
+execution_effect_return = executable_return - ideal_target_return
+execution_drag_return = ideal_target_return - executable_return
 ```
+
+`effect` 是带符号贡献；`drag` 采用“正数表示拖累”的口径。两者不得混名，也不得把 drag 强制截断为非负，因为延迟成交偶尔可能改善结果。
 
 拆分 execution drag 时逐层启用费用、容量、阻塞和零股约束。
 
@@ -132,6 +173,8 @@ unintentional_cash：代表缺失、数据门禁、订单阻塞、容量、零�
 ### 11.1 事后诊断状态
 
 `Bull / Bear / Sideways / High Vol / Low Vol` 可使用完整区间稳定分类，但必须标记 `POST_HOC_ANALYTICS_ONLY`，不得驱动交易。
+
+如果事后状态、OOS 失败案例或分段表现被用于设计后续策略版本，对应区间必须追加 `CONSUMED_AS_RESEARCH_INPUT / consumed_at / derived_experiment_ids`。这不会改写原版本已经产生的证据，但后续版本不得继续把该区间声称为 untouched OOS。
 
 ### 11.2 可交易状态
 
@@ -189,12 +232,14 @@ attribution_manifest.json
 ## 15. 测试与验收
 
 - 每日损益归因还原 NAV；公司行为前后经济价值连续。
-- 佣金和滑点只进入执行拖累。
+- 佣金和显式费用只从真实现金扣一次；滑点已包含在成交价中，只作为相对参考账户的机会成本归因。
 - 阻塞产生 unintentional cash，动量门槛产生 intentional cash。
-- A 与 B 只有聚类组件不同，不公平反事实被拒绝。
+- S1 与 S2 只有聚类组件不同；X ladder 固定策略目标，不公平反事实被拒绝。
 - theoretical 与 executable 差异可复算。
+- `execution_effect_return` 与 `execution_drag_return` 符号相反，延迟成交有利时不会被强制改写为零。
 - 回撤区间和恢复日期正确。
 - 事后 regime 不能进入交易接口。
+- 事后分析用于后续设计时生成 OOS 消费记录。
 - OOS fold 归因不混入 Train/Validation。
 - 残差超容差时拒绝发布。
 - 正式报告能回答为什么赚、为什么亏、哪里无法执行。
