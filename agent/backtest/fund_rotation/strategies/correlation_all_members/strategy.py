@@ -239,14 +239,16 @@ class CorrelationAllMembersSession:
         coverage_reports = compute_cluster_coverage(
             weekly_returns=momentum_returns,
             cluster_members=cluster_members,
-            eligible_by_week={
-                week: set(all_cluster_members)
-                for week in momentum_returns.index
-            },
+            eligible_by_week=_coverage_eligible_by_week(
+                view,
+                dim_pool,
+                all_cluster_members,
+                momentum_returns.index,
+            ),
             policy=ClusterCoveragePolicy(
-                min_weekly_coverage=0.0,
-                max_low_coverage_weeks=len(momentum_returns),
-                minimum_valid_members=1,
+                min_weekly_coverage=self._config.min_weekly_coverage,
+                max_low_coverage_weeks=self._config.max_low_coverage_weeks,
+                minimum_valid_members=self._config.minimum_valid_members,
             ),
         )
         cycle_id = (
@@ -330,6 +332,40 @@ class CorrelationAllMembersSession:
                 ),
             )
         )
+
+
+def _coverage_eligible_by_week(
+    view,
+    dim_pool: pd.DataFrame,
+    codes: set[str],
+    weeks,
+) -> dict[object, set[str]]:
+    list_dates = {
+        str(row["ts_code"]): _week_key_to_yyyymmdd(row.get("list_date", ""))
+        for _, row in dim_pool.iterrows()
+    }
+    eligible_by_week: dict[object, set[str]] = {}
+    for week in weeks:
+        week_date = _week_key_to_yyyymmdd(week)
+        historically_eligible = [
+            code
+            for code in sorted(codes)
+            if list_dates.get(code, "") <= week_date
+        ]
+        kept, _excluded = signal_date_eligible(
+            view,
+            historically_eligible,
+            week_date,
+        )
+        eligible_by_week[week] = set(kept)
+        eligible_by_week[pd.Timestamp(week_date)] = set(kept)
+    return eligible_by_week
+
+
+def _week_key_to_yyyymmdd(week) -> str:
+    if isinstance(week, pd.Timestamp):
+        return week.strftime("%Y%m%d")
+    return pd.Timestamp(str(week)).strftime("%Y%m%d")
 
 
 class CorrelationAllMembersStrategy:

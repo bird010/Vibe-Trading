@@ -9,6 +9,7 @@ each have a single explicit meaning.
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from statistics import median
@@ -54,6 +55,7 @@ _SHARE_ADJUSTMENT_TYPES = {
     CorporateActionType.SHARE_MERGE,
     CorporateActionType.SHARE_CONVERSION,
 }
+_DEFAULT_BUY_LOT_SIZE = 100
 
 
 def _as_enum(enum_type: type[Enum], value: Any, field_name: str) -> Enum:
@@ -104,6 +106,7 @@ class ParentOrderRecord:
     completed_date: str = ""
     cancel_reason: str = ""
     reject_reason: str = ""
+    lot_size: int = _DEFAULT_BUY_LOT_SIZE
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -120,6 +123,8 @@ class ParentOrderRecord:
             raise ValueError("order_id is required")
         if not self.quantity_basis_id:
             raise ValueError("quantity_basis_id is required")
+        if self.lot_size < 1:
+            raise ValueError("lot_size must be positive")
         for field_name in (
             "original_requested_quantity",
             "cumulative_filled_quantity",
@@ -320,8 +325,11 @@ class ExecutionLedger:
                     raise ValueError(
                         "replacement quantity_basis_id must differ from old parent"
                     )
-                adjusted_residual = int(
-                    old_parent.remaining_quantity * action.adjustment_factor
+                adjusted_residual = _replacement_residual_quantity(
+                    old_parent.direction,
+                    old_parent.remaining_quantity,
+                    action.adjustment_factor,
+                    lot_size=parent.lot_size,
                 )
                 if parent.original_requested_quantity != adjusted_residual:
                     raise ValueError(
@@ -595,6 +603,430 @@ def compute_execution_diagnostics_v2(
         ),
         "corporate_actions": compute_corporate_action_diagnostics(ledger),
     }
+
+
+def build_execution_ledger_from_pipeline_result(result: Any) -> ExecutionLedger:
+    """Adapt legacy PipelineResult execution facts into the formal v2 ledger.
+
+    The legacy execution loop remains the source of fills/orders for now.  This
+    adapter is the narrow boundary that translates its serialized parent orders
+    and trade events into explicit v2 parent/attempt/trade/corporate-action
+    facts before diagnostics are computed.
+    """
+
+    trade_events = [
+        event
+        for event in getattr(result, "trade_events", [])
+        if str(event.get("event_type", "")) != "CORPORATE_ACTION"
+    ]
+    events_by_attempt_id = {
+        str(event.get("attempt_id", "")): event
+        for event in trade_events
+        if str(event.get("attempt_id", ""))
+    }
+    order_rows_by_id: dict[str, list[dict[str, Any]]] = {}
+    for row in getattr(result, "orders", []):
+        order_id = str(row.get("order_id", ""))
+        if order_id:
+            order_rows_by_id.setdefault(order_id, []).append(row)
+
+    parent_orders: list[ParentOrderRecord] = []
+    attempts: list[ExecutionAttemptRecord] = []
+    quantity_basis_by_order: dict[str, str] = {}
+    adapted_attempt_ids: dict[str, tuple[str, str]] = {}
+    residual_adjustment_factor_by_ca: dict[str, float] = {}
+    seen_parents: set[str] = set()
+    for order_id, order_rows in order_rows_by_id.items():
+        row = order_rows[0]
+        ts_code = str(row.get("ts_code", ""))
+        lot_size = _lot_size_from_row(row)
+        adjustments = _corporate_action_adjustments(row)
+        if adjustments:
+            before = dict(adjustments[0].get("before", {}) or {})
+            old_quantity_basis = before.get(
+                "quantity_basis",
+                row.get("attempt_quantity_basis", 1.0),
+            )
+            old_quantity_basis_id = _quantity_basis_id(ts_code, old_quantity_basis)
+            old_attempt_rows = [
+                attempt_row
+                for attempt_row in order_rows
+                if _quantity_basis_id(
+                    ts_code,
+                    attempt_row.get("attempt_quantity_basis", old_quantity_basis),
+                )
+                == old_quantity_basis_id
+                and str(attempt_row.get("attempt_status", "")) != "NOT_ATTEMPTED"
+            ]
+            old_filled = sum(
+                int(float(attempt_row.get("attempt_filled", 0) or 0))
+                for attempt_row in old_attempt_rows
+            )
+            old_requested = int(float(before.get("requested", row.get("requested", 0)) or 0))
+            old_remaining = int(float(before.get("remaining", max(old_requested - old_filled, 0)) or 0))
+            parent_orders.append(
+                ParentOrderRecord(
+                    order_id=order_id,
+                    decision_id=str(row.get("event_id", "")) or order_id,
+                    ts_code=ts_code,
+                    direction=str(row.get("direction", "")),
+                    created_date=_created_date_from_event_id(str(row.get("event_id", ""))),
+                    original_requested_quantity=old_requested,
+                    cumulative_filled_quantity=old_filled,
+                    remaining_quantity=old_remaining,
+                    quantity_basis_id=old_quantity_basis_id,
+                    status=ParentOrderStatus.CANCELED,
+                    completed_date=str(adjustments[0].get("trade_date", "")),
+                    cancel_reason="CORPORATE_ACTION_REPLACED",
+                )
+            )
+            seen_parents.add(order_id)
+            quantity_basis_by_order[order_id] = old_quantity_basis_id
+
+            for index, adjustment in enumerate(adjustments, 1):
+                after = dict(adjustment.get("after", {}) or {})
+                replacement_order_id = f"{order_id}-R{index}"
+                replacement_quantity_basis = after.get(
+                    "quantity_basis",
+                    row.get("current_quantity_basis", old_quantity_basis),
+                )
+                replacement_quantity_basis_id = _quantity_basis_id(
+                    ts_code,
+                    replacement_quantity_basis,
+                )
+                replacement_attempt_rows = [
+                    attempt_row
+                    for attempt_row in order_rows
+                    if _quantity_basis_id(
+                        ts_code,
+                        attempt_row.get("attempt_quantity_basis", replacement_quantity_basis),
+                    )
+                    == replacement_quantity_basis_id
+                    and str(attempt_row.get("attempt_status", "")) != "NOT_ATTEMPTED"
+                ]
+                replacement_filled = sum(
+                    int(float(attempt_row.get("attempt_filled", 0) or 0))
+                    for attempt_row in replacement_attempt_rows
+                )
+                scale = float(adjustment.get("scale", 1.0) or 1.0)
+                replacement_requested = max(
+                    _replacement_residual_quantity(
+                        str(row.get("direction", "")),
+                        old_remaining,
+                        scale,
+                        lot_size=lot_size,
+                    ),
+                    replacement_filled,
+                )
+                residual_adjustment_factor_by_ca[str(adjustment.get("corporate_action_id", ""))] = (
+                    replacement_requested / old_remaining if old_remaining > 0 else 1.0
+                )
+                parent_orders.append(
+                    ParentOrderRecord(
+                        order_id=replacement_order_id,
+                        decision_id=str(row.get("event_id", "")) or replacement_order_id,
+                        ts_code=ts_code,
+                        direction=str(row.get("direction", "")),
+                        created_date=str(adjustment.get("trade_date", "")),
+                        original_requested_quantity=replacement_requested,
+                        cumulative_filled_quantity=replacement_filled,
+                        remaining_quantity=max(replacement_requested - replacement_filled, 0),
+                        quantity_basis_id=replacement_quantity_basis_id,
+                        replacement_of_order_id=order_id,
+                        replacement_chain_id=order_id,
+                        corporate_action_id=str(adjustment.get("corporate_action_id", "")),
+                        lot_size=lot_size,
+                        status=_parent_status(row.get("final_status", "")),
+                    )
+                )
+                quantity_basis_by_order[replacement_order_id] = replacement_quantity_basis_id
+        else:
+            quantity_basis_id = _quantity_basis_id(
+                ts_code,
+                row.get("current_quantity_basis", row.get("attempt_quantity_basis", 1.0)),
+            )
+            quantity_basis_by_order[order_id] = quantity_basis_id
+            attempt_fill_sum = sum(
+                int(float(attempt_row.get("attempt_filled", 0) or 0))
+                for attempt_row in order_rows
+                if str(attempt_row.get("attempt_status", "")) != "NOT_ATTEMPTED"
+            )
+            remaining = int(float(row.get("remaining", 0) or 0))
+            requested = max(
+                int(float(row.get("requested", 0) or 0)),
+                attempt_fill_sum + max(remaining, 0),
+            )
+            filled = attempt_fill_sum
+            if order_id not in seen_parents:
+                parent_orders.append(
+                    ParentOrderRecord(
+                        order_id=order_id,
+                        decision_id=str(row.get("event_id", "")) or order_id,
+                        ts_code=ts_code,
+                        direction=str(row.get("direction", "")),
+                        created_date=_created_date_from_event_id(str(row.get("event_id", ""))),
+                        original_requested_quantity=requested,
+                        cumulative_filled_quantity=filled,
+                        remaining_quantity=max(requested - filled, 0),
+                        quantity_basis_id=quantity_basis_id,
+                        status=_parent_status(row.get("final_status", "")),
+                    )
+                )
+                seen_parents.add(order_id)
+
+        for row in order_rows:
+            attempt_status_raw = str(row.get("attempt_status", ""))
+            if attempt_status_raw == "NOT_ATTEMPTED":
+                continue
+            attempt_number = int(float(row.get("attempt_number", 0) or 0))
+            if attempt_number < 1:
+                continue
+            original_attempt_id = f"{order_id}-A{attempt_number}"
+            attempt_quantity_basis_id = _quantity_basis_id(
+                ts_code,
+                row.get("attempt_quantity_basis", row.get("current_quantity_basis", 1.0)),
+            )
+            adapted_order_id = _adapted_order_id_for_attempt(
+                order_id,
+                attempt_quantity_basis_id,
+                quantity_basis_by_order,
+            )
+            attempt_id = (
+                original_attempt_id
+                if adapted_order_id == order_id
+                else f"{adapted_order_id}-A{attempt_number}"
+            )
+            adapted_attempt_ids[original_attempt_id] = (adapted_order_id, attempt_id)
+            event = events_by_attempt_id.get(original_attempt_id, {})
+            attempt_requested = int(
+                float(event.get("requested", row.get("requested", 0)) or 0)
+            )
+            attempt_filled = int(float(row.get("attempt_filled", 0) or 0))
+            raw_price = float(event.get("raw_open", event.get("price", 0.0)) or 0.0)
+            executed_price = float(event.get("price", 0.0) or 0.0)
+            notional = abs(float(attempt_filled) * executed_price)
+            slippage_cost = (
+                notional * max(float(event.get("slippage_bps", 0.0) or 0.0), 0.0) / 10_000.0
+            )
+            attempts.append(
+                ExecutionAttemptRecord(
+                    attempt_id=attempt_id,
+                    order_id=adapted_order_id,
+                    attempt_number=attempt_number,
+                    trade_date=str(row.get("trade_date", "") or event.get("trade_date", "")),
+                    requested_quantity=attempt_requested,
+                    filled_quantity=attempt_filled,
+                    unfilled_quantity=max(attempt_requested - attempt_filled, 0),
+                    quantity_basis_id=attempt_quantity_basis_id,
+                    raw_price=raw_price,
+                    executed_price=executed_price,
+                    commission=float(event.get("commission", 0.0) or 0.0),
+                    explicit_fee=float(event.get("explicit_fee", 0.0) or 0.0),
+                    slippage_cost=slippage_cost,
+                    participation_rate=float(event.get("participation_rate", 0.0) or 0.0),
+                    status=_attempt_status(attempt_status_raw),
+                    reason_code=str(event.get("reason", row.get("reason", "")) or ""),
+                )
+            )
+
+    trades: list[ExecutedTradeRecord] = []
+    for index, event in enumerate(trade_events, 1):
+        filled = int(float(event.get("filled", 0) or 0))
+        if filled <= 0:
+            continue
+        order_id = str(event.get("order_id", ""))
+        attempt_id = str(event.get("attempt_id", ""))
+        adapted_order_id, adapted_attempt_id = adapted_attempt_ids.get(
+            attempt_id,
+            (order_id, attempt_id),
+        )
+        ts_code = str(event.get("ts_code", ""))
+        price = float(event.get("price", 0.0) or 0.0)
+        notional = abs(float(filled) * price)
+        trades.append(
+            ExecutedTradeRecord(
+                trade_id=f"{adapted_attempt_id or adapted_order_id}-T{index}",
+                attempt_id=adapted_attempt_id,
+                order_id=adapted_order_id,
+                ts_code=ts_code,
+                direction=str(event.get("action", "")),
+                quantity=filled,
+                quantity_basis_id=quantity_basis_by_order.get(
+                    adapted_order_id,
+                    _quantity_basis_id(ts_code, 1.0),
+                ),
+                price=price,
+                notional=notional,
+                commission=float(event.get("commission", 0.0) or 0.0),
+                explicit_fee=float(event.get("explicit_fee", 0.0) or 0.0),
+                slippage_cost=(
+                    notional
+                    * max(float(event.get("slippage_bps", 0.0) or 0.0), 0.0)
+                    / 10_000.0
+                ),
+                trade_date=str(event.get("trade_date", "")),
+            )
+        )
+
+    corporate_actions = [
+        _corporate_action_from_event(
+            event,
+            adjustment_factor_override=residual_adjustment_factor_by_ca.get(
+                str(event.get("corporate_action_id", ""))
+            ),
+        )
+        for event in getattr(result, "trade_events", [])
+        if str(event.get("event_type", "")) == "CORPORATE_ACTION"
+    ]
+
+    return ExecutionLedger(
+        parent_orders=tuple(parent_orders),
+        attempts=tuple(attempts),
+        trades=tuple(trades),
+        corporate_actions=tuple(corporate_actions),
+    )
+
+
+def compute_pipeline_execution_diagnostics_v2(
+    result: Any,
+    *,
+    initial_capital: float,
+) -> dict[str, Any]:
+    ledger = build_execution_ledger_from_pipeline_result(result)
+    equity = getattr(result, "executed_equity", None)
+    if equity is None or getattr(equity, "empty", True):
+        average_portfolio_nav = float(initial_capital)
+        evaluation_days = None
+    else:
+        average_portfolio_nav = float(equity.mean()) * float(initial_capital)
+        evaluation_days = int(len(equity))
+    return compute_execution_diagnostics_v2(
+        ledger,
+        average_portfolio_nav=average_portfolio_nav,
+        evaluation_days=evaluation_days,
+    )
+
+
+def _quantity_basis_id(ts_code: str, quantity_basis: object) -> str:
+    return f"{ts_code}:shares:{float(quantity_basis or 1.0):.12g}"
+
+
+def _replacement_residual_quantity(
+    direction: OrderDirection | str,
+    remaining_quantity: int,
+    adjustment_factor: float,
+    lot_size: int = _DEFAULT_BUY_LOT_SIZE,
+) -> int:
+    adjusted = int(float(remaining_quantity) * float(adjustment_factor))
+    if _as_enum(OrderDirection, direction, "order direction") is OrderDirection.BUY:
+        if lot_size < 1:
+            raise ValueError("lot_size must be positive")
+        return (adjusted // lot_size) * lot_size
+    return adjusted
+
+
+def _lot_size_from_row(row: dict[str, Any]) -> int:
+    raw_lot_size = row.get("lot_size", _DEFAULT_BUY_LOT_SIZE)
+    lot_size = int(raw_lot_size)
+    if lot_size < 1:
+        raise ValueError("order lot_size must be positive")
+    return lot_size
+
+
+def _created_date_from_event_id(event_id: str) -> str:
+    parts = event_id.split("-")
+    return parts[1] if len(parts) >= 3 and parts[0] == "SIG" else ""
+
+
+def _corporate_action_adjustments(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = row.get("corporate_action_adjustments", "")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [dict(item) for item in raw if isinstance(item, dict)]
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def _adapted_order_id_for_attempt(
+    original_order_id: str,
+    attempt_quantity_basis_id: str,
+    quantity_basis_by_order: dict[str, str],
+) -> str:
+    if quantity_basis_by_order.get(original_order_id) == attempt_quantity_basis_id:
+        return original_order_id
+    for order_id, quantity_basis_id in quantity_basis_by_order.items():
+        if (
+            order_id.startswith(f"{original_order_id}-R")
+            and quantity_basis_id == attempt_quantity_basis_id
+        ):
+            return order_id
+    return original_order_id
+
+
+def _parent_status(value: object) -> ParentOrderStatus:
+    status = str(value)
+    if status == "PENDING":
+        return ParentOrderStatus.OPEN
+    if status == "PARTIAL":
+        return ParentOrderStatus.PARTIALLY_FILLED
+    if status == "FILLED":
+        return ParentOrderStatus.FILLED
+    if status in {"CANCELLED", "CANCELED"}:
+        return ParentOrderStatus.CANCELED
+    if status == "REJECTED":
+        return ParentOrderStatus.REJECTED
+    if status == "EXPIRED":
+        return ParentOrderStatus.EXPIRED
+    return ParentOrderStatus.OPEN
+
+
+def _attempt_status(value: object) -> AttemptStatus:
+    status = str(value)
+    if status == "PARTIAL":
+        return AttemptStatus.PARTIALLY_FILLED
+    if status == "FILLED":
+        return AttemptStatus.FILLED
+    if status == "BLOCKED":
+        return AttemptStatus.BLOCKED
+    if status == "INVALID":
+        return AttemptStatus.INVALID
+    return AttemptStatus.PENDING
+
+
+def _corporate_action_from_event(
+    event: dict[str, Any],
+    *,
+    adjustment_factor_override: float | None = None,
+) -> CorporateActionRecord:
+    old_quantity = int(float(event.get("requested", 0) or 0))
+    new_quantity = int(float(event.get("filled", 0) or 0))
+    old_factor = float(event.get("old_adj_factor", 0.0) or 0.0)
+    new_factor = float(event.get("new_adj_factor", 0.0) or 0.0)
+    if adjustment_factor_override is not None:
+        adjustment_factor = adjustment_factor_override
+    elif old_factor > 0 and new_factor > 0:
+        adjustment_factor = new_factor / old_factor
+    elif old_quantity > 0 and new_quantity > 0:
+        adjustment_factor = new_quantity / old_quantity
+    else:
+        adjustment_factor = 1.0
+    return CorporateActionRecord(
+        corporate_action_id=str(event.get("corporate_action_id", "")),
+        ts_code=str(event.get("ts_code", "")),
+        action_type=CorporateActionType.SHARE_CONVERSION,
+        effective_date=str(event.get("trade_date", "")),
+        old_quantity=old_quantity,
+        new_quantity=new_quantity,
+        old_cost_basis=max(float(event.get("last_close_before", 0.0) or 0.0), 0.0),
+        new_cost_basis=max(float(event.get("last_close_after", 0.0) or 0.0), 0.0),
+        adjustment_factor=adjustment_factor,
+    )
 
 
 class UnknownExecutionRule(ValueError):

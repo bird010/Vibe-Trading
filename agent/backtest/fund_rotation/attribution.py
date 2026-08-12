@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from .accounting_contract import ACCOUNTING_CONTRACT_VERSION, DAILY_ACCOUNTING_EVENT_ORDER
 
-ACCOUNTING_CONTRACT_VERSION = "daily_accounting_v1"
 RECONCILIATION_FAILED = "ATTRIBUTION_RECONCILIATION_FAILED"
 OPEN_PRICE_DEGRADED = "DEGRADED_OPEN_PRICE_UNAVAILABLE"
 

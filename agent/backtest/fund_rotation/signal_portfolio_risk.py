@@ -94,14 +94,15 @@ class MomentumPolicy:
 
 @dataclass(frozen=True)
 class MomentumResult:
-    scores_by_family: dict[str, dict[Any, float]]
+    scores_by_family: dict[str, dict[Any, float | None]]
+    reason_codes_by_family: dict[str, dict[Any, tuple[str, ...]]] = field(default_factory=dict)
 
 
-def _compound_return(values: pd.Series) -> float:
+def _compound_return(values: pd.Series) -> float | None:
     finite = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
     finite = finite.dropna()
     if finite.empty:
-        return 0.0
+        return None
     return float(np.prod(1.0 + finite.to_numpy(dtype=float)) - 1.0)
 
 
@@ -120,34 +121,50 @@ def compute_momentum_families(
     cluster_returns: pd.DataFrame,
     policy: MomentumPolicy,
 ) -> MomentumResult:
-    scores_by_family: dict[str, dict[Any, float]] = {}
+    scores_by_family: dict[str, dict[Any, float | None]] = {}
+    reason_codes_by_family: dict[str, dict[Any, tuple[str, ...]]] = {}
     for family in policy.families:
-        scores: dict[Any, float] = {}
+        scores: dict[Any, float | None] = {}
+        reasons: dict[Any, tuple[str, ...]] = {}
         for cluster_id in cluster_returns.columns:
             series = cluster_returns[cluster_id]
             if family == "risk_adjusted":
                 window = series.iloc[-policy.single_window :]
                 momentum = _compound_return(window)
                 vol = float(pd.to_numeric(window, errors="coerce").std(ddof=0))
-                scores[cluster_id] = momentum / vol if math.isfinite(vol) and vol > 0 else 0.0
+                if momentum is not None and math.isfinite(vol) and vol > 0:
+                    scores[cluster_id] = momentum / vol
+                else:
+                    scores[cluster_id] = None
+                    reasons[cluster_id] = ("UNAVAILABLE_MOMENTUM",)
             else:
                 scores[cluster_id] = _compound_return(
                     _window_for_family(series, family, policy.single_window)
                 )
-            if not math.isfinite(scores[cluster_id]):
+                if scores[cluster_id] is None:
+                    reasons[cluster_id] = ("UNAVAILABLE_MOMENTUM",)
+            if scores[cluster_id] is not None and not math.isfinite(float(scores[cluster_id])):
                 scores[cluster_id] = 0.0
         scores_by_family[family] = scores
-    return MomentumResult(scores_by_family=scores_by_family)
+        reason_codes_by_family[family] = reasons
+    return MomentumResult(
+        scores_by_family=scores_by_family,
+        reason_codes_by_family=reason_codes_by_family,
+    )
 
 
-def aggregate_momentum_rank_average(scores_by_family: Mapping[str, Mapping[Any, float]]) -> dict[Any, float]:
+def aggregate_momentum_rank_average(scores_by_family: Mapping[str, Mapping[Any, float | None]]) -> dict[Any, float]:
     clusters = sorted({cluster_id for scores in scores_by_family.values() for cluster_id in scores})
     rank_sums = {cluster_id: 0.0 for cluster_id in clusters}
     rank_counts = {cluster_id: 0 for cluster_id in clusters}
 
     for scores in scores_by_family.values():
+        available = [
+            cluster_id for cluster_id in clusters
+            if _is_finite_number(scores.get(cluster_id))
+        ]
         ranked = sorted(
-            clusters,
+            available,
             key=lambda cluster_id: (
                 -_finite_or_worst(scores.get(cluster_id)),
                 str(cluster_id),
@@ -166,22 +183,46 @@ def aggregate_momentum_rank_average(scores_by_family: Mapping[str, Mapping[Any, 
 
 
 def aggregate_momentum_zscore_weighted(
-    scores_by_family: Mapping[str, Mapping[Any, float]],
+    scores_by_family: Mapping[str, Mapping[Any, float | None]],
     weights: Mapping[str, float],
 ) -> dict[Any, float]:
     total_weight = float(sum(weights.values()))
     if not math.isclose(total_weight, 1.0, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError("momentum family weights must sum to 1")
-    clusters = sorted({cluster_id for scores in scores_by_family.values() for cluster_id in scores})
+    weighted_families = [family for family, weight in weights.items() if float(weight) > 0.0]
+    all_clusters = sorted({cluster_id for scores in scores_by_family.values() for cluster_id in scores})
+    clusters = [
+        cluster_id
+        for cluster_id in all_clusters
+        if any(
+            _is_finite_number(scores_by_family.get(family, {}).get(cluster_id))
+            for family in weighted_families
+        )
+    ]
     weighted_scores = {cluster_id: 0.0 for cluster_id in clusters}
+    available_weight_by_cluster = {cluster_id: 0.0 for cluster_id in clusters}
 
     for family, weight in weights.items():
-        raw = np.array([_finite_or_zero(scores_by_family.get(family, {}).get(cluster_id)) for cluster_id in clusters])
+        family_clusters = [
+            cluster_id for cluster_id in clusters
+            if _is_finite_number(scores_by_family.get(family, {}).get(cluster_id))
+        ]
+        raw = np.array([
+            float(scores_by_family.get(family, {})[cluster_id])
+            for cluster_id in family_clusters
+        ])
         mean = float(np.mean(raw)) if len(raw) else 0.0
         std = float(np.std(raw)) if len(raw) else 0.0
         zscores = np.zeros_like(raw) if std == 0.0 or not math.isfinite(std) else (raw - mean) / std
-        for cluster_id, zscore in zip(clusters, zscores, strict=True):
+        for cluster_id, zscore in zip(family_clusters, zscores, strict=True):
             weighted_scores[cluster_id] += float(weight) * float(zscore)
+            available_weight_by_cluster[cluster_id] += float(weight)
+
+    weighted_scores = {
+        cluster_id: score / available_weight_by_cluster[cluster_id]
+        for cluster_id, score in weighted_scores.items()
+        if available_weight_by_cluster[cluster_id] > 0.0
+    }
 
     return dict(sorted(weighted_scores.items(), key=lambda item: (-item[1], str(item[0]))))
 
@@ -192,6 +233,13 @@ def _finite_or_zero(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _finite_or_worst(value: Any) -> float:
@@ -237,6 +285,7 @@ def apply_hysteresis(
     cycle_id: str,
     policy: SelectionPolicy,
     hard_failures: set[Any] | frozenset[Any] | None = None,
+    include_new_cycle_reason: bool = True,
 ) -> HysteresisResult:
     if policy.top_n <= 0:
         return HysteresisResult((), SelectionState(cycle_id, {}), {})
@@ -265,7 +314,11 @@ def apply_hysteresis(
             for cluster_id in selected
         }
         for cluster_id in selected:
-            reason_codes[cluster_id] = ("NEW_CLUSTERING_CYCLE", "ENTRY_TOP_N")
+            reason_codes[cluster_id] = (
+                ("NEW_CLUSTERING_CYCLE", "ENTRY_TOP_N")
+                if include_new_cycle_reason
+                else ("ENTRY_TOP_N",)
+            )
         return HysteresisResult(selected, SelectionState(cycle_id, next_holdings), reason_codes)
 
     retained: list[Any] = []
@@ -491,6 +544,7 @@ def build_portfolio_weights(
         return PortfolioResult(INVALID, {}, 1.0, 0.0, ("INVALID_MINIMUM_CASH_WEIGHT",))
 
     reason_codes: list[str] = []
+    slot_cash_reason = False
     if not policy.enabled:
         reason_codes.append("PORTFOLIO_WEIGHTING_DISABLED_EQUAL_WEIGHT")
         weights = _equal_weights(assets, investable)
@@ -498,18 +552,21 @@ def build_portfolio_weights(
         weights = _equal_weights(assets, investable)
     elif policy.method == "equal_weight_by_cluster_slot":
         weights = _equal_weights_by_cluster_slot(assets, investable, policy)
+        slot_cash_reason = sum(weights.values()) < investable - 1e-12
     elif policy.method == "inverse_volatility":
         weights = _inverse_volatility_weights(assets, investable, volatilities or {})
     else:
         return PortfolioResult(INVALID, {}, policy.minimum_cash_weight, 0.0, ("UNKNOWN_PORTFOLIO_METHOD",))
 
     one_way = _one_way_turnover(weights, previous_weights or {})
+    if slot_cash_reason:
+        reason_codes.append("VACANT_CLUSTER_SLOT_CASH")
     constraint_reasons = _portfolio_constraint_reasons(weights, assets, policy, one_way)
     status = INVALID if constraint_reasons else VALID
     return PortfolioResult(
         status=status,
         weights=weights,
-        cash_weight=policy.minimum_cash_weight,
+        cash_weight=float(max(policy.minimum_cash_weight, 1.0 - sum(weights.values()))),
         one_way_turnover=one_way,
         reason_codes=tuple(reason_codes + constraint_reasons),
     )
@@ -729,10 +786,15 @@ def run_decision_pipeline(
     raw_scores = dict(raw_signal_scores)
     records.append(StageRecord("raw_signal_scores", raw_scores, raw_scores, policy_versions["signal"], ()))
 
+    unavailable_momentum_reasons = tuple(
+        "UNAVAILABLE_MOMENTUM"
+        for score in raw_signal_scores.values()
+        if not _is_finite_number(score)
+    )
     filtered = {
         cluster_id: score
         for cluster_id, score in raw_signal_scores.items()
-        if coverage_available.get(cluster_id, False)
+        if coverage_available.get(cluster_id, False) and _is_finite_number(score)
     }
     coverage_reasons = tuple(
         INSUFFICIENT_CLUSTER_COVERAGE
@@ -745,7 +807,7 @@ def run_decision_pipeline(
             dict(raw_signal_scores),
             dict(filtered),
             policy_versions["coverage"],
-            coverage_reasons,
+            unavailable_momentum_reasons + coverage_reasons,
         )
     )
 
@@ -754,6 +816,7 @@ def run_decision_pipeline(
         state=selection_state,
         cycle_id=cycle_id,
         policy=selection_policy,
+        include_new_cycle_reason=(cycle_id != "pipeline-cycle"),
     )
     records.append(
         StageRecord(
@@ -837,7 +900,14 @@ def run_decision_pipeline(
     )
 
     status = INVALID if portfolio.status == INVALID else VALID
-    decision_reasons = tuple(dict.fromkeys(coverage_reasons + rep_reasons + portfolio.reason_codes))
+    decision_reasons = tuple(
+        dict.fromkeys(
+            unavailable_momentum_reasons
+            + coverage_reasons
+            + rep_reasons
+            + portfolio.reason_codes
+        )
+    )
     execution_output = {
         "status": status,
         "weights": risk.scaled_weights,

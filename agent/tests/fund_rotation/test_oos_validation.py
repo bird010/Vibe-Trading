@@ -122,8 +122,8 @@ def _formal_non_cluster_baseline(experiment) -> dict[str, object]:
         "universe_id": "cn_equity_etf",
         "execution_contract_version": "exec-v1",
         "execution_policy_hash": oos_validation.canonical_identity_hash("exec-v1"),
-        "accounting_contract_version": "accounting-v1",
-        "accounting_policy_hash": oos_validation.canonical_identity_hash("accounting-v1"),
+        "accounting_contract_version": "daily_accounting_v1",
+        "accounting_policy_hash": oos_validation.canonical_identity_hash("daily_accounting_v1"),
         "market_rule_policy_hash": oos_validation.canonical_identity_hash("market-rule-default-v1"),
         "evaluation_calendar_hash": oos_validation.canonical_identity_hash(tuple(experiment.split_policy.oos_weeks)),
         "benchmark_policy_hash": oos_validation.canonical_identity_hash(experiment.benchmark_policy),
@@ -227,6 +227,29 @@ def test_qualified_oos_evidence_requires_completed_non_cluster_baseline_contract
     assert label == "QUALIFIED_OOS_EVIDENCE"
 
 
+def test_oos_accounting_contract_defaults_match_daily_accounting_v1() -> None:
+    """Catches OOS defaulting to the legacy accounting-v1 contract while attribution uses daily accounting."""
+    variant = _variant("absolute-12m")
+    state = WalkForwardAccountState(
+        cash=1000.0,
+        positions={"510300.SH": 10.0},
+        cost_basis={"510300.SH": 4.5},
+        residual_orders=(),
+        corporate_action_state={"510300.SH": "none"},
+        last_valuation_date="w207",
+        last_nav=1.0,
+    )
+
+    assert variant.accounting_policy_hash == oos_validation.canonical_identity_hash("daily_accounting_v1")
+    assert state.accounting_contract_version == "daily_accounting_v1"
+
+
+def test_oos_qualification_policy_spec_is_canonical_name_with_legacy_alias() -> None:
+    """Catches the old QualificationPolicy class name leaking into policy identity/debug surfaces."""
+    assert oos_validation.QualificationPolicy is oos_validation.OOSQualificationPolicySpec
+    assert oos_validation.QualificationPolicy().__class__.__name__ == "OOSQualificationPolicySpec"
+
+
 def test_qualified_oos_evidence_accepts_canonical_baseline_contract_field_aliases() -> None:
     experiment = create_research_experiment(**_qualified_experiment_kwargs())
 
@@ -262,6 +285,23 @@ def test_qualified_oos_evidence_rejects_conflicting_baseline_contract_aliases() 
             qualification_policy=QualificationPolicy(require_non_cluster_baseline=True),
             non_cluster_baseline_results=(baseline,),
         )
+
+
+def test_qualified_oos_evidence_allows_baseline_own_strategy_framework_and_config_hashes() -> None:
+    """Catches formal baseline implementation hashes being mistaken for common OOS comparison contract fields."""
+    experiment = create_research_experiment(**_qualified_experiment_kwargs())
+    baseline = _formal_non_cluster_baseline(experiment)
+    baseline["strategy_implementation_hash"] = "baseline-strategy-v2"
+    baseline["framework_implementation_hash"] = "baseline-framework-v2"
+    baseline["resolved_config_hash"] = "baseline-config-v2"
+
+    label = oos_validation.require_qualified_oos_evidence(
+        experiment,
+        qualification_policy=QualificationPolicy(require_non_cluster_baseline=True),
+        non_cluster_baseline_results=(baseline,),
+    )
+
+    assert label == "QUALIFIED_OOS_EVIDENCE"
 
 
 @pytest.mark.parametrize(
@@ -329,9 +369,6 @@ def test_qualified_oos_evidence_rejects_baseline_missing_any_formal_contract_fie
         ("strategy_family", "unknown_alpha_baseline"),
         ("uses_clustering", True),
         ("oos_qualification_label", "RESEARCH_ONLY"),
-        ("strategy_implementation_hash", "strategy-v2"),
-        ("framework_implementation_hash", "framework-v2"),
-        ("resolved_config_hash", "different-config"),
         ("knowledge_cutoff", "2026-08-12T15:00:00"),
         ("universe_id", "different_universe"),
         ("execution_contract_version", "exec-v2"),

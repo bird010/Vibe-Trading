@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from backtest.fund_rotation.accounting_contract import ACCOUNTING_CONTRACT_VERSION
 from src.stockpred.fund_rotation.forward_validation import (
     EXPECTED_ARTIFACT_NAMES,
     ApprovalRecord,
@@ -18,11 +19,15 @@ from src.stockpred.fund_rotation.forward_validation import (
     QualificationEvidence,
     QualificationPolicy,
     ShadowAccountState,
+    ShadowDecision,
     ShadowDecisionService,
     ShadowDecisionStatus,
     ShadowDeployment,
     ShadowDeploymentStatus,
     ShadowExecutionService,
+    ShadowExecutionAttempt,
+    ShadowFill,
+    ShadowOrder,
     StrategyVersionLifecycle,
     assess_decision_eligibility,
     build_frozen_strategy_version,
@@ -48,7 +53,7 @@ def frozen_version(**overrides) -> FrozenStrategyVersion:
         config_payload={"lookback": 20, "top_n": 2},
         data_contract_version="pit-data/v1",
         execution_contract_version="shadow-execution/v1",
-        accounting_contract_version="daily-accounting-order/v1",
+        accounting_contract_version=ACCOUNTING_CONTRACT_VERSION,
         qualification_policy_hash="policy-sha",
         frozen_at=at("2026-01-01T00:00:00"),
         effective_from=at("2026-01-05T00:00:00"),
@@ -60,7 +65,7 @@ def frozen_version(**overrides) -> FrozenStrategyVersion:
 def valid_policy() -> QualificationPolicy:
     return QualificationPolicy(
         policy_id="policy-1",
-        policy_hash="policy-sha",
+        policy_hash="",
         target_transition="CAN_GRANT_DECISION_ELIGIBILITY",
         hard_gates=(
             GateSpec(
@@ -99,6 +104,145 @@ def valid_evidence() -> QualificationEvidence:
         artifact_hashes=("metrics-hash", "decisions-hash"),
         quality_status="SEALED",
         generated_at=at("2026-07-01T00:00:00"),
+    )
+
+
+class DeterministicExecutionAdapter:
+    def execute(
+        self,
+        *,
+        decision: ShadowDecision,
+        orders: tuple[ShadowOrder, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]:
+        prices = dict(market_data.prices)
+        attempts = tuple(
+            ShadowExecutionAttempt(
+                attempt_id=f"test-attempt:{decision.shadow_decision_id}:{order.symbol}",
+                shadow_decision_id=decision.shadow_decision_id,
+                symbol=order.symbol,
+                target_weight=order.target_weight,
+                execution_as_of_time=execution_as_of_time,
+            )
+            for order in orders
+        )
+        fills = tuple(
+            ShadowFill(
+                fill_id=f"test-fill:{attempt.attempt_id}",
+                attempt_id=attempt.attempt_id,
+                symbol=attempt.symbol,
+                quantity=round((market_data.executable_nav * attempt.target_weight) / prices[attempt.symbol], 6),
+                price=prices[attempt.symbol],
+                explicit_cost=0.25,
+            )
+            for attempt in attempts
+        )
+        return attempts, fills
+
+
+class DeterministicAccountingAdapter:
+    def apply(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowAccountState:
+        return ShadowAccountState(
+            strategy_version_id=decision.strategy_version_id,
+            as_of_time=execution_as_of_time,
+            cash=0.0,
+            positions=tuple((fill.symbol, fill.quantity) for fill in fills),
+            target_weights=decision.new_targets,
+            residual_orders=previous_state.residual_orders,
+            shadow_ideal_nav=market_data.ideal_nav,
+            shadow_executable_nav=market_data.executable_nav,
+            accounting_contract_version=decision.accounting_contract_version,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+        )
+
+
+class WrongDecisionExecutionAdapter(DeterministicExecutionAdapter):
+    def execute(
+        self,
+        *,
+        decision: ShadowDecision,
+        orders: tuple[ShadowOrder, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]:
+        attempts, fills = super().execute(
+            decision=decision,
+            orders=orders,
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+        )
+        bad_attempt = ShadowExecutionAttempt(
+            attempt_id=attempts[0].attempt_id,
+            shadow_decision_id="other-decision",
+            symbol=attempts[0].symbol,
+            target_weight=attempts[0].target_weight,
+            execution_as_of_time=attempts[0].execution_as_of_time,
+        )
+        return (bad_attempt, *attempts[1:]), fills
+
+
+class LegacyContractAccountingAdapter(DeterministicAccountingAdapter):
+    def apply(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowAccountState:
+        return ShadowAccountState(
+            strategy_version_id=decision.strategy_version_id,
+            as_of_time=execution_as_of_time,
+            cash=0.0,
+            positions=tuple((fill.symbol, fill.quantity) for fill in fills),
+            target_weights=decision.new_targets,
+            residual_orders=previous_state.residual_orders,
+            shadow_ideal_nav=market_data.ideal_nav,
+            shadow_executable_nav=market_data.executable_nav,
+            accounting_contract_version="daily-accounting-order/v1",
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+        )
+
+
+class NonContinuousAccountingAdapter(DeterministicAccountingAdapter):
+    def apply(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowAccountState:
+        return ShadowAccountState(
+            strategy_version_id=decision.strategy_version_id,
+            as_of_time=execution_as_of_time,
+            cash=0.0,
+            positions=tuple((fill.symbol, fill.quantity) for fill in fills),
+            target_weights=decision.new_targets,
+            residual_orders=previous_state.residual_orders,
+            shadow_ideal_nav=market_data.ideal_nav,
+            shadow_executable_nav=market_data.executable_nav,
+            accounting_contract_version=decision.accounting_contract_version,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles,
+        )
+
+
+def configured_execution_service(store: InMemoryForwardValidationStore) -> ShadowExecutionService:
+    return ShadowExecutionService(
+        store,
+        execution_adapter=DeterministicExecutionAdapter(),
+        accounting_adapter=DeterministicAccountingAdapter(),
     )
 
 
@@ -156,12 +300,20 @@ def test_frozen_strategy_version_is_immutable_and_hashes_contracts() -> None:
     assert version.lifecycle == StrategyVersionLifecycle.FROZEN
     assert version.data_contract_version == "pit-data/v1"
     assert version.execution_contract_version == "shadow-execution/v1"
-    assert version.accounting_contract_version == "daily-accounting-order/v1"
+    assert version.accounting_contract_version == ACCOUNTING_CONTRACT_VERSION
     assert version.config_hash != changed_config.config_hash
     assert version.strategy_version_id != changed_config.strategy_version_id
 
     with pytest.raises(FrozenInstanceError):
         version.config_hash = "tampered"
+
+
+def test_forward_validation_rejects_accounting_contract_versions_outside_shared_daily_contract() -> None:
+    with pytest.raises(ValueError, match="accounting contract"):
+        frozen_version(accounting_contract_version="daily-accounting-order/v1")
+
+    with pytest.raises(ValueError, match="accounting contract"):
+        frozen_version(accounting_contract_version="arbitrary-contract")
 
 
 def test_lifecycle_enums_are_separate_state_machines() -> None:
@@ -204,12 +356,13 @@ def test_qualification_objects_are_immutable_and_policy_requires_gate_contract()
 
     with pytest.raises(FrozenInstanceError):
         policy.policy_hash = "changed"
+    assert policy.policy_hash
     assert assessment.evidence_ids == ("evidence-1",)
 
     with pytest.raises(ValueError, match="missing gate contract"):
         QualificationPolicy(
             policy_id="bad",
-            policy_hash="bad-hash",
+            policy_hash="",
             target_transition="CAN_START_SHADOW",
             hard_gates=(
                 GateSpec(
@@ -225,6 +378,31 @@ def test_qualification_objects_are_immutable_and_policy_requires_gate_contract()
             ),
             warning_gates=(),
             frozen_at=at("2025-12-31T00:00:00"),
+        )
+
+
+def test_qualification_policy_rejects_reused_hash_for_different_gate_semantics() -> None:
+    policy = valid_policy()
+
+    with pytest.raises(ValueError, match="policy hash"):
+        QualificationPolicy(
+            policy_id="policy-1",
+            policy_hash=policy.policy_hash,
+            target_transition="CAN_GRANT_DECISION_ELIGIBILITY",
+            hard_gates=(
+                GateSpec(
+                    gate_id="min-observation",
+                    metric_name="forward_observation_weeks",
+                    formula="calendar_weeks(first_shadow_decision, assessment_time)",
+                    evaluation_scope="shadow_deployment",
+                    threshold=52,
+                    comparison_operator=">=",
+                    missing_data_policy="FAIL_CLOSED",
+                    evidence_artifact="shadow_metrics.json",
+                ),
+            ),
+            warning_gates=policy.warning_gates,
+            frozen_at=policy.frozen_at,
         )
 
 
@@ -323,6 +501,40 @@ def test_decision_service_is_idempotent_and_corrections_append_only() -> None:
     assert store.decisions[0].new_targets == (("ETF_A", 0.6), ("ETF_B", 0.4))
 
 
+def test_decision_idempotency_key_ignores_scheduler_invocation_time_and_late_cutoff_is_revision() -> None:
+    store, version = seeded_store()
+    schedule_ready_signal(store, version)
+    service = ShadowDecisionService(store)
+
+    sealed = service.seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    )
+    store.add_market_data(
+        MarketDataForExecution(
+            execution_date="2026-01-06",
+            available_at=at("2026-01-06T09:31:00"),
+            prices=(("ETF_A", 10.0), ("ETF_B", 20.0)),
+            ideal_nav=1_020.0,
+            executable_nav=1_015.0,
+        )
+    )
+
+    late_cutoff = service.seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-06T09:45:00"),
+    )
+
+    assert late_cutoff.decision is sealed.decision
+    assert sealed.decision.status == ShadowDecisionStatus.SEALED
+    assert sealed.decision.decision_idempotency_key == f"decision:{version.strategy_version_id}:2026-01-05"
+    assert len(store.decisions) == 1
+    assert len(store.orders) == 2
+    assert len(store.corrections) == 1
+    assert store.corrections[0].shadow_decision_id == sealed.decision.shadow_decision_id
+    assert store.corrections[0].correction_type == "CUTOFF_REVISION"
+
+
 def test_execution_waits_for_market_data_then_uses_separate_idempotency_and_dual_nav() -> None:
     store, version = seeded_store()
     schedule_ready_signal(store, version)
@@ -330,7 +542,7 @@ def test_execution_waits_for_market_data_then_uses_separate_idempotency_and_dual
         version.strategy_version_id,
         as_of_time=at("2026-01-05T09:30:00"),
     ).decision
-    service = ShadowExecutionService(store)
+    service = configured_execution_service(store)
 
     before_data = service.execute_due_orders(
         decision.shadow_decision_id,
@@ -366,10 +578,43 @@ def test_execution_waits_for_market_data_then_uses_separate_idempotency_and_dual
     assert executed.execution_idempotency_key.startswith("execution:")
     assert executed.execution_idempotency_key != decision.decision_idempotency_key
     assert len(executed.attempts) == 2
+    assert all(fill.explicit_cost > 0 for fill in executed.fills)
     assert executed.account_state.shadow_ideal_nav == 1_020.0
     assert executed.account_state.shadow_executable_nav == 1_015.0
     assert executed.account_state.completed_rebalance_cycles == 1
     assert executed.data_delay_seconds == 60
+
+
+def test_missing_execution_adapters_return_not_configured_without_fabricated_fills() -> None:
+    store, version = seeded_store()
+    schedule_ready_signal(store, version)
+    decision = ShadowDecisionService(store).seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    ).decision
+    store.add_market_data(
+        MarketDataForExecution(
+            execution_date="2026-01-06",
+            available_at=at("2026-01-06T09:31:00"),
+            prices=(("ETF_A", 10.0), ("ETF_B", 20.0)),
+            ideal_nav=1_020.0,
+            executable_nav=1_015.0,
+        )
+    )
+
+    result = ShadowExecutionService(store).execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert result.status == "NOT_CONFIGURED"
+    assert result.reason_codes == ("EXECUTION_ADAPTER_NOT_CONFIGURED", "ACCOUNTING_ADAPTER_NOT_CONFIGURED")
+    assert result.attempts == ()
+    assert result.fills == ()
+    assert result.account_state is None
+    assert store.execution_results == {}
+    assert store.execution_attempts == []
+    assert store.fills == []
 
 
 @pytest.mark.parametrize(
@@ -433,7 +678,7 @@ def test_shadow_account_state_is_continuous_across_decision_cycles() -> None:
             executable_nav=1_015.0,
         )
     )
-    first_execution = ShadowExecutionService(store).execute_due_orders(
+    first_execution = configured_execution_service(store).execute_due_orders(
         first_decision.shadow_decision_id,
         execution_as_of_time=at("2026-01-06T09:31:00"),
     )
@@ -457,7 +702,124 @@ def test_shadow_account_state_is_continuous_across_decision_cycles() -> None:
     assert first_execution.account_state.positions == (("ETF_A", 60.9), ("ETF_B", 20.3))
     assert second_decision.previous_targets == (("ETF_A", 0.6), ("ETF_B", 0.4))
     assert second_decision.previous_cash == 0.0
-    assert second_decision.accounting_contract_version == "daily-accounting-order/v1"
+    assert second_decision.accounting_contract_version == ACCOUNTING_CONTRACT_VERSION
+
+
+def execution_ready_store() -> tuple[InMemoryForwardValidationStore, FrozenStrategyVersion, ShadowDecision]:
+    store, version = seeded_store()
+    schedule_ready_signal(store, version)
+    decision = ShadowDecisionService(store).seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    ).decision
+    store.add_market_data(
+        MarketDataForExecution(
+            execution_date="2026-01-06",
+            available_at=at("2026-01-06T09:31:00"),
+            prices=(("ETF_A", 10.0), ("ETF_B", 20.0)),
+            ideal_nav=1_020.0,
+            executable_nav=1_015.0,
+        )
+    )
+    return store, version, decision
+
+
+def assert_contract_violation_does_not_persist(
+    store: InMemoryForwardValidationStore,
+    version: FrozenStrategyVersion,
+    result,
+    previous_account_state: ShadowAccountState,
+) -> None:
+    assert result.status == "CONTRACT_VIOLATION"
+    assert result.account_state is None
+    assert store.execution_results == {}
+    assert store.execution_attempts == []
+    assert store.fills == []
+    assert store.account_states[version.strategy_version_id] is previous_account_state
+
+
+def test_execution_adapter_output_wrong_decision_ownership_fails_closed_without_executed_persistence() -> None:
+    store, version, decision = execution_ready_store()
+    previous_account_state = store.account_states[version.strategy_version_id]
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=WrongDecisionExecutionAdapter(),
+        accounting_adapter=DeterministicAccountingAdapter(),
+    )
+
+    result = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert "ATTEMPT_DECISION_MISMATCH" in result.reason_codes
+    assert_contract_violation_does_not_persist(store, version, result, previous_account_state)
+
+
+def test_execution_adapter_output_legacy_accounting_contract_fails_closed_without_executed_persistence() -> None:
+    store, version, decision = execution_ready_store()
+    previous_account_state = store.account_states[version.strategy_version_id]
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=DeterministicExecutionAdapter(),
+        accounting_adapter=LegacyContractAccountingAdapter(),
+    )
+
+    result = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert "ACCOUNTING_CONTRACT_MISMATCH" in result.reason_codes
+    assert_contract_violation_does_not_persist(store, version, result, previous_account_state)
+
+
+def test_execution_adapter_output_non_continuous_account_state_fails_closed_without_executed_persistence() -> None:
+    store, version, decision = execution_ready_store()
+    previous_account_state = store.account_states[version.strategy_version_id]
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=DeterministicExecutionAdapter(),
+        accounting_adapter=NonContinuousAccountingAdapter(),
+    )
+
+    result = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert "ACCOUNT_CYCLE_NOT_CONTINUOUS" in result.reason_codes
+    assert_contract_violation_does_not_persist(store, version, result, previous_account_state)
+
+
+def test_execution_rejects_starting_account_state_that_no_longer_matches_sealed_decision() -> None:
+    store, version, decision = execution_ready_store()
+    previous_account_state = store.account_states[version.strategy_version_id]
+    store.set_account_state(
+        version.strategy_version_id,
+        ShadowAccountState(
+            strategy_version_id=version.strategy_version_id,
+            as_of_time=at("2026-01-05T10:00:00"),
+            cash=900.0,
+            positions=(),
+            target_weights=(("OLD", 1.0),),
+            residual_orders=(("OLD", 10.0),),
+            shadow_ideal_nav=900.0,
+            shadow_executable_nav=900.0,
+            accounting_contract_version=ACCOUNTING_CONTRACT_VERSION,
+            completed_rebalance_cycles=0,
+        ),
+    )
+    drifted_account_state = store.account_states[version.strategy_version_id]
+
+    result = configured_execution_service(store).execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert previous_account_state is not drifted_account_state
+    assert "STARTING_ACCOUNT_STATE_MISMATCH" in result.reason_codes
+    assert_contract_violation_does_not_persist(store, version, result, drifted_account_state)
 
 
 def test_decision_eligibility_requires_minimum_observation_cycles_and_manual_approval() -> None:
@@ -512,7 +874,80 @@ def test_decision_eligibility_requires_minimum_observation_cycles_and_manual_app
     assert mature_without_approval.failed_hard_gates == ("manual-approval",)
     assert approved.decision == DecisionQualification.ELIGIBLE
     assert approved.failed_hard_gates == ()
-    assert approved.warnings == ("REGIME_COVERAGE_INSUFFICIENT",)
+    assert approved.warnings == ("regime-coverage",)
+
+
+def test_policy_gate_specs_are_evaluated_from_evidence_metrics() -> None:
+    policy = QualificationPolicy(
+        policy_id="policy-metrics",
+        policy_hash="",
+        target_transition="CAN_GRANT_DECISION_ELIGIBILITY",
+        hard_gates=(
+            GateSpec(
+                gate_id="max-execution-cost",
+                metric_name="execution_cost_ratio",
+                formula="sum(explicit_cost) / executable_nav",
+                evaluation_scope="shadow_deployment",
+                threshold=0.05,
+                comparison_operator="<=",
+                missing_data_policy="FAIL_CLOSED",
+                evidence_artifact="shadow_metrics.json",
+            ),
+        ),
+        warning_gates=(
+            GateSpec(
+                gate_id="ideal-execution-gap",
+                metric_name="ideal_execution_gap",
+                formula="abs(ideal_nav - executable_nav) / ideal_nav",
+                evaluation_scope="shadow_deployment",
+                threshold=0.02,
+                comparison_operator="<=",
+                missing_data_policy="WARN",
+                evidence_artifact="shadow_metrics.json",
+            ),
+        ),
+        frozen_at=at("2025-12-31T00:00:00"),
+    )
+    evidence = QualificationEvidence(
+        evidence_id="evidence-metrics",
+        evidence_type="SHADOW_FORWARD_METRICS",
+        subject_id="sv-1",
+        artifact_ids=("shadow_metrics.json",),
+        artifact_hashes=("metrics-hash",),
+        quality_status="SEALED",
+        generated_at=at("2026-07-01T00:00:00"),
+        metrics={
+            "execution_cost_ratio": 0.08,
+            "ideal_execution_gap": 0.03,
+        },
+    )
+    approval = ApprovalRecord(
+        approval_id="approval-1",
+        strategy_version_id="sv-1",
+        approver="risk-owner",
+        approved_at=at("2026-07-09T00:00:00"),
+        policy_hash=policy.policy_hash,
+        assessment_id="pre-approval-assessment",
+        evidence_version="evidence-v1",
+        known_limitations=(),
+        allowed_use="research-and-investment-reference",
+    )
+
+    assessment = assess_decision_eligibility(
+        strategy_version_id="sv-1",
+        policy=policy,
+        evidence=(evidence,),
+        forward_observation_weeks=52,
+        completed_rebalance_cycles=12,
+        regime_coverage_sufficient=True,
+        approval=approval,
+        evaluated_at=at("2026-07-10T00:00:00"),
+    )
+
+    assert assessment.decision == DecisionQualification.INELIGIBLE
+    assert assessment.failed_hard_gates == ("max-execution-cost",)
+    assert assessment.warnings == ("ideal-execution-gap",)
+    assert assessment.reason_codes == ("GATE_FAILED:max-execution-cost", "GATE_WARNING:ideal-execution-gap")
 
 
 def test_drift_suspends_deployment_without_invalidating_frozen_version() -> None:

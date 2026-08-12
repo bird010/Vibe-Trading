@@ -13,7 +13,9 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
+
+from backtest.fund_rotation.accounting_contract import ACCOUNTING_CONTRACT_VERSION
 
 
 class StrategyVersionLifecycle(str, Enum):
@@ -100,6 +102,11 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}-{_sha256(parts)[:16]}"
 
 
+def _require_daily_accounting_contract(accounting_contract_version: str) -> None:
+    if accounting_contract_version != ACCOUNTING_CONTRACT_VERSION:
+        raise ValueError(f"accounting contract must be {ACCOUNTING_CONTRACT_VERSION}")
+
+
 @dataclass(frozen=True)
 class FrozenStrategyVersion:
     strategy_version_id: str
@@ -115,6 +122,9 @@ class FrozenStrategyVersion:
     frozen_at: datetime
     effective_from: datetime
     lifecycle: StrategyVersionLifecycle = StrategyVersionLifecycle.FROZEN
+
+    def __post_init__(self) -> None:
+        _require_daily_accounting_contract(self.accounting_contract_version)
 
 
 def build_frozen_strategy_version(
@@ -188,6 +198,36 @@ class GateSpec:
             raise ValueError("missing gate contract")
 
 
+def _gate_semantics(gate: GateSpec) -> dict[str, Any]:
+    return {
+        "gate_id": gate.gate_id,
+        "metric_name": gate.metric_name,
+        "formula": gate.formula,
+        "evaluation_scope": gate.evaluation_scope,
+        "threshold": gate.threshold,
+        "comparison_operator": gate.comparison_operator,
+        "missing_data_policy": gate.missing_data_policy,
+        "evidence_artifact": gate.evidence_artifact,
+    }
+
+
+def _policy_hash(
+    *,
+    policy_id: str,
+    target_transition: str,
+    hard_gates: tuple[GateSpec, ...],
+    warning_gates: tuple[GateSpec, ...],
+) -> str:
+    return _sha256(
+        {
+            "policy_id": policy_id,
+            "target_transition": target_transition,
+            "hard_gates": [_gate_semantics(gate) for gate in hard_gates],
+            "warning_gates": [_gate_semantics(gate) for gate in warning_gates],
+        }
+    )
+
+
 @dataclass(frozen=True)
 class QualificationEvidence:
     evidence_id: str
@@ -197,6 +237,7 @@ class QualificationEvidence:
     artifact_hashes: tuple[str, ...]
     quality_status: str
     generated_at: datetime
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -207,6 +248,18 @@ class QualificationPolicy:
     hard_gates: tuple[GateSpec, ...]
     warning_gates: tuple[GateSpec, ...]
     frozen_at: datetime
+
+    def __post_init__(self) -> None:
+        canonical_hash = _policy_hash(
+            policy_id=self.policy_id,
+            target_transition=self.target_transition,
+            hard_gates=self.hard_gates,
+            warning_gates=self.warning_gates,
+        )
+        if not self.policy_hash:
+            object.__setattr__(self, "policy_hash", canonical_hash)
+        elif self.policy_hash != canonical_hash:
+            raise ValueError("policy hash does not match canonical policy semantics")
 
 
 @dataclass(frozen=True)
@@ -348,6 +401,7 @@ class ShadowExecutionResult:
     fills: tuple[ShadowFill, ...]
     account_state: ShadowAccountState | None
     data_delay_seconds: int = 0
+    reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -457,21 +511,84 @@ class InMemoryForwardValidationStore:
         return correction
 
 
+class FrozenStrategyDecisionProvider(Protocol):
+    def next_signal(
+        self,
+        *,
+        store: InMemoryForwardValidationStore,
+        strategy_version_id: str,
+        as_of_time: datetime,
+    ) -> ScheduledSignal | None:
+        """Return the frozen strategy signal due at the scheduler cutoff."""
+
+
+class StoreScheduledSignalProvider:
+    def next_signal(
+        self,
+        *,
+        store: InMemoryForwardValidationStore,
+        strategy_version_id: str,
+        as_of_time: datetime,
+    ) -> ScheduledSignal | None:
+        return store.next_signal(strategy_version_id, as_of_time)
+
+
+class ShadowTargetValidator(Protocol):
+    def validate(self, signal: ScheduledSignal) -> tuple[bool, tuple[str, ...]]:
+        """Validate frozen strategy targets before a shadow decision is sealed."""
+
+
+class DefaultShadowTargetValidator:
+    def validate(self, signal: ScheduledSignal) -> tuple[bool, tuple[str, ...]]:
+        if not signal.target_weights:
+            return False, ("TARGETS_EMPTY",)
+        if any(weight < 0 for _, weight in signal.target_weights):
+            return False, ("TARGET_WEIGHT_NEGATIVE",)
+        total_weight = sum(weight for _, weight in signal.target_weights)
+        if abs(total_weight - 1.0) > 1e-9:
+            return False, ("TARGET_WEIGHTS_NOT_NORMALIZED",)
+        return True, ()
+
+
 class ShadowDecisionService:
-    def __init__(self, store: InMemoryForwardValidationStore) -> None:
+    def __init__(
+        self,
+        store: InMemoryForwardValidationStore,
+        *,
+        decision_provider: FrozenStrategyDecisionProvider | None = None,
+        target_validator: ShadowTargetValidator | None = None,
+    ) -> None:
         self.store = store
+        self.decision_provider = decision_provider or StoreScheduledSignalProvider()
+        self.target_validator = target_validator or DefaultShadowTargetValidator()
 
     def seal_scheduled_decision(
         self,
         strategy_version_id: str,
         as_of_time: datetime,
     ) -> ShadowDecisionResult:
-        signal = self.store.next_signal(strategy_version_id, as_of_time)
+        signal = self.decision_provider.next_signal(
+            store=self.store,
+            strategy_version_id=strategy_version_id,
+            as_of_time=as_of_time,
+        )
         if signal is None:
             raise ValueError(f"no scheduled signal due for {strategy_version_id} at {as_of_time.isoformat()}")
-        key = f"decision:{strategy_version_id}:{signal.signal_date}:{as_of_time.isoformat()}"
+        key = f"decision:{strategy_version_id}:{signal.signal_date}"
         existing = next((decision for decision in self.store.decisions if decision.decision_idempotency_key == key), None)
         if existing is not None:
+            if existing.as_of_time != as_of_time and not any(
+                correction.shadow_decision_id == existing.shadow_decision_id
+                and correction.correction_type == "CUTOFF_REVISION"
+                and correction.corrected_at == as_of_time
+                for correction in self.store.corrections
+            ):
+                self.store.append_decision_correction(
+                    shadow_decision_id=existing.shadow_decision_id,
+                    correction_type="CUTOFF_REVISION",
+                    reason=f"ignored scheduler cutoff {as_of_time.isoformat()} for stable key {key}",
+                    corrected_at=as_of_time,
+                )
             existing_orders = tuple(order for order in self.store.orders if order.shadow_decision_id == existing.shadow_decision_id)
             return ShadowDecisionResult(decision=existing, orders=existing_orders)
 
@@ -480,10 +597,14 @@ class ShadowDecisionService:
         signal_ready = signal.data_available_at <= as_of_time
         execution_market_data = self.store.market_data.get(signal.expected_execution_date)
         execution_price_visible = execution_market_data is not None and execution_market_data.available_at <= as_of_time
-        can_seal = signal_ready and not execution_price_visible
+        targets_valid, target_reason_codes = self.target_validator.validate(signal) if signal_ready else (True, ())
+        can_seal = signal_ready and not execution_price_visible and targets_valid
         if execution_price_visible:
             status = ShadowDecisionStatus.INVALID
             reason_codes = ("EXECUTION_PRICE_ALREADY_VISIBLE",)
+        elif signal_ready and not targets_valid:
+            status = ShadowDecisionStatus.INVALID
+            reason_codes = target_reason_codes
         elif signal_ready:
             status = ShadowDecisionStatus.SEALED
             reason_codes = ("SEALED",)
@@ -530,9 +651,42 @@ class ShadowDecisionService:
         return ShadowDecisionResult(decision=decision, orders=orders)
 
 
+class ShadowExecutionAdapter(Protocol):
+    def execute(
+        self,
+        *,
+        decision: ShadowDecision,
+        orders: tuple[ShadowOrder, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]:
+        """Turn sealed shadow orders into execution attempts and fills."""
+
+
+class ShadowAccountingAdapter(Protocol):
+    def apply(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowAccountState:
+        """Apply fills to the shadow account ledger."""
+
+
 class ShadowExecutionService:
-    def __init__(self, store: InMemoryForwardValidationStore) -> None:
+    def __init__(
+        self,
+        store: InMemoryForwardValidationStore,
+        *,
+        execution_adapter: ShadowExecutionAdapter | None = None,
+        accounting_adapter: ShadowAccountingAdapter | None = None,
+    ) -> None:
         self.store = store
+        self.execution_adapter = execution_adapter
+        self.accounting_adapter = accounting_adapter
 
     def execute_due_orders(
         self,
@@ -564,42 +718,67 @@ class ShadowExecutionService:
                 account_state=None,
             )
 
-        orders = tuple(order for order in self.store.orders if order.shadow_decision_id == shadow_decision_id)
-        attempts = tuple(
-            ShadowExecutionAttempt(
-                attempt_id=_stable_id("attempt", key, order.symbol),
+        missing_adapters = []
+        if self.execution_adapter is None:
+            missing_adapters.append("EXECUTION_ADAPTER_NOT_CONFIGURED")
+        if self.accounting_adapter is None:
+            missing_adapters.append("ACCOUNTING_ADAPTER_NOT_CONFIGURED")
+        if missing_adapters:
+            return ShadowExecutionResult(
                 shadow_decision_id=shadow_decision_id,
-                symbol=order.symbol,
-                target_weight=order.target_weight,
-                execution_as_of_time=execution_as_of_time,
+                status="NOT_CONFIGURED",
+                execution_idempotency_key=key,
+                attempts=(),
+                fills=(),
+                account_state=None,
+                data_delay_seconds=market_data.data_delay_seconds,
+                reason_codes=tuple(missing_adapters),
             )
-            for order in orders
-        )
-        prices = dict(market_data.prices)
-        fills = tuple(
-            ShadowFill(
-                fill_id=_stable_id("fill", attempt.attempt_id),
-                attempt_id=attempt.attempt_id,
-                symbol=attempt.symbol,
-                quantity=round((market_data.executable_nav * attempt.target_weight) / prices[attempt.symbol], 6),
-                price=prices[attempt.symbol],
-                explicit_cost=0.0,
-            )
-            for attempt in attempts
-        )
+
+        orders = tuple(order for order in self.store.orders if order.shadow_decision_id == shadow_decision_id)
         previous_state = self.store.account_states[decision.strategy_version_id]
-        account_state = ShadowAccountState(
-            strategy_version_id=decision.strategy_version_id,
-            as_of_time=execution_as_of_time,
-            cash=0.0,
-            positions=tuple((fill.symbol, fill.quantity) for fill in fills),
-            target_weights=decision.new_targets,
-            residual_orders=previous_state.residual_orders,
-            shadow_ideal_nav=market_data.ideal_nav,
-            shadow_executable_nav=market_data.executable_nav,
-            accounting_contract_version=decision.accounting_contract_version,
-            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+        start_violations = self._validate_starting_account_state(
+            decision=decision,
+            previous_state=previous_state,
         )
+        if start_violations:
+            return self._contract_violation_result(
+                shadow_decision_id=shadow_decision_id,
+                execution_idempotency_key=key,
+                market_data=market_data,
+                reason_codes=start_violations,
+            )
+
+        attempts, fills = self.execution_adapter.execute(
+            decision=decision,
+            orders=orders,
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+        )
+        account_state = self.accounting_adapter.apply(
+            decision=decision,
+            previous_state=previous_state,
+            fills=fills,
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+        )
+        output_violations = self._validate_adapter_output(
+            decision=decision,
+            orders=orders,
+            previous_state=previous_state,
+            attempts=attempts,
+            fills=fills,
+            account_state=account_state,
+            execution_as_of_time=execution_as_of_time,
+        )
+        if output_violations:
+            return self._contract_violation_result(
+                shadow_decision_id=shadow_decision_id,
+                execution_idempotency_key=key,
+                market_data=market_data,
+                reason_codes=output_violations,
+            )
+
         result = ShadowExecutionResult(
             shadow_decision_id=shadow_decision_id,
             status="EXECUTED",
@@ -615,11 +794,152 @@ class ShadowExecutionService:
         self.store.execution_results[key] = result
         return result
 
+    def _contract_violation_result(
+        self,
+        *,
+        shadow_decision_id: str,
+        execution_idempotency_key: str,
+        market_data: MarketDataForExecution,
+        reason_codes: tuple[str, ...],
+    ) -> ShadowExecutionResult:
+        return ShadowExecutionResult(
+            shadow_decision_id=shadow_decision_id,
+            status="CONTRACT_VIOLATION",
+            execution_idempotency_key=execution_idempotency_key,
+            attempts=(),
+            fills=(),
+            account_state=None,
+            data_delay_seconds=market_data.data_delay_seconds,
+            reason_codes=reason_codes,
+        )
+
+    def _validate_starting_account_state(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+    ) -> tuple[str, ...]:
+        violations: list[str] = []
+        if decision.accounting_contract_version != ACCOUNTING_CONTRACT_VERSION:
+            violations.append("ACCOUNTING_CONTRACT_MISMATCH")
+        if previous_state.accounting_contract_version != decision.accounting_contract_version:
+            violations.append("STARTING_ACCOUNTING_CONTRACT_MISMATCH")
+        if previous_state.strategy_version_id != decision.strategy_version_id:
+            violations.append("STARTING_ACCOUNT_STRATEGY_MISMATCH")
+        if (
+            previous_state.cash != decision.previous_cash
+            or previous_state.shadow_executable_nav != decision.previous_nav
+            or previous_state.target_weights != decision.previous_targets
+        ):
+            violations.append("STARTING_ACCOUNT_STATE_MISMATCH")
+        return tuple(violations)
+
+    def _validate_adapter_output(
+        self,
+        *,
+        decision: ShadowDecision,
+        orders: tuple[ShadowOrder, ...],
+        previous_state: ShadowAccountState,
+        attempts: tuple[ShadowExecutionAttempt, ...],
+        fills: tuple[ShadowFill, ...],
+        account_state: ShadowAccountState,
+        execution_as_of_time: datetime,
+    ) -> tuple[str, ...]:
+        violations: list[str] = []
+        expected_orders = tuple((symbol, weight) for symbol, weight in decision.new_targets)
+        actual_orders = tuple((order.symbol, order.target_weight) for order in orders)
+        if actual_orders != expected_orders:
+            violations.append("ORDER_TARGET_MISMATCH")
+        if any(order.shadow_decision_id != decision.shadow_decision_id for order in orders):
+            violations.append("ORDER_DECISION_MISMATCH")
+        if any(order.expected_execution_date != decision.expected_execution_date for order in orders):
+            violations.append("ORDER_EXECUTION_DATE_MISMATCH")
+
+        attempt_ids = {attempt.attempt_id for attempt in attempts}
+        order_symbols = {order.symbol for order in orders}
+        if any(attempt.shadow_decision_id != decision.shadow_decision_id for attempt in attempts):
+            violations.append("ATTEMPT_DECISION_MISMATCH")
+        if any(attempt.symbol not in order_symbols for attempt in attempts):
+            violations.append("ATTEMPT_ORDER_MISMATCH")
+        if len(attempt_ids) != len(attempts):
+            violations.append("ATTEMPT_ID_DUPLICATE")
+
+        if any(fill.attempt_id not in attempt_ids for fill in fills):
+            violations.append("FILL_ATTEMPT_MISMATCH")
+        attempts_by_id = {attempt.attempt_id: attempt for attempt in attempts}
+        if any(fill.attempt_id in attempts_by_id and fill.symbol != attempts_by_id[fill.attempt_id].symbol for fill in fills):
+            violations.append("FILL_SYMBOL_MISMATCH")
+
+        if account_state.strategy_version_id != decision.strategy_version_id:
+            violations.append("ACCOUNT_STRATEGY_MISMATCH")
+        if account_state.accounting_contract_version != ACCOUNTING_CONTRACT_VERSION:
+            violations.append("ACCOUNTING_CONTRACT_MISMATCH")
+        if account_state.accounting_contract_version != decision.accounting_contract_version:
+            violations.append("ACCOUNTING_CONTRACT_MISMATCH")
+        if account_state.as_of_time != execution_as_of_time:
+            violations.append("ACCOUNT_AS_OF_TIME_MISMATCH")
+        if account_state.target_weights != decision.new_targets:
+            violations.append("ACCOUNT_TARGET_MISMATCH")
+        if account_state.completed_rebalance_cycles != previous_state.completed_rebalance_cycles + 1:
+            violations.append("ACCOUNT_CYCLE_NOT_CONTINUOUS")
+
+        return tuple(dict.fromkeys(violations))
+
     def _decision(self, shadow_decision_id: str) -> ShadowDecision:
         for decision in self.store.decisions:
             if decision.shadow_decision_id == shadow_decision_id:
                 return decision
         raise ValueError(f"unknown shadow decision: {shadow_decision_id}")
+
+
+def _metrics_from_evidence(
+    *,
+    evidence: tuple[QualificationEvidence, ...],
+    forward_observation_weeks: int,
+    completed_rebalance_cycles: int,
+    regime_coverage_sufficient: bool,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "forward_observation_weeks": forward_observation_weeks,
+        "completed_rebalance_cycles": completed_rebalance_cycles,
+        "regime_exposure_coverage": 3 if regime_coverage_sufficient else 0,
+    }
+    for item in evidence:
+        metrics.update(item.metrics)
+    return metrics
+
+
+def _compare_gate_metric(value: Any, operator: str, threshold: Any) -> bool:
+    if operator == ">=":
+        return value >= threshold
+    if operator == ">":
+        return value > threshold
+    if operator == "<=":
+        return value <= threshold
+    if operator == "<":
+        return value < threshold
+    if operator == "==":
+        return value == threshold
+    if operator == "!=":
+        return value != threshold
+    raise ValueError(f"unsupported gate comparison operator: {operator}")
+
+
+def _gate_reason_code(prefix: str, gate: GateSpec) -> str:
+    legacy_reason_codes = {
+        "min-observation": "MIN_FORWARD_OBSERVATION_WEEKS",
+        "min-forward-observation-weeks": "MIN_FORWARD_OBSERVATION_WEEKS",
+        "min-completed-rebalance-cycles": "MIN_COMPLETED_REBALANCE_CYCLES",
+    }
+    if prefix == "GATE_FAILED" and gate.gate_id in legacy_reason_codes:
+        return legacy_reason_codes[gate.gate_id]
+    return f"{prefix}:{gate.gate_id}"
+
+
+def _gate_fails(gate: GateSpec, metrics: dict[str, Any]) -> bool:
+    if gate.metric_name not in metrics:
+        return gate.missing_data_policy in {"FAIL_CLOSED", "WARN"}
+    return not _compare_gate_metric(metrics[gate.metric_name], gate.comparison_operator, gate.threshold)
 
 
 def assess_decision_eligibility(
@@ -636,20 +956,26 @@ def assess_decision_eligibility(
     failed: list[str] = []
     reasons: list[str] = []
     warnings: list[str] = []
-    if forward_observation_weeks < 26:
-        failed.append("min-forward-observation-weeks")
-        reasons.append("MIN_FORWARD_OBSERVATION_WEEKS")
-    if completed_rebalance_cycles < 6:
-        failed.append("min-completed-rebalance-cycles")
-        reasons.append("MIN_COMPLETED_REBALANCE_CYCLES")
+    metrics = _metrics_from_evidence(
+        evidence=evidence,
+        forward_observation_weeks=forward_observation_weeks,
+        completed_rebalance_cycles=completed_rebalance_cycles,
+        regime_coverage_sufficient=regime_coverage_sufficient,
+    )
+    for gate in policy.hard_gates:
+        if _gate_fails(gate, metrics):
+            failed.append(gate.gate_id)
+            reasons.append(_gate_reason_code("GATE_FAILED", gate))
     if approval is None:
         failed.append("manual-approval")
         reasons.append("APPROVAL_REQUIRED")
     elif approval.policy_hash != policy.policy_hash or approval.strategy_version_id != strategy_version_id:
         failed.append("manual-approval")
         reasons.append("APPROVAL_CONTRACT_MISMATCH")
-    if not regime_coverage_sufficient:
-        warnings.append("REGIME_COVERAGE_INSUFFICIENT")
+    for gate in policy.warning_gates:
+        if _gate_fails(gate, metrics):
+            warnings.append(gate.gate_id)
+            reasons.append(_gate_reason_code("GATE_WARNING", gate))
 
     decision = DecisionQualification.INELIGIBLE if failed else DecisionQualification.ELIGIBLE
     assessment_id = _stable_id(
@@ -657,8 +983,7 @@ def assess_decision_eligibility(
         strategy_version_id,
         policy.policy_hash,
         tuple(item.evidence_id for item in evidence),
-        forward_observation_weeks,
-        completed_rebalance_cycles,
+        metrics,
         approval.approval_id if approval else None,
         evaluated_at.isoformat(),
     )

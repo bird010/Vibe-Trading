@@ -51,6 +51,9 @@ class CorrelationAllMembersConfig(BaseModel):
         description="最小成对周数",
     )
     momentum_threshold: float = Field(0.0, description="动量阈值")
+    min_weekly_coverage: float = Field(0.8, ge=0.0, le=1.0)
+    max_low_coverage_weeks: int = Field(0, ge=0)
+    minimum_valid_members: int = Field(1, ge=1)
 
     @model_validator(mode="after")
     def _cross_field_constraints(self) -> "CorrelationAllMembersConfig":

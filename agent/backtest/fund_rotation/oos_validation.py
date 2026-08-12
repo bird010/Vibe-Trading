@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
+from .accounting_contract import ACCOUNTING_CONTRACT_VERSION, DAILY_ACCOUNTING_EVENT_ORDER
 
 COMPONENT_CHAIN_STAGES: tuple[str, ...] = ("S0", "S1", "S2", "S3", "S4", "S5", "S6")
 QUALIFIED_OOS_EVIDENCE = "QUALIFIED_OOS_EVIDENCE"
@@ -22,7 +23,6 @@ RESEARCH_ONLY = "RESEARCH_ONLY"
 CONSUMED_AS_RESEARCH_INPUT = "CONSUMED_AS_RESEARCH_INPUT"
 _FORBIDDEN_OOS_EVIDENCE_KEYS = frozenset({"winner", "rank", "selection_rank", "selection_winner"})
 _FORBIDDEN_SELECTION_METRIC_TOKENS = frozenset({"proxy"})
-_DEFAULT_ACCOUNTING_CONTRACT_VERSION = "accounting-v1"
 _DEFAULT_FRAMEWORK_IMPLEMENTATION_HASH = "framework-default-v1"
 _DEFAULT_KNOWLEDGE_CUTOFF = "knowledge-cutoff-default-v1"
 _DEFAULT_MARKET_RULE_POLICY_HASH = "market-rule-default-v1"
@@ -161,7 +161,7 @@ class BenchmarkPolicy:
 
 
 @dataclass(frozen=True)
-class QualificationPolicy:
+class OOSQualificationPolicySpec:
     min_oos_weeks: int = 104
     min_oos_fraction: float = 0.20
     require_non_cluster_baseline: bool = True
@@ -176,6 +176,9 @@ class QualificationPolicy:
             "min_oos_fraction": self.min_oos_fraction,
             "require_non_cluster_baseline": self.require_non_cluster_baseline,
         }
+
+
+QualificationPolicy = OOSQualificationPolicySpec
 
 
 @dataclass(frozen=True)
@@ -326,19 +329,19 @@ class TemporalSplitPolicy:
     def total_weeks(self) -> int:
         return len(self.train_weeks) + len(self.validation_weeks) + len(self.oos_weeks)
 
-    def has_qualified_oos(self, qualification_policy: QualificationPolicy | None = None) -> bool:
-        policy = qualification_policy or QualificationPolicy()
+    def has_qualified_oos(self, qualification_policy: OOSQualificationPolicySpec | None = None) -> bool:
+        policy = qualification_policy or OOSQualificationPolicySpec()
         return (
             len(self.oos_weeks) >= policy.min_oos_weeks
             and len(self.oos_weeks) / self.total_weeks >= policy.min_oos_fraction
         )
 
-    def oos_qualification_label(self, qualification_policy: QualificationPolicy | None = None) -> str:
+    def oos_qualification_label(self, qualification_policy: OOSQualificationPolicySpec | None = None) -> str:
         if self.has_qualified_oos(qualification_policy):
             return QUALIFIED_OOS_EVIDENCE
         return RESEARCH_ONLY
 
-    def require_qualified_oos_evidence(self, qualification_policy: QualificationPolicy | None = None) -> str:
+    def require_qualified_oos_evidence(self, qualification_policy: OOSQualificationPolicySpec | None = None) -> str:
         label = self.oos_qualification_label(qualification_policy)
         if label != QUALIFIED_OOS_EVIDENCE:
             raise ValueError("OOS split cannot be marked QUALIFIED_OOS_EVIDENCE")
@@ -412,13 +415,8 @@ class WalkForwardAccountState:
     corporate_action_state: Mapping[str, Any]
     last_valuation_date: str
     last_nav: float
-    accounting_contract_version: str = _DEFAULT_ACCOUNTING_CONTRACT_VERSION
-    daily_accounting_event_order: tuple[str, ...] = (
-        "corporate_actions",
-        "fills",
-        "valuation",
-        "residual_order_carry",
-    )
+    accounting_contract_version: str = ACCOUNTING_CONTRACT_VERSION
+    daily_accounting_event_order: tuple[str, ...] = DAILY_ACCOUNTING_EVENT_ORDER
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "positions", _immutable_mapping(self.positions))
@@ -519,7 +517,7 @@ class VariantSpec:
         if not self.execution_policy_hash:
             object.__setattr__(self, "execution_policy_hash", _identity_hash(self.execution_contract_version))
         if not self.accounting_policy_hash:
-            object.__setattr__(self, "accounting_policy_hash", _identity_hash(_DEFAULT_ACCOUNTING_CONTRACT_VERSION))
+            object.__setattr__(self, "accounting_policy_hash", _identity_hash(ACCOUNTING_CONTRACT_VERSION))
         if not self.market_rule_policy_hash:
             object.__setattr__(self, "market_rule_policy_hash", _identity_hash(_DEFAULT_MARKET_RULE_POLICY_HASH))
         if not self.evaluation_calendar_hash:
@@ -606,7 +604,7 @@ def create_research_experiment(
     selection_policy: SelectionPolicy,
     split_policy: TemporalSplitPolicy,
     benchmark_policy: BenchmarkPolicy,
-    qualification_policy: QualificationPolicy,
+    qualification_policy: OOSQualificationPolicySpec,
     candidate_variants: Sequence[VariantSpec],
     walk_forward_policy: RollingWalkForwardPolicy | None = None,
 ) -> ResearchExperiment:
@@ -706,10 +704,10 @@ def _is_forbidden_oos_evidence_key(key: str) -> bool:
 def require_qualified_oos_evidence(
     experiment: ResearchExperiment,
     *,
-    qualification_policy: QualificationPolicy | None = None,
+    qualification_policy: OOSQualificationPolicySpec | None = None,
     non_cluster_baseline_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    policy = qualification_policy or QualificationPolicy()
+    policy = qualification_policy or OOSQualificationPolicySpec()
     label = experiment.split_policy.require_qualified_oos_evidence(policy)
     if not policy.require_non_cluster_baseline:
         return label
@@ -760,15 +758,12 @@ def _same_oos_contract_identity(result: Mapping[str, Any], experiment: ResearchE
 
 def _experiment_oos_contract_identity(experiment: ResearchExperiment) -> dict[str, Any]:
     return {
-        "strategy_implementation_hash": _common_variant_field(experiment, "strategy_implementation_hash"),
-        "framework_implementation_hash": _common_variant_field(experiment, "framework_implementation_hash"),
-        "resolved_config_hash": _common_variant_field(experiment, "resolved_config_hash"),
         "data_snapshot_fingerprint": _common_variant_field(experiment, "data_identity_hash"),
         "knowledge_cutoff": _common_variant_field(experiment, "knowledge_cutoff"),
         "universe_id": _common_variant_field(experiment, "universe_id"),
         "execution_contract_version": _common_variant_field(experiment, "execution_contract_version"),
         "execution_policy_hash": _common_variant_field(experiment, "execution_policy_hash"),
-        "accounting_contract_version": _DEFAULT_ACCOUNTING_CONTRACT_VERSION,
+        "accounting_contract_version": ACCOUNTING_CONTRACT_VERSION,
         "accounting_policy_hash": _common_variant_field(experiment, "accounting_policy_hash"),
         "market_rule_policy_hash": _common_variant_field(experiment, "market_rule_policy_hash"),
         "evaluation_calendar_hash": _identity_hash(tuple(experiment.split_policy.oos_weeks)),

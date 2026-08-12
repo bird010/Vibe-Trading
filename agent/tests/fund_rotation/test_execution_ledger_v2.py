@@ -1,3 +1,6 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from backtest.fund_rotation.execution_ledger_v2 import (
@@ -17,11 +20,13 @@ from backtest.fund_rotation.execution_ledger_v2 import (
     ParentOrderRecord,
     ParentOrderStatus,
     UnknownExecutionRule,
+    build_execution_ledger_from_pipeline_result,
     compute_attempt_diagnostics,
     compute_corporate_action_diagnostics,
     compute_execution_diagnostics_v2,
     compute_order_diagnostics,
     compute_trade_diagnostics,
+    _replacement_residual_quantity,
 )
 
 
@@ -505,6 +510,124 @@ def test_replacement_parent_must_follow_share_adjusted_old_residual_contract():
             trades=(_trade(trade_id="T-1", attempt_id="A-1", quantity=500),),
             corporate_actions=(split,),
         )
+
+
+def test_pipeline_adapter_preserves_replacement_identity_and_lot_rounded_quantity():
+    order_id = "SIG-20240105-0001-510300.SH"
+    adjustment = {
+        "corporate_action_id": "CA-20240109-510300.SH",
+        "trade_date": "20240109",
+        "scale": 1.5,
+        "before": {
+            "requested": 150,
+            "filled": 50,
+            "remaining": 100,
+            "quantity_basis": 1.0,
+        },
+        "after": {
+            "requested": 225,
+            "filled": 75,
+            "remaining": 150,
+            "quantity_basis": 1.5,
+        },
+    }
+    result = SimpleNamespace(
+        orders=[
+            {
+                "order_id": order_id,
+                "event_id": "SIG-20240105-0001",
+                "ts_code": "510300.SH",
+                "direction": "BUY",
+                "requested": 225,
+                "filled": 75,
+                "remaining": 150,
+                "attempt_number": 1,
+                "trade_date": "20240108",
+                "attempt_filled": 50,
+                "attempt_status": "PARTIAL",
+                "attempt_quantity_basis": 1.0,
+                "current_quantity_basis": 1.5,
+                "lot_size": 50,
+                "final_status": "PENDING",
+                "corporate_action_adjustments": json.dumps([adjustment]),
+            }
+        ],
+        trade_events=[
+            {
+                "trade_date": "20240108",
+                "signal_week": "20240105",
+                "signal_event_id": "SIG-20240105-0001",
+                "order_id": order_id,
+                "attempt_id": f"{order_id}-A1",
+                "ts_code": "510300.SH",
+                "action": "BUY",
+                "status": "PARTIAL",
+                "requested": 150,
+                "filled": 50,
+                "unfilled": 100,
+                "price": 10.0,
+                "commission": 1.0,
+                "explicit_fee": 0.0,
+                "slippage_bps": 5.0,
+                "participation_rate": 0.01,
+            },
+            {
+                "event_type": "CORPORATE_ACTION",
+                "corporate_action_id": "CA-20240109-510300.SH",
+                "trade_date": "20240109",
+                "ts_code": "510300.SH",
+                "requested": 100,
+                "filled": 150,
+                "old_adj_factor": 1.0,
+                "new_adj_factor": 1.5,
+                "last_close_before": 10.0,
+                "last_close_after": 6.6666667,
+            },
+        ],
+        executed_equity=None,
+    )
+
+    ledger = build_execution_ledger_from_pipeline_result(result)
+
+    assert [parent.order_id for parent in ledger.parent_orders] == [
+        order_id,
+        f"{order_id}-R1",
+    ]
+    old_parent, replacement = ledger.parent_orders
+    assert old_parent.ts_code == "510300.SH"
+    assert old_parent.direction is OrderDirection.BUY
+    assert old_parent.created_date == "20240105"
+    assert old_parent.original_requested_quantity == 150
+    assert old_parent.cumulative_filled_quantity == 50
+    assert old_parent.remaining_quantity == 100
+    assert old_parent.status is ParentOrderStatus.CANCELED
+    assert old_parent.cancel_reason == "CORPORATE_ACTION_REPLACED"
+
+    assert replacement.ts_code == old_parent.ts_code
+    assert replacement.direction is old_parent.direction
+    assert replacement.created_date == "20240109"
+    assert replacement.replacement_of_order_id == order_id
+    assert replacement.replacement_chain_id == order_id
+    assert replacement.corporate_action_id == "CA-20240109-510300.SH"
+    assert replacement.original_requested_quantity == 150
+    assert replacement.remaining_quantity == 150
+    assert replacement.lot_size == 50
+    assert replacement.quantity_basis_id == "510300.SH:shares:1.5"
+
+    attempt = ledger.attempts[0]
+    trade = ledger.trades[0]
+    assert attempt.order_id == order_id
+    assert attempt.quantity_basis_id == old_parent.quantity_basis_id
+    assert trade.order_id == order_id
+    assert trade.attempt_id == attempt.attempt_id
+    assert trade.quantity == 50
+    assert trade.quantity_basis_id == old_parent.quantity_basis_id
+    assert trade.trade_date == "20240108"
+
+
+def test_replacement_rounding_uses_order_lot_size():
+    assert _replacement_residual_quantity(OrderDirection.BUY, 100, 1.5, lot_size=50) == 150
+    assert _replacement_residual_quantity(OrderDirection.BUY, 100, 1.5, lot_size=100) == 100
 
 
 def test_ledger_requires_parent_attempt_and_trade_quantity_closure():

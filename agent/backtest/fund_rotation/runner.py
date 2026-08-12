@@ -12,7 +12,7 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,6 +37,9 @@ from backtest.fund_rotation.execution import (
     PipelineResult,
     build_execution_context,
     run_execution_loop,
+)
+from backtest.fund_rotation.execution_ledger_v2 import (
+    compute_pipeline_execution_diagnostics_v2,
 )
 from backtest.fund_rotation.metrics import compute_performance_metrics
 from backtest.fund_rotation.returns import compute_adjusted_close
@@ -107,7 +110,7 @@ class FundRotationRunResult:
     strategy_metrics: dict[str, float] = field(default_factory=dict)
     benchmark_equity: dict[str, pd.Series] = field(default_factory=dict)
     benchmark_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
-    execution_diagnostics: dict[str, float] = field(default_factory=dict)
+    execution_diagnostics: dict[str, Any] = field(default_factory=dict)
     diagnostics: StrategyDiagnostics | None = None
     quality_status: str = "VALID"
 
@@ -119,11 +122,13 @@ class FundRotationBacktestRunner:
         fund_adj: pd.DataFrame,
         dim_fund: pd.DataFrame,
         *,
+        pit_universe_resolver: object | None = None,
         run_id: str | None = None,
     ) -> None:
         self._fund_daily = fund_daily
         self._fund_adj = fund_adj
         self._dim_fund = dim_fund
+        self._pit_universe_resolver = pit_universe_resolver
         self._run_id = run_id or uuid.uuid4().hex[:12]
 
     def run(
@@ -244,7 +249,9 @@ class FundRotationBacktestRunner:
                 error_message=str(exc),
             )
 
-        universe = frozenset(str(code) for code in snapshot.universe_codes)
+        fallback_universe = frozenset(str(code) for code in snapshot.universe_codes)
+        universe_diagnostics_by_date: dict[str, dict[str, Any]] = {}
+        pit_quality_status = "VERIFIED"
         decisions: list[TargetWeightDecision] = []
         targets_map: dict[str, dict[str, float]] = {}
         current_targets: dict[str, float] = {}
@@ -261,7 +268,7 @@ class FundRotationBacktestRunner:
             strategy_metrics: dict[str, float] | None = None,
             benchmark_equity: dict[str, pd.Series] | None = None,
             benchmark_metrics: dict[str, dict[str, float]] | None = None,
-            execution_diagnostics: dict[str, float] | None = None,
+            execution_diagnostics: dict[str, Any] | None = None,
             quality_status: str = "VALID",
         ) -> FundRotationRunResult:
             return FundRotationRunResult(
@@ -299,6 +306,19 @@ class FundRotationBacktestRunner:
                         for date, weights in targets_map.items()
                     },
                 )
+            pit_evidence = _resolve_pit_universe_for_signal(
+                self._pit_universe_resolver,
+                snapshot=snapshot,
+                signal_date=signal_date,
+                fallback_universe=fallback_universe,
+            )
+            universe = pit_evidence.universe
+            universe_diagnostics_by_date[signal_date] = dict(pit_evidence.diagnostics)
+            pit_quality_status = _combine_pit_quality_status(
+                pit_quality_status,
+                pit_evidence.quality_status,
+            )
+
             view = CausalDataView(
                 self._fund_daily,
                 self._fund_adj,
@@ -407,9 +427,10 @@ class FundRotationBacktestRunner:
                 trade_events=pipeline_result.trade_events,
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
-                execution_diagnostics=_execution_diagnostics(
+                execution_diagnostics=_formal_execution_diagnostics(
                     pipeline_result,
                     execution,
+                    universe_diagnostics_by_date,
                 ),
             )
 
@@ -425,9 +446,10 @@ class FundRotationBacktestRunner:
                 trade_events=pipeline_result.trade_events,
                 orders=pipeline_result.orders,
                 positions_history=pipeline_result.positions_history,
-                execution_diagnostics=_execution_diagnostics(
+                execution_diagnostics=_formal_execution_diagnostics(
                     pipeline_result,
                     execution,
+                    universe_diagnostics_by_date,
                 ),
             )
 
@@ -455,12 +477,16 @@ class FundRotationBacktestRunner:
                 benchmark_equity.get("equal_weight_etf"),
             )
         )
-        execution_diagnostics = _execution_diagnostics(
+        execution_diagnostics = _formal_execution_diagnostics(
             pipeline_result,
             execution,
+            universe_diagnostics_by_date,
         )
 
-        overall_quality = _worst_quality_status(decisions)
+        overall_quality = _combine_run_quality_status(
+            _worst_quality_status(decisions),
+            pit_quality_status,
+        )
         try:
             diagnostics = session.finalize()
         except Exception as exc:
@@ -630,6 +656,162 @@ def _worst_quality_status(decisions: list) -> str:
     )
     value = worst.quality_status
     return str(value.value) if hasattr(value, "value") else str(value)
+
+
+@dataclass(frozen=True)
+class _PITUniverseEvidence:
+    universe: frozenset[str]
+    quality_status: str
+    diagnostics: dict[str, Any]
+
+
+def _resolve_pit_universe_for_signal(
+    resolver: object | None,
+    *,
+    snapshot: object,
+    signal_date: str,
+    fallback_universe: frozenset[str],
+) -> _PITUniverseEvidence:
+    if resolver is None:
+        return _missing_pit_master_evidence(fallback_universe)
+
+    if hasattr(resolver, "resolve_universe"):
+        resolution = resolver.resolve_universe(
+            snapshot=snapshot,
+            signal_date=signal_date,
+            knowledge_cutoff=signal_date,
+            fallback_universe=fallback_universe,
+        )
+    elif callable(resolver):
+        resolution = resolver(
+            snapshot=snapshot,
+            signal_date=signal_date,
+            knowledge_cutoff=signal_date,
+            fallback_universe=fallback_universe,
+        )
+    else:
+        raise TypeError("pit_universe_resolver must be callable or expose resolve_universe")
+
+    universe = _extract_universe_codes(resolution)
+    diagnostics = _extract_universe_diagnostics(resolution)
+    quality_status = _quality_status_value(
+        _extract_resolution_value(resolution, "quality_status", "VERIFIED")
+    )
+    diagnostics["quality_status"] = quality_status
+    diagnostics.setdefault("reason_code", "")
+    diagnostics.setdefault("details", "")
+    return _PITUniverseEvidence(
+        universe=frozenset(universe),
+        quality_status=quality_status,
+        diagnostics=diagnostics,
+    )
+
+
+def _missing_pit_master_evidence(
+    fallback_universe: frozenset[str],
+) -> _PITUniverseEvidence:
+    diagnostics = {
+        "quality_status": "RESEARCH_ONLY_UNVERIFIED_UNIVERSE",
+        "reason_code": "PIT_MASTER_MISSING",
+        "details": (
+            "snapshot does not provide PIT fund master and no PIT resolver was injected"
+        ),
+    }
+    return _PITUniverseEvidence(
+        universe=frozenset(fallback_universe),
+        quality_status="RESEARCH_ONLY_UNVERIFIED_UNIVERSE",
+        diagnostics=diagnostics,
+    )
+
+
+def _extract_universe_codes(resolution: object) -> tuple[str, ...]:
+    raw = _extract_resolution_value(resolution, "universe_codes", None)
+    if raw is None:
+        raw = _extract_resolution_value(resolution, "eligible_codes", None)
+    if raw is None:
+        raw = _extract_resolution_value(resolution, "eligible", ())
+    codes = []
+    for item in raw or ():
+        codes.append(str(getattr(item, "ts_code", item)))
+    return tuple(codes)
+
+
+def _extract_universe_diagnostics(resolution: object) -> dict[str, Any]:
+    raw = _extract_resolution_value(resolution, "diagnostics", None)
+    if raw is None:
+        raw = _extract_resolution_value(resolution, "audit_metrics", None)
+    return dict(raw or {})
+
+
+def _extract_resolution_value(
+    resolution: object,
+    key: str,
+    default: object,
+) -> object:
+    if isinstance(resolution, dict):
+        return resolution.get(key, default)
+    return getattr(resolution, key, default)
+
+
+def _quality_status_value(value: object) -> str:
+    return str(value.value) if hasattr(value, "value") else str(value)
+
+
+_PIT_QUALITY_ORDER = {
+    "VERIFIED": 0,
+    "VALID": 0,
+    "KNOWLEDGE_TIME_UNVERIFIED": 1,
+    "PIT_UNVERIFIED": 1,
+    "RESEARCH_ONLY_UNVERIFIED_UNIVERSE": 1,
+    "PIT_INVALID": 2,
+}
+
+
+def _combine_pit_quality_status(current: str, candidate: str) -> str:
+    return max(
+        (current, candidate),
+        key=lambda value: _PIT_QUALITY_ORDER.get(str(value), 1),
+    )
+
+
+def _combine_run_quality_status(strategy_quality: str, pit_quality: str) -> str:
+    if pit_quality in {"VERIFIED", "VALID"}:
+        return strategy_quality
+    if _QUALITY_ORDER.get(strategy_quality, 0) >= _QUALITY_ORDER["INVALID"]:
+        return strategy_quality
+    return pit_quality
+
+
+def _formal_execution_diagnostics(
+    result: PipelineResult,
+    execution: ExecutionConfig,
+    universe_diagnostics_by_date: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    diagnostics = compute_pipeline_execution_diagnostics_v2(
+        result,
+        initial_capital=execution.initial_capital,
+    )
+    legacy_result = _execution_diagnostics(result, execution)
+    diagnostics["legacy_result"] = legacy_result
+    diagnostics["diagnostics_difference"] = {
+        "legacy_result_location": "legacy_result",
+        "formal_contract": diagnostics.get("metric_contract_version", ""),
+    }
+    diagnostics["universe"] = _summarize_universe_diagnostics(
+        universe_diagnostics_by_date,
+    )
+    return diagnostics
+
+
+def _summarize_universe_diagnostics(
+    universe_diagnostics_by_date: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not universe_diagnostics_by_date:
+        return {}
+    latest_date = sorted(universe_diagnostics_by_date)[-1]
+    latest = dict(universe_diagnostics_by_date[latest_date])
+    latest.pop("signal_date", None)
+    return latest
 
 
 def _execution_diagnostics(

@@ -26,6 +26,9 @@ class FundRotationConfig:
     min_valid_weeks: int = 20
     min_pairwise_weeks: int = 20
     momentum_threshold: float = 0.0
+    min_weekly_coverage: float = 0.8
+    max_low_coverage_weeks: int = 0
+    minimum_valid_members: int = 1
 
     # ── Capital and fees ──
     initial_capital: float = 1_000_000.0

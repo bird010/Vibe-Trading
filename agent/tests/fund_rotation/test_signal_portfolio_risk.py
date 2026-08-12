@@ -101,7 +101,8 @@ def test_momentum_families_include_baseline_skip_month_and_finite_risk_adjusted_
     assert result.scores_by_family["12-1"][101] == pytest.approx(
         float(np.prod(1.0 + returns[101].iloc[-52:-4]) - 1.0)
     )
-    assert math.isfinite(result.scores_by_family["risk_adjusted"][103])
+    assert result.scores_by_family["risk_adjusted"][103] is None
+    assert result.reason_codes_by_family["risk_adjusted"][103] == ("UNAVAILABLE_MOMENTUM",)
 
     average_rank = aggregate_momentum_rank_average(result.scores_by_family)
     assert list(average_rank) == [101, 102, 103]
@@ -112,6 +113,39 @@ def test_momentum_families_include_baseline_skip_month_and_finite_risk_adjusted_
     )
     assert list(weighted) == [101, 102, 103]
     assert all(math.isfinite(score) for score in weighted.values())
+
+
+def test_unavailable_momentum_is_null_reasoned_and_excluded_from_rankings():
+    weeks = pd.date_range("2026-01-02", periods=4, freq="W-FRI")
+    returns = pd.DataFrame(
+        {
+            "missing": [np.nan, np.nan, np.nan, np.nan],
+            "flat": [0.0, 0.0, 0.0, 0.0],
+            "winner": [0.01, 0.01, 0.01, 0.01],
+        },
+        index=weeks,
+    )
+
+    result = compute_momentum_families(
+        returns,
+        MomentumPolicy(single_window=4, families=("single_window", "risk_adjusted")),
+    )
+
+    assert result.scores_by_family["single_window"]["missing"] is None
+    assert result.reason_codes_by_family["single_window"]["missing"] == ("UNAVAILABLE_MOMENTUM",)
+    assert result.scores_by_family["risk_adjusted"]["flat"] is None
+    assert result.reason_codes_by_family["risk_adjusted"]["flat"] == ("UNAVAILABLE_MOMENTUM",)
+
+    average_rank = aggregate_momentum_rank_average(result.scores_by_family)
+    assert list(average_rank) == ["winner", "flat"]
+    assert "missing" not in average_rank
+
+    weighted = aggregate_momentum_zscore_weighted(
+        result.scores_by_family,
+        weights={"single_window": 0.5, "risk_adjusted": 0.5},
+    )
+    assert list(weighted) == ["winner", "flat"]
+    assert "missing" not in weighted
 
 
 def test_hysteresis_respects_buffer_min_holding_score_improvement_cycle_reset_and_hard_failure():
@@ -295,6 +329,26 @@ def test_portfolio_weighting_equal_inverse_vol_constraints_cash_and_turnover():
     assert "MAX_ETF_WEIGHT_CONSTRAINT" in invalid.reason_codes
 
 
+def test_equal_weight_by_cluster_slot_reports_vacant_fixed_slots_as_cash():
+    result = build_portfolio_weights(
+        (
+            AssetSelection("AAA", cluster_id="c1", asset_class="equity"),
+            AssetSelection("BBB", cluster_id="c2", asset_class="equity"),
+        ),
+        policy=PortfolioPolicy(
+            enabled=True,
+            method="equal_weight_by_cluster_slot",
+            target_cluster_slots=3,
+            minimum_cash_weight=0.0,
+        ),
+    )
+
+    assert result.status == "VALID"
+    assert result.weights == {"AAA": pytest.approx(1 / 3), "BBB": pytest.approx(1 / 3)}
+    assert result.cash_weight == pytest.approx(1 / 3)
+    assert result.reason_codes == ("VACANT_CLUSTER_SLOT_CASH",)
+
+
 def test_risk_layer_scales_exposure_independently_and_disabled_mode_is_identity():
     raw_weights = {"AAA": 0.50, "BBB": 0.30}
     disabled = apply_risk_layer(
@@ -382,6 +436,34 @@ def test_pipeline_records_stage_inputs_outputs_policy_versions_and_invalid_const
     portfolio_stage = next(r for r in decision.stage_records if r.stage == "raw_portfolio_weights")
     assert portfolio_stage.policy_version == "port-v1"
     assert portfolio_stage.reason_codes == ("MAX_ETF_WEIGHT_CONSTRAINT",)
+
+
+def test_pipeline_excludes_unavailable_momentum_from_selection_with_reason():
+    decision = run_decision_pipeline(
+        raw_signal_scores={"unavailable": np.nan, "winner": 0.20},
+        coverage_available={"unavailable": True, "winner": True},
+        representatives={"unavailable": "BAD", "winner": "GOOD"},
+        asset_metadata={
+            "BAD": {"cluster_id": "unavailable", "asset_class": "equity"},
+            "GOOD": {"cluster_id": "winner", "asset_class": "equity"},
+        },
+        selection_policy=SelectionPolicy(top_n=1, exit_buffer=0),
+        portfolio_policy=PortfolioPolicy(enabled=True, method="equal_weight"),
+        risk_policy=RiskPolicy(enabled=False),
+        policy_versions={
+            "signal": "sig-v1",
+            "coverage": "cov-v1",
+            "selection": "sel-v1",
+            "representative": "rep-v1",
+            "portfolio": "port-v1",
+            "risk": "risk-v1",
+        },
+    )
+
+    assert decision.reason_codes == ("UNAVAILABLE_MOMENTUM",)
+    selected_stage = next(r for r in decision.stage_records if r.stage == "selected_clusters")
+    assert selected_stage.output == ("winner",)
+    assert selected_stage.reason_codes == ("ENTRY_TOP_N",)
 
 
 def test_pipeline_keeps_missing_representative_slot_as_cash_without_renormalizing_weights():
