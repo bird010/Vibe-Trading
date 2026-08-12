@@ -48,6 +48,8 @@ class Order:
 class OrderManager:
     """§12.2 — Manages order lifecycle across rebalance events."""
 
+    _RETRYABLE_STATUSES = (OrderStatus.PENDING, OrderStatus.PARTIAL)
+
     def __init__(self) -> None:
         self._active: dict[str, Order] = {}
         self._history: list[Order] = []
@@ -126,8 +128,11 @@ class OrderManager:
         return result
 
     def get_pending_orders(self) -> list[Order]:
-        """Get all active orders, sells first then buys."""
-        active = list(self._active.values())
+        """Get retryable active orders, sells first then buys."""
+        active = [
+            order for order in self._active.values()
+            if order.status in self._RETRYABLE_STATUSES and order.remaining > 0
+        ]
         sells = [o for o in active if o.requested < 0]
         buys = [o for o in active if o.requested > 0]
         return sorted(sells, key=lambda o: o.ts_code) + sorted(buys, key=lambda o: o.ts_code)

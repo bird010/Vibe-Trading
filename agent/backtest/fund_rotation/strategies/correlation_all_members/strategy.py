@@ -27,9 +27,17 @@ from backtest.fund_rotation.correlation import (
     iterative_exclude,
 )
 from backtest.fund_rotation.momentum import (
-    build_target_weights,
     compute_cluster_momentum,
-    select_top_clusters,
+)
+from backtest.fund_rotation.signal_portfolio_risk import (
+    ClusterCoveragePolicy,
+    PortfolioPolicy,
+    RiskPolicy,
+    SelectionPolicy,
+    SelectionState,
+    compute_cluster_coverage,
+    run_decision_pipeline,
+    serialize_stage_records,
 )
 from backtest.fund_rotation.strategies.correlation_all_members.config import (
     CorrelationAllMembersConfig,
@@ -65,6 +73,7 @@ class CorrelationAllMembersSession:
         self._config = config
         self._week_index = 0
         self._clusters: dict[str, int] = {}
+        self._selection_state: SelectionState | None = None
         self._last_recluster_week = -config.recluster_interval_weeks
         self._cluster_history: list[dict] = []
         self._exclusions: list = []
@@ -216,12 +225,6 @@ class CorrelationAllMembersSession:
         cluster_members: dict[int, list[str]] = {}
         for code, cluster_id in self._clusters.items():
             cluster_members.setdefault(cluster_id, []).append(code)
-        selected = select_top_clusters(
-            momentum,
-            top_n=cfg.top_n,
-            threshold=cfg.momentum_threshold,
-            cluster_members=cluster_members,
-        )
 
         eligible_set = set(eligible)
         filtered_members = {
@@ -230,11 +233,68 @@ class CorrelationAllMembersSession:
             ]
             for cluster_id, members in cluster_members.items()
         }
-        targets = build_target_weights(
-            selected,
-            filtered_members,
-            top_n=cfg.top_n,
+        all_cluster_members = {
+            code for members in cluster_members.values() for code in members
+        }
+        coverage_reports = compute_cluster_coverage(
+            weekly_returns=momentum_returns,
+            cluster_members=cluster_members,
+            eligible_by_week={
+                week: set(all_cluster_members)
+                for week in momentum_returns.index
+            },
+            policy=ClusterCoveragePolicy(
+                min_weekly_coverage=0.0,
+                max_low_coverage_weeks=len(momentum_returns),
+                minimum_valid_members=1,
+            ),
         )
+        cycle_id = (
+            str(self._cluster_history[-1]["week"])
+            if self._cluster_history
+            else "initial"
+        )
+        pipeline_decision = run_decision_pipeline(
+            raw_signal_scores=dict(momentum),
+            coverage_available={
+                cluster_id: report.is_available
+                for cluster_id, report in coverage_reports.items()
+            },
+            representatives=filtered_members,
+            asset_metadata={
+                code: {
+                    "cluster_id": cluster_id,
+                    "asset_class": "etf",
+                }
+                for cluster_id, members in filtered_members.items()
+                for code in members
+            },
+            selection_policy=SelectionPolicy(
+                top_n=cfg.top_n,
+                minimum_entry_score=cfg.momentum_threshold,
+            ),
+            portfolio_policy=PortfolioPolicy(
+                method="equal_weight_by_cluster_slot",
+                target_cluster_slots=cfg.top_n,
+            ),
+            risk_policy=RiskPolicy(enabled=False),
+            policy_versions={
+                "signal": "correlation_all_members:momentum",
+                "coverage": "correlation_all_members:coverage",
+                "selection": "correlation_all_members:hysteresis",
+                "representative": "correlation_all_members:all_members",
+                "portfolio": (
+                    "correlation_all_members:equal_weight_by_cluster_slot"
+                ),
+                "risk": "correlation_all_members:risk_identity",
+            },
+            selection_state=self._selection_state,
+            cycle_id=cycle_id,
+        )
+        self._selection_state = pipeline_decision.next_selection_state
+        execution_stage = pipeline_decision.stage_records[-1]
+        execution_output = execution_stage.output
+        targets = dict(execution_output["weights"])
 
         return TargetWeightDecision(
             decision_id=f"{signal_date}-correlation_all_members",
@@ -246,6 +306,12 @@ class CorrelationAllMembersSession:
             diagnostics={
                 "num_clusters": len(self._clusters),
                 "eligible_codes": list(eligible),
+                "signal_pipeline_stage_records": serialize_stage_records(
+                    pipeline_decision.stage_records
+                ),
+                "signal_pipeline_reason_codes": list(
+                    pipeline_decision.reason_codes
+                ),
             },
         )
 

@@ -157,6 +157,37 @@ def test_public_run_execution_loop_sells_before_buys_on_rotation_day():
     assert result.executed_equity.notna().all()
 
 
+def test_filled_order_is_not_retried_on_later_trading_days():
+    """Once a parent order is FILLED, later execution days create no attempts."""
+    dates = pd.bdate_range("2024-01-02", "2024-01-10").strftime("%Y%m%d").tolist()
+    market = pd.DataFrame([
+        {
+            "ts_code": "A", "trade_date": date,
+            "open": 10.0, "close": 10.0, "high": 10.1, "low": 9.9,
+            "pre_close": 10.0, "vol": 1_000_000, "amount": 10_000_000.0,
+        }
+        for date in dates
+    ])
+    adj = pd.DataFrame([
+        {"ts_code": "A", "trade_date": date, "adj_factor": 1.0}
+        for date in dates
+    ])
+    result = PipelineResult(weekly_targets={"20240105": {"A": 0.1}})
+    config = FundRotationConfig(
+        k=1, top_n=1, initial_capital=100_000,
+        adv_min_observations=1, max_participation_rate=1.0,
+        start_date="20240102", end_date="20240110",
+    )
+    ctx = build_execution_context(market, adj, config)
+
+    run_execution_loop(result, config, ctx)
+
+    attempts = [event for event in result.trade_events if event["ts_code"] == "A"]
+    assert [(event["trade_date"], event["status"]) for event in attempts] == [
+        ("20240108", "FILLED"),
+    ]
+
+
 def test_should_cancel_stops_execution_loop_at_daily_checkpoint():
     """§26.1 — the execution loop honors the cancellation checkpoint and
     preserves events/equity collected before the stop."""
