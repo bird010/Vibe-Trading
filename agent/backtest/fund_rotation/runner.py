@@ -452,12 +452,18 @@ class FundRotationBacktestRunner:
                     if decision.action is DecisionKind.SET_TARGETS
                 },
             )
+        except (ValueError, TypeError) as exc:
+            return fail("CONTRACT_ERROR", str(exc))
+
+        try:
             native_result = self._execution_engine.execute(
                 native_request,
                 should_cancel=lambda: cancellation.is_cancelled,
             )
-        except (UnknownExecutionRule, PITInvalidMarketRule, ValueError, TypeError) as exc:
+        except (UnknownExecutionRule, PITInvalidMarketRule) as exc:
             return fail("EXECUTION_RULES_UNAVAILABLE", str(exc))
+        except (ValueError, TypeError) as exc:
+            return fail("ENGINE_EXECUTION_ERROR", str(exc))
 
         execution_diagnostics = _formal_execution_diagnostics(
             native_result,

@@ -6,6 +6,8 @@ import pytest
 
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.pipeline import run_signal_pipeline
+from backtest.fund_rotation.pit_universe import PITQueryMode
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 def _synthetic_data(
@@ -62,6 +64,22 @@ def _synthetic_data(
     return fund_daily, fund_adj, dim_fund
 
 
+def _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund, **kwargs):
+    codes = tuple(sorted(dim_fund["ts_code"].astype(str)))
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(codes)
+    return run_signal_pipeline(
+        config,
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+        market_rule_snapshot_version=1,
+        **kwargs,
+    )
+
+
 class TestPipelineE2E:
     """§19.5 — synthetic data gold-standard test."""
 
@@ -79,7 +97,7 @@ class TestPipelineE2E:
             start_date="20220101",
             end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         # Should produce some target weeks
         assert len(result.weekly_targets) > 0
         assert result.num_reclusters >= 1
@@ -93,7 +111,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         for week, targets in result.weekly_targets.items():
             total = sum(targets.values())
             assert total <= 1.0 + 1e-9, f"Week {week}: total weight {total} > 1"
@@ -108,8 +126,8 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        r1 = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
-        r2 = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        r1 = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        r2 = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         assert r1.weekly_targets == r2.weekly_targets
         assert r1.num_reclusters == r2.num_reclusters
 
@@ -122,7 +140,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         assert not result.equal_weight_benchmark.empty
         assert not result.buy_hold_benchmark.empty
         assert not result.cash_benchmark.empty
@@ -136,7 +154,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4, initial_capital=100_000,
             start_date="20220101", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
 
         # buy_hold still uses execution engine (daily, with entry costs)
         assert len(result.buy_hold_benchmark) > len(result.weekly_targets)
@@ -169,7 +187,7 @@ class TestPipelineE2E:
             "backtest.fund_rotation.pipeline.time_block_bootstrap",
             capture_bootstrap,
         )
-        result = run_signal_pipeline(FundRotationConfig(
+        result = _run_signal_pipeline(FundRotationConfig(
             k=3, top_n=2, min_training_weeks=20,
             correlation_lookback_weeks=20, min_valid_weeks=10,
             min_pairwise_weeks=10, recluster_interval_weeks=10,
@@ -189,7 +207,7 @@ class TestPipelineE2E:
 
     def test_short_common_interval_reports_structured_bootstrap_skip(self):
         fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=24)
-        result = run_signal_pipeline(FundRotationConfig(
+        result = _run_signal_pipeline(FundRotationConfig(
             k=3, top_n=2, min_training_weeks=20,
             correlation_lookback_weeks=20, min_valid_weeks=10,
             min_pairwise_weeks=10, recluster_interval_weeks=10,
@@ -214,7 +232,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         if result.weekly_targets:
             assert "annual_return" in result.strategy_metrics
             assert "max_drawdown" in result.strategy_metrics
@@ -229,7 +247,7 @@ class TestPipelineE2E:
             start_date="20220101", end_date="20220201",
         )
         with pytest.raises(ValueError, match="Insufficient history"):
-            run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+            _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
 
     def test_stage_callbacks_follow_state_machine_order(self):
         """Pipeline stages must be emitted in the persisted state-machine order."""
@@ -243,7 +261,7 @@ class TestPipelineE2E:
         )
         stages: list[str] = []
 
-        run_signal_pipeline(
+        _run_signal_pipeline(
             config, fund_daily, fund_adj, dim_fund,
             stage_callback=stages.append,
         )
@@ -281,7 +299,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
 
         assert calls, "pct_change was not exercised by the pipeline"
         assert all(fm is None for fm in calls), (
@@ -314,7 +332,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         assert windows, "correlation distance was not exercised"
         for week_endings in windows:
             assert len(week_endings) == 52, (
@@ -338,7 +356,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230401",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
 
         from backtest.fund_rotation.evaluation import iso_week_endings
         endings = iso_week_endings(
@@ -362,11 +380,11 @@ class TestPipelineE2E:
         # 51 week-endings -> insufficient history (defined failure).
         fd51, fa51, df51 = _synthetic_data(n_etfs=10, n_weeks=51)
         with pytest.raises(ValueError, match="Insufficient history"):
-            run_signal_pipeline(config, fd51, fa51, df51)
+            _run_signal_pipeline(config, fd51, fa51, df51)
 
         # 52 week-endings -> only 51 valid returns, no complete window -> no signal.
         fd52, fa52, df52 = _synthetic_data(n_etfs=10, n_weeks=52)
-        r52 = run_signal_pipeline(config, fd52, fa52, df52)
+        r52 = _run_signal_pipeline(config, fd52, fa52, df52)
         assert len(r52.weekly_targets) == 0
 
         # 54 week-endings -> the first signal lands on the 53rd week-ending
@@ -374,7 +392,7 @@ class TestPipelineE2E:
         # executes. (Exactly 53 weeks cannot run end-to-end: the first signal
         # would sit on the last week-ending with no execution day — §32.1.)
         fd54, fa54, df54 = _synthetic_data(n_etfs=10, n_weeks=54)
-        r54 = run_signal_pipeline(config, fd54, fa54, df54)
+        r54 = _run_signal_pipeline(config, fd54, fa54, df54)
         assert len(r54.weekly_targets) >= 1
         assert min(r54.weekly_targets) == "20230106"  # 53rd week-ending
 
@@ -390,7 +408,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220530", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
 
         # Output signals are trimmed to >= start_date (pre-eval signal excluded).
         assert "20220527" not in result.weekly_targets
@@ -420,7 +438,7 @@ class TestPipelineE2E:
                     min_valid_weeks=10, min_pairwise_weeks=10, recluster_interval_weeks=10,
                     momentum_window_weeks=4)
         # Recover the pre-evaluation target (week 20220527) via an early start.
-        early = run_signal_pipeline(
+        early = _run_signal_pipeline(
             FundRotationConfig(**base, start_date="20220101", end_date="20230701"),
             fund_daily, fund_adj, dim_fund,
         )
@@ -438,7 +456,7 @@ class TestPipelineE2E:
         assert canonical_first == "20220530"
 
         # Real executor's first order matches the canonical schedule.
-        result = run_signal_pipeline(
+        result = _run_signal_pipeline(
             FundRotationConfig(**base, start_date="20220530", end_date="20230701"),
             fund_daily, fund_adj, dim_fund,
         )
@@ -456,7 +474,7 @@ class TestPipelineE2E:
             momentum_window_weeks=4,
             start_date="20220101", end_date="20230701",
         )
-        result = run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
+        result = _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund)
         # First signal 20220527 is in-evaluation; executes next trading day.
         assert min(result.weekly_targets) == "20220527"
         order_dates = sorted(o["trade_date"] for o in result.orders if o["trade_date"])

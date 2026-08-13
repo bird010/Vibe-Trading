@@ -128,6 +128,14 @@ class SpyNativeEngine:
         )
 
 
+class RaisingNativeEngine:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def execute(self, request, *, should_cancel=None):
+        raise self.exc
+
+
 class DelayedToken(CancellationToken):
     def __init__(self):
         super().__init__()
@@ -372,6 +380,30 @@ def test_missing_explicit_pit_rule_inputs_fail_closed_without_engine_call():
     assert result.error_code == "EXECUTION_RULES_UNAVAILABLE"
     assert "PIT market rule resolver" in result.error_message
     assert engine.calls == []
+
+
+def test_native_engine_missing_rule_exception_maps_to_execution_rules_unavailable():
+    resolver = MarketRuleResolver(InMemoryPITMarketRuleSource([]))
+    instruments = {"A": FundInstrumentVersion("A", "domestic_equity_etf", "A-src")}
+
+    result = _run(
+        engine=None,
+        market_rule_resolver=resolver,
+        market_rule_instruments=instruments,
+    )
+
+    assert result.status is SubRunStatus.FAILED
+    assert result.error_code == "EXECUTION_RULES_UNAVAILABLE"
+    assert "UNKNOWN_EXECUTION_RULE" in result.error_message
+
+
+@pytest.mark.parametrize("exc", [ValueError("bad size"), TypeError("bad request")])
+def test_native_engine_general_errors_are_not_reported_as_missing_rules(exc):
+    result = _run(engine=RaisingNativeEngine(exc))
+
+    assert result.status is SubRunStatus.FAILED
+    assert result.error_code == "ENGINE_EXECUTION_ERROR"
+    assert str(exc) in result.error_message
 
 
 def test_diagnostics_are_computed_directly_from_native_ledger():

@@ -17,6 +17,7 @@ and valuation live in ``execution.py``; scheduling lives in the Runner.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import pandas as pd
 
@@ -35,6 +36,11 @@ from backtest.fund_rotation.metrics import compute_performance_metrics
 from backtest.fund_rotation.robustness import compute_cluster_stability, time_block_bootstrap
 from backtest.fund_rotation.ideal_executor import run_daily_ideal_account
 from backtest.fund_rotation.benchmarks import compute_equal_weight_theoretical_index
+from backtest.fund_rotation.market_rules import (
+    FundInstrumentVersion,
+    MarketRuleResolver,
+)
+from backtest.fund_rotation.pit_universe import PITQueryMode
 
 from backtest.fund_rotation.runner import (
     CancellationToken,
@@ -84,6 +90,10 @@ def run_signal_pipeline(
     trade_dates: list[str] | None = None,
     stage_callback: callable | None = None,
     profiler: ExecutionProfiler | None = None,
+    market_rule_resolver: MarketRuleResolver | None = None,
+    market_rule_instruments: Mapping[str, FundInstrumentVersion] | None = None,
+    market_rule_mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
+    market_rule_snapshot_version: int | None = None,
 ) -> PipelineResult:
     """Run the legacy-shape fund-rotation backtest via the common Runner.
 
@@ -98,6 +108,10 @@ def run_signal_pipeline(
         dim_fund: Columns [ts_code, name, list_date].
         trade_dates: Optional sorted list of all market trading dates.
         stage_callback: Optional callable(stage_name: str) for progress reporting.
+        market_rule_resolver: Explicit PIT market-rule resolver for Runner execution.
+        market_rule_instruments: Explicit PIT instrument mapping for Runner execution.
+        market_rule_mode: PIT market-rule query mode.
+        market_rule_snapshot_version: Explicit market-rule snapshot version.
 
     Returns:
         PipelineResult with targets, benchmarks, and metrics.
@@ -190,7 +204,9 @@ def run_signal_pipeline(
     _notify("GENERATING_SIGNALS")
     strategy_config = CorrelationAllMembersConfig.from_legacy(config)
     snapshot = PinnedFundDataSnapshot(
-        fund_version=0, fund_adj_version=0, dim_version=0,
+        fund_version=0,
+        fund_adj_version=0,
+        dim_version=int(market_rule_snapshot_version or 0),
         universe_codes=tuple(sorted(str(c) for c in etf_codes)),
         trading_dates=tuple(all_dates_sorted),
         fingerprint="legacy-compat",
@@ -211,7 +227,14 @@ def run_signal_pipeline(
         base_slippage_bps=config.base_slippage_bps,
         max_slippage_bps=config.max_slippage_bps,
     )
-    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+    runner = FundRotationBacktestRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=market_rule_resolver,
+        market_rule_instruments=market_rule_instruments,
+        market_rule_mode=market_rule_mode,
+    )
     run_result = runner.run(
         strategy=CorrelationAllMembersStrategy(),
         config=strategy_config,
