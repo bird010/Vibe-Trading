@@ -7,8 +7,9 @@ owns the formal v2 execution facts directly.  It does not adapt a
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -32,9 +33,33 @@ from backtest.fund_rotation.execution_ledger_v2 import (
     ParentOrderRecord,
     ParentOrderStatus,
 )
+from backtest.fund_rotation.market_rules import (
+    FundInstrumentVersion,
+    MarketRuleResolver,
+    MarketRules,
+    UnknownExecutionRule,
+)
 from backtest.fund_rotation.executor import PortfolioExecutor
-from backtest.fund_rotation.orders import OrderManager
+from backtest.fund_rotation.orders import Order, OrderManager, OrderStatus
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_change
+
+
+@dataclass(frozen=True)
+class NativeExecutionState:
+    cash: float
+    positions: dict[str, dict] = field(default_factory=dict)
+    last_close: dict[str, float] = field(default_factory=dict)
+    last_close_date: dict[str, str] = field(default_factory=dict)
+    last_close_source: dict[str, str] = field(default_factory=dict)
+    position_adj_factor: dict[str, float] = field(default_factory=dict)
+    active_targets: dict[str, float] = field(default_factory=dict)
+    active_orders: tuple[dict, ...] = field(default_factory=tuple)
+    parent_orders: tuple[dict, ...] = field(default_factory=tuple)
+    attempts: tuple[dict, ...] = field(default_factory=tuple)
+    trades: tuple[dict, ...] = field(default_factory=tuple)
+    corporate_actions: tuple[dict, ...] = field(default_factory=tuple)
+    event_counter: int = 0
 
 
 @dataclass(frozen=True)
@@ -48,6 +73,12 @@ class NativeExecutionRequest:
     knowledge_cutoff: str
     snapshot_version: int
     run_id: str
+    rule_resolver: MarketRuleResolver
+    instrument_versions: dict[str, FundInstrumentVersion]
+    rule_mode: PITQueryMode
+    initial_state: NativeExecutionState | None = None
+    decision_ids: dict[str, str] = field(default_factory=dict)
+    order_ids: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -59,6 +90,7 @@ class NativeExecutionResult:
     positions_history: list[dict]
     ending_cash: float
     ending_positions: dict[str, dict]
+    state: NativeExecutionState
 
 
 @dataclass
@@ -79,6 +111,9 @@ class _ParentState:
     status: ParentOrderStatus = ParentOrderStatus.OPEN
     completed_date: str = ""
     cancel_reason: str = ""
+    rule_version: str = ""
+    source_record_id: str = ""
+    corporate_action_adjustments: tuple[dict, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         self.remaining_quantity = self.original_requested_quantity
@@ -125,6 +160,64 @@ class _ParentState:
             lot_size=self.lot_size,
         )
 
+    def to_state_dict(self) -> dict:
+        return {
+            "order_id": self.order_id,
+            "decision_id": self.decision_id,
+            "ts_code": self.ts_code,
+            "direction": self.direction,
+            "created_date": self.created_date,
+            "original_requested_quantity": self.original_requested_quantity,
+            "cumulative_filled_quantity": self.cumulative_filled_quantity,
+            "remaining_quantity": self.remaining_quantity,
+            "quantity_basis": self.quantity_basis,
+            "lot_size": self.lot_size,
+            "replacement_of_order_id": self.replacement_of_order_id,
+            "replacement_chain_id": self.replacement_chain_id,
+            "corporate_action_id": self.corporate_action_id,
+            "status": self.status.value,
+            "completed_date": self.completed_date,
+            "cancel_reason": self.cancel_reason,
+            "rule_version": self.rule_version,
+            "source_record_id": self.source_record_id,
+            "corporate_action_adjustments": list(self.corporate_action_adjustments),
+        }
+
+    @classmethod
+    def from_state_dict(cls, data: dict) -> "_ParentState":
+        parent = cls(
+            order_id=str(data["order_id"]),
+            decision_id=str(data["decision_id"]),
+            ts_code=str(data["ts_code"]),
+            direction=str(data["direction"]),
+            created_date=str(data["created_date"]),
+            original_requested_quantity=int(data["original_requested_quantity"]),
+            quantity_basis=float(data.get("quantity_basis", 1.0) or 1.0),
+            lot_size=int(data.get("lot_size", 100) or 100),
+            replacement_of_order_id=str(data.get("replacement_of_order_id", "")),
+            replacement_chain_id=str(data.get("replacement_chain_id", "")),
+            corporate_action_id=str(data.get("corporate_action_id", "")),
+            status=ParentOrderStatus(data.get("status", ParentOrderStatus.OPEN.value)),
+            completed_date=str(data.get("completed_date", "")),
+            cancel_reason=str(data.get("cancel_reason", "")),
+            rule_version=str(data.get("rule_version", "")),
+            source_record_id=str(data.get("source_record_id", "")),
+            corporate_action_adjustments=tuple(
+                dict(item) for item in data.get("corporate_action_adjustments", ())
+            ),
+        )
+        parent.cumulative_filled_quantity = int(
+            data.get("cumulative_filled_quantity", 0) or 0
+        )
+        parent.remaining_quantity = int(
+            data.get(
+                "remaining_quantity",
+                parent.original_requested_quantity - parent.cumulative_filled_quantity,
+            )
+            or 0
+        )
+        return parent
+
 
 class FundRotationExecutionEngine:
     def execute(
@@ -134,10 +227,14 @@ class FundRotationExecutionEngine:
         should_cancel: Callable[[], bool] | None = None,
     ) -> NativeExecutionResult:
         config = request.execution
+        if abs(float(request.initial_capital) - float(config.initial_capital)) > 1e-9:
+            raise ValueError("request.initial_capital must equal execution.initial_capital")
         evaluation_dates = list(request.evaluation_dates)
         ctx = build_execution_context(request.fund_daily, request.fund_adj, config)
 
-        if not request.targets:
+        initial_state = request.initial_state
+        has_active_state = bool(initial_state and initial_state.active_orders)
+        if not request.targets and not has_active_state:
             return _cash_hold_result(evaluation_dates, request.initial_capital)
 
         snapshots = [
@@ -155,33 +252,55 @@ class FundRotationExecutionEngine:
             )
             for exec_date, snap in sorted(schedule.items())
         }
-        if not exec_date_map:
+        if not exec_date_map and not has_active_state:
             return _cash_hold_result(evaluation_dates, request.initial_capital)
 
-        rules = ChinaETFExecutionRules(
-            commission_rate=config.commission_rate,
-            commission_min=config.commission_min,
-            other_fee_rate=config.other_fee_rate,
+        initial_rule_code = _first_execution_code(request, initial_state)
+        if not initial_rule_code:
+            raise UnknownExecutionRule("UNKNOWN_EXECUTION_RULE: no execution instrument")
+        initial_rules, _ = _resolve_execution_rules(
+            request,
+            initial_rule_code,
+            evaluation_dates[0],
+            config,
         )
-        executor = PortfolioExecutor(cash=request.initial_capital, rules=rules)
-        order_mgr = OrderManager()
+        executor = PortfolioExecutor(
+            cash=float(initial_state.cash) if initial_state else request.initial_capital,
+            rules=initial_rules,
+        )
+        if initial_state:
+            executor.set_positions(initial_state.positions)
+            executor._last_close = dict(initial_state.last_close)
+            executor._last_close_date = dict(initial_state.last_close_date)
+            executor._last_close_source = dict(initial_state.last_close_source)
+
+        order_mgr = _restore_order_manager(initial_state)
         profiler = ExecutionProfiler()
 
-        parent_states: dict[str, _ParentState] = {}
-        active_parent_by_code: dict[str, str] = {}
-        attempt_counts: dict[str, int] = {}
+        parent_states: dict[str, _ParentState] = _restore_parent_states(initial_state)
+        active_parent_by_code: dict[str, str] = {
+            str(order["ts_code"]): str(order["parent_order_id"])
+            for order in (initial_state.active_orders if initial_state else ())
+        }
+        attempts: list[ExecutionAttemptRecord] = _restore_attempts(initial_state)
+        trades: list[ExecutedTradeRecord] = _restore_trades(initial_state)
+        corporate_actions: list[CorporateActionRecord] = _restore_corporate_actions(
+            initial_state
+        )
+        attempt_counts: dict[str, int] = _attempt_counts(attempts)
         replacement_counts: dict[str, int] = {}
-        attempts: list[ExecutionAttemptRecord] = []
-        trades: list[ExecutedTradeRecord] = []
-        corporate_actions: list[CorporateActionRecord] = []
         trade_events: list[dict] = []
         equity_records: list[dict] = []
         positions_history: list[dict] = []
 
-        active_targets: dict[str, float] = {}
-        position_adj_factor: dict[str, float] = {}
+        active_targets: dict[str, float] = (
+            dict(initial_state.active_targets) if initial_state else {}
+        )
+        position_adj_factor: dict[str, float] = (
+            dict(initial_state.position_adj_factor) if initial_state else {}
+        )
         date_ordinal = {date: index for index, date in enumerate(evaluation_dates)}
-        event_counter = 0
+        event_counter = int(initial_state.event_counter) if initial_state else 0
 
         for trade_date in evaluation_dates:
             if should_cancel is not None and should_cancel():
@@ -199,14 +318,17 @@ class FundRotationExecutionEngine:
                 replacement_counts=replacement_counts,
                 corporate_actions=corporate_actions,
                 trade_events=trade_events,
-                lot_size=rules.lot_size,
             )
 
             if trade_date in exec_date_map:
                 signal_week, targets = exec_date_map[trade_date]
                 active_targets = targets
                 event_counter += 1
-                signal_event_id = f"SIG-{signal_week}-{event_counter:04d}"
+                signal_event_id = _caller_decision_id(
+                    request,
+                    signal_week,
+                    event_counter,
+                )
 
                 all_codes = set(targets) | set(executor._positions)
                 bars = {
@@ -214,6 +336,17 @@ class FundRotationExecutionEngine:
                     for code in all_codes
                     if (trade_date, code) in ctx.bar_lookup
                 }
+                creation_rules: dict[str, ChinaETFExecutionRules] = {}
+                creation_provenance: dict[str, MarketRules] = {}
+                for code in all_codes:
+                    rule, provenance = _resolve_execution_rules(
+                        request,
+                        code,
+                        trade_date,
+                        config,
+                    )
+                    creation_rules[code] = rule
+                    creation_provenance[code] = provenance
                 pre_equity = executor._compute_equity_anchor(sorted(all_codes), bars)
                 deltas: dict[str, int] = {}
                 for code in all_codes:
@@ -237,7 +370,13 @@ class FundRotationExecutionEngine:
                 )
                 order_mgr.create_orders(deltas, event_id=signal_event_id)
                 for code, delta in sorted(deltas.items()):
-                    order_id = f"{signal_event_id}-{code}"
+                    order_id = _caller_order_id(
+                        request,
+                        signal_week,
+                        signal_event_id,
+                        code,
+                    )
+                    provenance = creation_provenance[code]
                     parent_states[order_id] = _ParentState(
                         order_id=order_id,
                         decision_id=signal_event_id,
@@ -246,7 +385,9 @@ class FundRotationExecutionEngine:
                         created_date=trade_date,
                         original_requested_quantity=abs(int(delta)),
                         quantity_basis=1.0,
-                        lot_size=rules.lot_size,
+                        lot_size=creation_rules[code].lot_size,
+                        rule_version=provenance.rule_version,
+                        source_record_id=provenance.source_record_id,
                     )
                     active_parent_by_code[code] = order_id
 
@@ -268,6 +409,17 @@ class FundRotationExecutionEngine:
                     executor._last_close_source[code] = "close"
 
             if pending:
+                rules_by_code: dict[str, ChinaETFExecutionRules] = {}
+                provenance_by_code: dict[str, MarketRules] = {}
+                for order in pending:
+                    rule, provenance = _resolve_execution_rules(
+                        request,
+                        order.ts_code,
+                        trade_date,
+                        config,
+                    )
+                    rules_by_code[order.ts_code] = rule
+                    provenance_by_code[order.ts_code] = provenance
                 rebalance_result = execute_with_capacity(
                     executor=executor,
                     order_mgr=order_mgr,
@@ -276,8 +428,9 @@ class FundRotationExecutionEngine:
                     trade_date=trade_date,
                     config=config,
                     adv_index=ctx.adv_index,
-                    rules=rules,
+                    rules=initial_rules,
                     profiler=profiler,
+                    rules_by_code=rules_by_code,
                 )
                 for event in rebalance_result.events:
                     _record_execution_event(
@@ -290,6 +443,7 @@ class FundRotationExecutionEngine:
                         attempts=attempts,
                         trades=trades,
                         trade_events=trade_events,
+                        provenance_by_code=provenance_by_code,
                     )
 
             for code in executor._positions:
@@ -322,7 +476,16 @@ class FundRotationExecutionEngine:
                         1.0
                         - sum(max(weight, 0.0) for weight in active_targets.values()),
                     ),
-                    "execution_failure_cash": 0.0,
+                    "execution_failure_cash": max(
+                        executor.cash
+                        - daily_equity
+                        * max(
+                            0.0,
+                            1.0
+                            - sum(max(weight, 0.0) for weight in active_targets.values()),
+                        ),
+                        0.0,
+                    ),
                     "equity": daily_equity,
                 }
             )
@@ -339,10 +502,21 @@ class FundRotationExecutionEngine:
             ledger=ledger,
             executed_equity=executed_equity,
             trade_events=trade_events,
-            orders=_orders_from_ledger(ledger),
+            orders=_orders_from_ledger(ledger, parent_states),
             positions_history=positions_history,
             ending_cash=float(executor.cash),
             ending_positions={code: dict(pos) for code, pos in executor._positions.items()},
+            state=_state_from_execution(
+                cash=float(executor.cash),
+                executor=executor,
+                order_mgr=order_mgr,
+                parent_states=parent_states,
+                active_parent_by_code=active_parent_by_code,
+                ledger=ledger,
+                position_adj_factor=position_adj_factor,
+                active_targets=active_targets,
+                event_counter=event_counter,
+            ),
         )
 
 
@@ -370,7 +544,256 @@ def _cash_hold_result(
         ],
         ending_cash=float(initial_capital),
         ending_positions={},
+        state=NativeExecutionState(cash=float(initial_capital)),
     )
+
+
+def _first_execution_code(
+    request: NativeExecutionRequest,
+    initial_state: NativeExecutionState | None,
+) -> str:
+    for targets in request.targets.values():
+        for code in targets:
+            return str(code)
+    if initial_state:
+        for order in initial_state.active_orders:
+            return str(order["ts_code"])
+        for code in initial_state.positions:
+            return str(code)
+    return ""
+
+
+def _resolve_execution_rules(
+    request: NativeExecutionRequest,
+    code: str,
+    trade_date: str,
+    config: FundRotationConfig,
+) -> tuple[ChinaETFExecutionRules, MarketRules]:
+    instrument = request.instrument_versions.get(code)
+    if instrument is None:
+        raise UnknownExecutionRule(f"UNKNOWN_EXECUTION_RULE: missing instrument {code}")
+    provenance = request.rule_resolver.resolve(
+        instrument=instrument,
+        trade_date=trade_date,
+        knowledge_cutoff=request.knowledge_cutoff,
+        snapshot_version=request.snapshot_version,
+        mode=request.rule_mode,
+    )
+    return _rules_from_market_rules(provenance, config), provenance
+
+
+def _rules_from_market_rules(
+    market_rules: MarketRules,
+    config: FundRotationConfig,
+) -> ChinaETFExecutionRules:
+    if market_rules.price_limit_pct is None:
+        raise UnknownExecutionRule(
+            f"UNKNOWN_EXECUTION_RULE: missing price_limit_pct for {market_rules.rule_version}"
+        )
+    return ChinaETFExecutionRules(
+        lot_size=market_rules.lot_size,
+        tick_size=market_rules.tick_size,
+        commission_rate=config.commission_rate,
+        commission_min=config.commission_min,
+        other_fee_rate=config.other_fee_rate,
+        allow_short=market_rules.short_allowed,
+        price_limit_pct=market_rules.price_limit_pct,
+    )
+
+
+def _caller_decision_id(
+    request: NativeExecutionRequest,
+    signal_week: str,
+    event_counter: int,
+) -> str:
+    return request.decision_ids.get(signal_week, f"SIG-{signal_week}-{event_counter:04d}")
+
+
+def _caller_order_id(
+    request: NativeExecutionRequest,
+    signal_week: str,
+    decision_id: str,
+    code: str,
+) -> str:
+    if decision_id in request.order_ids and code in request.order_ids[decision_id]:
+        return request.order_ids[decision_id][code]
+    if signal_week in request.order_ids and code in request.order_ids[signal_week]:
+        return request.order_ids[signal_week][code]
+    return f"{decision_id}-{code}"
+
+
+def _restore_order_manager(initial_state: NativeExecutionState | None) -> OrderManager:
+    order_mgr = OrderManager()
+    if initial_state is None:
+        return order_mgr
+    for row in initial_state.active_orders:
+        order = Order(
+            ts_code=str(row["ts_code"]),
+            requested=int(row["requested"]),
+            event_id=str(row["event_id"]),
+            status=OrderStatus(row.get("status", OrderStatus.PENDING.value)),
+            filled=int(row.get("filled", 0) or 0),
+            attempts=[dict(item) for item in row.get("attempts", [])],
+            quantity_basis=float(row.get("quantity_basis", 1.0) or 1.0),
+            corporate_action_adjustments=[
+                dict(item) for item in row.get("corporate_action_adjustments", [])
+            ],
+        )
+        order_mgr._active[order.ts_code] = order
+    return order_mgr
+
+
+def _restore_parent_states(
+    initial_state: NativeExecutionState | None,
+) -> dict[str, _ParentState]:
+    if initial_state is None:
+        return {}
+    return {
+        str(row["order_id"]): _ParentState.from_state_dict(dict(row))
+        for row in initial_state.parent_orders
+    }
+
+
+def _restore_attempts(
+    initial_state: NativeExecutionState | None,
+) -> list[ExecutionAttemptRecord]:
+    if initial_state is None:
+        return []
+    return [ExecutionAttemptRecord(**dict(row)) for row in initial_state.attempts]
+
+
+def _restore_trades(
+    initial_state: NativeExecutionState | None,
+) -> list[ExecutedTradeRecord]:
+    if initial_state is None:
+        return []
+    return [ExecutedTradeRecord(**dict(row)) for row in initial_state.trades]
+
+
+def _restore_corporate_actions(
+    initial_state: NativeExecutionState | None,
+) -> list[CorporateActionRecord]:
+    if initial_state is None:
+        return []
+    return [
+        CorporateActionRecord(**dict(row))
+        for row in initial_state.corporate_actions
+    ]
+
+
+def _attempt_counts(attempts: list[ExecutionAttemptRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for attempt in attempts:
+        counts[attempt.order_id] = max(
+            counts.get(attempt.order_id, 0),
+            int(attempt.attempt_number),
+        )
+    return counts
+
+
+def _state_from_execution(
+    *,
+    cash: float,
+    executor: PortfolioExecutor,
+    order_mgr: OrderManager,
+    parent_states: dict[str, _ParentState],
+    active_parent_by_code: dict[str, str],
+    ledger: ExecutionLedger,
+    position_adj_factor: dict[str, float],
+    active_targets: dict[str, float],
+    event_counter: int,
+) -> NativeExecutionState:
+    active_orders: list[dict] = []
+    for code, order in sorted(order_mgr._active.items()):
+        parent_order_id = active_parent_by_code.get(code)
+        if not parent_order_id:
+            continue
+        active_orders.append(
+            {
+                "parent_order_id": parent_order_id,
+                "ts_code": code,
+                "requested": order.requested,
+                "event_id": order.event_id,
+                "status": order.status.value,
+                "filled": order.filled,
+                "attempts": [dict(item) for item in order.attempts],
+                "quantity_basis": order.quantity_basis,
+                "corporate_action_adjustments": [
+                    dict(item) for item in order.corporate_action_adjustments
+                ],
+            }
+        )
+    return NativeExecutionState(
+        cash=cash,
+        positions={code: dict(pos) for code, pos in executor._positions.items()},
+        last_close=dict(executor._last_close),
+        last_close_date=dict(executor._last_close_date),
+        last_close_source=dict(executor._last_close_source),
+        position_adj_factor=dict(position_adj_factor),
+        active_targets=dict(active_targets),
+        active_orders=tuple(active_orders),
+        parent_orders=tuple(parent.to_state_dict() for parent in parent_states.values()),
+        attempts=tuple(_attempt_to_state(attempt) for attempt in ledger.attempts),
+        trades=tuple(_trade_to_state(trade) for trade in ledger.trades),
+        corporate_actions=tuple(
+            _corporate_action_to_state(action)
+            for action in ledger.corporate_actions
+        ),
+        event_counter=event_counter,
+    )
+
+
+def _attempt_to_state(attempt: ExecutionAttemptRecord) -> dict:
+    return {
+        "attempt_id": attempt.attempt_id,
+        "order_id": attempt.order_id,
+        "attempt_number": attempt.attempt_number,
+        "trade_date": attempt.trade_date,
+        "requested_quantity": attempt.requested_quantity,
+        "filled_quantity": attempt.filled_quantity,
+        "unfilled_quantity": attempt.unfilled_quantity,
+        "quantity_basis_id": attempt.quantity_basis_id,
+        "raw_price": attempt.raw_price,
+        "executed_price": attempt.executed_price,
+        "commission": attempt.commission,
+        "explicit_fee": attempt.explicit_fee,
+        "slippage_cost": attempt.slippage_cost,
+        "participation_rate": attempt.participation_rate,
+        "status": attempt.status.value,
+        "reason_code": attempt.reason_code,
+    }
+
+
+def _trade_to_state(trade: ExecutedTradeRecord) -> dict:
+    return {
+        "trade_id": trade.trade_id,
+        "attempt_id": trade.attempt_id,
+        "order_id": trade.order_id,
+        "ts_code": trade.ts_code,
+        "direction": trade.direction.value,
+        "quantity": trade.quantity,
+        "quantity_basis_id": trade.quantity_basis_id,
+        "price": trade.price,
+        "notional": trade.notional,
+        "commission": trade.commission,
+        "explicit_fee": trade.explicit_fee,
+        "slippage_cost": trade.slippage_cost,
+        "trade_date": trade.trade_date,
+    }
+
+
+def _corporate_action_to_state(action: CorporateActionRecord) -> dict:
+    return {
+        "corporate_action_id": action.corporate_action_id,
+        "ts_code": action.ts_code,
+        "action_type": action.action_type.value,
+        "effective_date": action.effective_date,
+        "old_quantity": action.old_quantity,
+        "new_quantity": action.new_quantity,
+        "old_cost_basis": action.old_cost_basis,
+        "new_cost_basis": action.new_cost_basis,
+        "adjustment_factor": action.adjustment_factor,
+    }
 
 
 def _cancel_active_parents(
@@ -403,7 +826,6 @@ def _apply_corporate_actions(
     replacement_counts: dict[str, int],
     corporate_actions: list[CorporateActionRecord],
     trade_events: list[dict],
-    lot_size: int,
 ) -> None:
     for code, pos in list(executor._positions.items()):
         new_factor = adj_lookup.get((trade_date, code))
@@ -457,7 +879,28 @@ def _apply_corporate_actions(
                         old_parent.direction,
                         old_parent.remaining_quantity,
                         scale,
-                        lot_size=lot_size,
+                        lot_size=old_parent.lot_size,
+                    )
+                    adjustment = {
+                        "corporate_action_id": corporate_action_id,
+                        "trade_date": trade_date,
+                        "scale": scale,
+                        "before": {
+                            "requested": old_parent.original_requested_quantity,
+                            "filled": old_parent.cumulative_filled_quantity,
+                            "remaining": old_parent.remaining_quantity,
+                            "quantity_basis": old_parent.quantity_basis,
+                        },
+                        "after": {
+                            "requested": replacement_requested,
+                            "filled": 0,
+                            "remaining": replacement_requested,
+                            "quantity_basis": old_parent.quantity_basis * scale,
+                        },
+                    }
+                    old_parent.corporate_action_adjustments = (
+                        *old_parent.corporate_action_adjustments,
+                        adjustment,
                     )
                     parent_states[replacement_id] = _ParentState(
                         order_id=replacement_id,
@@ -467,7 +910,7 @@ def _apply_corporate_actions(
                         created_date=trade_date,
                         original_requested_quantity=replacement_requested,
                         quantity_basis=old_parent.quantity_basis * scale,
-                        lot_size=lot_size,
+                        lot_size=old_parent.lot_size,
                         replacement_of_order_id=old_parent_id,
                         replacement_chain_id=(
                             old_parent.replacement_chain_id or old_parent_id
@@ -524,12 +967,17 @@ def _record_execution_event(
     attempts: list[ExecutionAttemptRecord],
     trades: list[ExecutedTradeRecord],
     trade_events: list[dict],
+    provenance_by_code: dict[str, MarketRules],
 ) -> None:
     code = str(event.get("code", ""))
     parent_id = active_parent_by_code.get(code)
     if not parent_id:
         return
     parent = parent_states[parent_id]
+    provenance = provenance_by_code.get(code)
+    if provenance is not None:
+        parent.rule_version = provenance.rule_version
+        parent.source_record_id = provenance.source_record_id
     requested = int(event.get("requested", 0) or 0)
     filled = int(event.get("filled", 0) or 0)
     attempt_counts[parent_id] = attempt_counts.get(parent_id, 0) + 1
@@ -595,6 +1043,10 @@ def _record_execution_event(
         "order_id": parent_id,
         "attempt_id": attempt_id,
         "target_weight": float(active_targets.get(code, 0.0)),
+        "rule_version": provenance.rule_version if provenance else parent.rule_version,
+        "source_record_id": (
+            provenance.source_record_id if provenance else parent.source_record_id
+        ),
     }
     trade_events.append(enriched)
 
@@ -664,36 +1116,78 @@ def _holdings_snapshot(
     return holdings
 
 
-def _orders_from_ledger(ledger: ExecutionLedger) -> list[dict]:
+def _orders_from_ledger(
+    ledger: ExecutionLedger,
+    parent_states: dict[str, _ParentState],
+) -> list[dict]:
     attempts_by_order: dict[str, list[ExecutionAttemptRecord]] = {}
     for attempt in ledger.attempts:
         attempts_by_order.setdefault(attempt.order_id, []).append(attempt)
 
     rows: list[dict] = []
     for parent in ledger.parent_orders:
+        parent_state = parent_states.get(parent.order_id)
         parent_attempts = attempts_by_order.get(parent.order_id) or [None]
         for attempt in parent_attempts:
             rows.append(
                 {
                     "order_id": parent.order_id,
+                    "parent_order_id": parent.order_id,
                     "event_id": parent.decision_id,
+                    "decision_id": parent.decision_id,
                     "ts_code": parent.ts_code,
                     "direction": parent.direction.value,
                     "requested": parent.original_requested_quantity,
                     "filled": parent.cumulative_filled_quantity,
+                    "attempt_id": attempt.attempt_id if attempt else "",
                     "attempt_number": attempt.attempt_number if attempt else 0,
                     "trade_date": attempt.trade_date if attempt else "",
                     "attempt_filled": attempt.filled_quantity if attempt else 0,
                     "attempt_status": attempt.status.value if attempt else "NOT_ATTEMPTED",
                     "reason": attempt.reason_code if attempt else "",
+                    "cumulative_filled_at_attempt": (
+                        _cumulative_filled_at_attempt(ledger.attempts, attempt)
+                        if attempt
+                        else 0
+                    ),
+                    "attempt_quantity_basis": (
+                        _quantity_basis_from_id(attempt.quantity_basis_id)
+                        if attempt
+                        else _quantity_basis_from_id(parent.quantity_basis_id)
+                    ),
                     "remaining": parent.remaining_quantity,
                     "final_status": parent.status.value,
                     "current_quantity_basis": _quantity_basis_from_id(
                         parent.quantity_basis_id
                     ),
+                    "corporate_action_adjustments": json.dumps(
+                        list(
+                            parent_state.corporate_action_adjustments
+                            if parent_state
+                            else ()
+                        ),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "rule_version": parent_state.rule_version if parent_state else "",
+                    "source_record_id": (
+                        parent_state.source_record_id if parent_state else ""
+                    ),
                 }
             )
     return rows
+
+
+def _cumulative_filled_at_attempt(
+    attempts: tuple[ExecutionAttemptRecord, ...],
+    attempt: ExecutionAttemptRecord,
+) -> int:
+    return sum(
+        item.filled_quantity
+        for item in attempts
+        if item.order_id == attempt.order_id
+        and item.attempt_number <= attempt.attempt_number
+    )
 
 
 def _quantity_basis_id(ts_code: str, quantity_basis: object) -> str:

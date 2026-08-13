@@ -531,12 +531,18 @@ def execute_with_capacity(
     adv_index: ADVIndex,
     rules: ChinaETFExecutionRules,
     profiler: ExecutionProfiler | None = None,
+    rules_by_code: dict[str, ChinaETFExecutionRules] | None = None,
 ) -> RebalanceResult:
     """Attempt exact residual quantities with causal ADV and common cash scaling."""
     events: list[dict] = []
     pending = order_mgr.get_pending_orders()
     all_codes = sorted({o.ts_code for o in pending} | set(executor._positions))
     pre_equity = executor._compute_equity_anchor(all_codes, bars)
+
+    def execution_rules(code: str) -> ChinaETFExecutionRules:
+        if rules_by_code is None:
+            return rules
+        return rules_by_code[code]
 
     def block(order, reason: str, adv=None) -> None:
         requested = order.remaining
@@ -564,11 +570,12 @@ def execute_with_capacity(
     for order in pending_sells:
         code, requested = order.ts_code, order.remaining
         bar = bars.get(code, {})
-        if not rules.can_sell(bar):
+        order_rules = execution_rules(code)
+        if not order_rules.can_sell(bar):
             block(order, "market_blocked")
             continue
         entry_date = executor._positions.get(code, {}).get("entry_date", "")
-        if not rules.can_sell_today(entry_date, trade_date):
+        if not order_rules.can_sell_today(entry_date, trade_date):
             block(order, "t_plus_1")
             continue
         _t_adv = _time.perf_counter()
@@ -582,17 +589,17 @@ def execute_with_capacity(
         raw_price = executor._get_execution_price(code, bars)
         filled, participation, slippage = apply_capacity_and_slippage(
             requested, raw_price, adv.adv_value, config.max_participation_rate,
-            rules.lot_size, config.base_slippage_bps, config.max_slippage_bps,
+            order_rules.lot_size, config.base_slippage_bps, config.max_slippage_bps,
         )
         filled = min(
-            rules.round_sell_size(filled),
+            order_rules.round_sell_size(filled),
             executor._positions.get(code, {}).get("size", 0),
         )
         if filled <= 0:
             block(order, "capacity_zero", adv)
             continue
-        price = rules.apply_tick(raw_price * (1 - slippage / 10000.0), -1)
-        commission = rules.calc_commission(filled, price)
+        price = order_rules.apply_tick(raw_price * (1 - slippage / 10000.0), -1)
+        commission = order_rules.calc_commission(filled, price)
         executor.cash += filled * price - commission
         pos = executor._positions[code]
         new_size = pos["size"] - filled
@@ -620,7 +627,8 @@ def execute_with_capacity(
     for order in pending_buys:
         code, requested = order.ts_code, order.remaining
         bar = bars.get(code, {})
-        if not rules.can_buy(bar):
+        order_rules = execution_rules(code)
+        if not order_rules.can_buy(bar):
             block(order, "market_blocked")
             continue
         _t_adv = _time.perf_counter()
@@ -634,18 +642,19 @@ def execute_with_capacity(
         raw_price = executor._get_execution_price(code, bars)
         capacity_size, _, _ = apply_capacity_and_slippage(
             requested, raw_price, adv.adv_value, config.max_participation_rate,
-            rules.lot_size, config.base_slippage_bps, config.max_slippage_bps,
+            order_rules.lot_size, config.base_slippage_bps, config.max_slippage_bps,
         )
         if capacity_size <= 0:
             block(order, "capacity_zero", adv)
             continue
         candidates.append({
             "order": order, "requested": requested, "capacity_size": capacity_size,
-            "raw_price": raw_price, "adv": adv,
+            "raw_price": raw_price, "adv": adv, "rules": order_rules,
         })
 
     def buy_terms(item: dict, scale: float) -> tuple[int, float, float, float, float]:
-        size = rules.round_buy_size(item["capacity_size"] * scale)
+        item_rules = item["rules"]
+        size = item_rules.round_buy_size(item["capacity_size"] * scale)
         if size <= 0:
             return 0, 0.0, 0.0, 0.0, 0.0
         participation = size * item["raw_price"] / item["adv"].adv_value
@@ -653,8 +662,8 @@ def execute_with_capacity(
             config.max_slippage_bps,
             config.base_slippage_bps + 200.0 * participation,
         )
-        price = rules.apply_tick(item["raw_price"] * (1 + slippage / 10000.0), 1)
-        commission = rules.calc_commission(size, price)
+        price = item_rules.apply_tick(item["raw_price"] * (1 + slippage / 10000.0), 1)
+        commission = item_rules.calc_commission(size, price)
         return size, participation, slippage, price, commission
 
     def total_cost(scale: float) -> float:
