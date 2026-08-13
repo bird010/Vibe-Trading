@@ -696,12 +696,27 @@ class ShadowExecutionService:
         self,
         store: InMemoryForwardValidationStore,
         *,
+        decision_provider: FrozenStrategyDecisionProvider | None = None,
         execution_adapter: ShadowExecutionAdapter | None = None,
         accounting_adapter: ShadowAccountingAdapter | None = None,
     ) -> None:
         self.store = store
+        self.decision_provider = decision_provider
         self.execution_adapter = execution_adapter
         self.accounting_adapter = accounting_adapter
+
+    def seal_scheduled_decision(
+        self,
+        strategy_version_id: str,
+        as_of_time: datetime,
+    ) -> ShadowDecisionResult:
+        """Seal through the explicitly wired provider used by production Shadow."""
+        if self.decision_provider is None:
+            raise ValueError("NOT_CONFIGURED: formal strategy decision provider is required")
+        return ShadowDecisionService(
+            self.store,
+            decision_provider=self.decision_provider,
+        ).seal_scheduled_decision(strategy_version_id, as_of_time)
 
     def execute_due_orders(
         self,
