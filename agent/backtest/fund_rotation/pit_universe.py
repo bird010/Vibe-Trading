@@ -86,6 +86,7 @@ class FundInstrumentVersion:
     tracking_index: str | None
     exchange: str | None
     quality_status: PITQualityStatus
+    instrument_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -509,6 +510,7 @@ def _instrument_from_row(row: pd.Series) -> FundInstrumentVersion:
         tracking_index=_optional_string(row.get("tracking_index")),
         exchange=_optional_string(row.get("exchange")),
         quality_status=quality,
+        instrument_type=_resolve_instrument_type(row),
     )
 
 
@@ -864,6 +866,39 @@ def _optional_string(value: object) -> str | None:
     return str(value)
 
 
+def _resolve_instrument_type(row: pd.Series) -> str | None:
+    explicit = _optional_string(row.get("instrument_type"))
+    if explicit is not None:
+        return explicit
+
+    return _map_fund_type_asset_class_to_instrument_type(
+        _optional_string(row.get("fund_type")),
+        _optional_string(row.get("asset_class")),
+    )
+
+
+def _map_fund_type_asset_class_to_instrument_type(
+    fund_type: str | None,
+    asset_class: str | None,
+) -> str | None:
+    normalized_fund_type = (fund_type or "").strip().upper()
+    normalized_asset_class = (asset_class or "").strip().lower()
+    if normalized_fund_type != "ETF":
+        return None
+
+    asset_class_mapping = {
+        "equity": "domestic_equity_etf",
+        "bond": "bond_etf",
+        "commodity": "commodity_etf",
+        "gold": "commodity_etf",
+        "cross_border": "cross_border_etf",
+        "qdii": "cross_border_etf",
+        "money_market": "money_market_etf",
+        "cash": "money_market_etf",
+    }
+    return asset_class_mapping.get(normalized_asset_class)
+
+
 def _format_date(value: object) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
@@ -882,6 +917,25 @@ def _optional_format_datetime(value: object) -> str | None:
     if not _has_value(value):
         return None
     return _format_datetime(value)
+
+
+def to_market_rule_instrument_version(
+    instrument: FundInstrumentVersion,
+):
+    instrument_type = instrument.instrument_type or _map_fund_type_asset_class_to_instrument_type(
+        instrument.fund_type,
+        instrument.asset_class,
+    )
+    if instrument_type is None:
+        return None
+    version = instrument.source_record_id or instrument.revision_id or instrument.ts_code
+    from .market_rules import FundInstrumentVersion as MarketRuleInstrumentVersion
+
+    return MarketRuleInstrumentVersion(
+        ts_code=instrument.ts_code,
+        instrument_type=instrument_type,
+        version=version,
+    )
 
 
 class FundRotationPITUniverseAdapter:

@@ -21,6 +21,7 @@ def _record(
     known_from: str = "2024-01-02T00:00:00",
     snapshot_version: int = 7,
     revision_id: str = "r1",
+    revision_order: int = 1,
     source_record_id: str | None = None,
     settlement: str = "T+1",
     lot_size: int = 100,
@@ -38,6 +39,7 @@ def _record(
         "known_from": known_from,
         "snapshot_version": snapshot_version,
         "revision_id": revision_id,
+        "revision_order": revision_order,
         "source_record_id": source_record_id or f"{ts_code}-{revision_id}",
         "settlement": settlement,
         "lot_size": lot_size,
@@ -137,6 +139,7 @@ def test_latest_restated_selects_latest_revision_from_fixed_snapshot() -> None:
                     "domestic_equity_etf",
                     known_from="2024-01-02T00:00:00",
                     revision_id="r1",
+                    revision_order=1,
                     source_record_id="src-510300-r1",
                     rule_version="pit-r1",
                 ),
@@ -145,6 +148,7 @@ def test_latest_restated_selects_latest_revision_from_fixed_snapshot() -> None:
                     "domestic_equity_etf",
                     known_from="2024-01-05T00:00:00",
                     revision_id="r2",
+                    revision_order=2,
                     source_record_id="src-510300-r2",
                     rule_version="pit-r2",
                 ),
@@ -162,6 +166,114 @@ def test_latest_restated_selects_latest_revision_from_fixed_snapshot() -> None:
 
     assert rules.source_record_id == "src-510300-r2"
     assert rules.rule_version == "pit-r2"
+
+
+def test_revision_order_is_explicit_and_not_revision_id_lexicographic() -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    known_from="2024-01-02T00:00:00",
+                    revision_id="r2",
+                    revision_order=2,
+                    source_record_id="src-510300-r2",
+                    rule_version="pit-r2",
+                ),
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    known_from="2024-01-02T00:00:00",
+                    revision_id="r10",
+                    revision_order=10,
+                    source_record_id="src-510300-r10",
+                    rule_version="pit-r10",
+                ),
+            ]
+        )
+    )
+
+    rules = resolver.resolve(
+        _instrument(),
+        trade_date="20240103",
+        knowledge_cutoff="2024-01-03T15:00:00",
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    assert rules.source_record_id == "src-510300-r10"
+    assert rules.rule_version == "pit-r10"
+
+
+def test_missing_revision_order_fails_closed_when_multiple_candidates_exist() -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    known_from="2024-01-02T00:00:00",
+                    revision_id="r1",
+                    revision_order=1,
+                    source_record_id="src-510300-r1",
+                ),
+                {
+                    **_record(
+                        "510300.SH",
+                        "domestic_equity_etf",
+                        known_from="2024-01-02T00:00:00",
+                        revision_id="r2",
+                        source_record_id="src-510300-r2",
+                    ),
+                    "revision_order": None,
+                },
+            ]
+        )
+    )
+
+    with pytest.raises(PITInvalidMarketRule, match="PIT_INVALID_EXECUTION_RULE"):
+        resolver.resolve(
+            _instrument(),
+            trade_date="20240103",
+            knowledge_cutoff="2024-01-03T15:00:00",
+            snapshot_version=7,
+            mode=PITQueryMode.AS_WAS_KNOWN,
+        )
+
+
+def test_duplicate_revision_order_fails_closed_when_multiple_candidates_exist() -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    known_from="2024-01-02T00:00:00",
+                    revision_id="r1",
+                    revision_order=2,
+                    source_record_id="src-510300-r1",
+                ),
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    known_from="2024-01-02T00:00:00",
+                    revision_id="r2",
+                    revision_order=2,
+                    source_record_id="src-510300-r2",
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(PITInvalidMarketRule, match="PIT_INVALID_EXECUTION_RULE"):
+        resolver.resolve(
+            _instrument(),
+            trade_date="20240103",
+            knowledge_cutoff="2024-01-03T15:00:00",
+            snapshot_version=7,
+            mode=PITQueryMode.LATEST_RESTATED,
+        )
 
 
 def test_snapshot_mismatch_fails_closed() -> None:
@@ -230,6 +342,58 @@ def test_missing_or_unknown_rule_raises_without_static_fallback() -> None:
     with pytest.raises(UnknownExecutionRule, match="UNKNOWN_EXECUTION_RULE"):
         resolver.resolve(
             _instrument(ts_code="LEVERED.SH", instrument_type="levered_crypto_etf"),
+            trade_date="20240103",
+            knowledge_cutoff="2024-01-03T15:00:00",
+            snapshot_version=7,
+            mode=PITQueryMode.AS_WAS_KNOWN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("False", False),
+        ("0", False),
+        ("true", True),
+        (1, True),
+    ],
+)
+def test_short_allowed_parses_only_explicit_boolean_values(
+    raw_value: object,
+    expected: bool,
+) -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                _record(
+                    "510300.SH",
+                    "domestic_equity_etf",
+                    short_allowed=raw_value,  # type: ignore[arg-type]
+                )
+            ]
+        )
+    )
+
+    rules = resolver.resolve(
+        _instrument(),
+        trade_date="20240103",
+        knowledge_cutoff="2024-01-03T15:00:00",
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    assert rules.short_allowed is expected
+
+
+@pytest.mark.parametrize("raw_value", ["maybe", "", None, 2])
+def test_short_allowed_invalid_values_fail_closed(raw_value: object) -> None:
+    record = _record("510300.SH", "domestic_equity_etf")
+    record["short_allowed"] = raw_value
+    resolver = MarketRuleResolver(InMemoryPITMarketRuleSource([record]))
+
+    with pytest.raises(PITInvalidMarketRule, match="PIT_INVALID_EXECUTION_RULE"):
+        resolver.resolve(
+            _instrument(),
             trade_date="20240103",
             knowledge_cutoff="2024-01-03T15:00:00",
             snapshot_version=7,

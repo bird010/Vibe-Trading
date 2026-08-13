@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Iterable, Mapping, Protocol
 
 import pandas as pd
@@ -41,6 +42,7 @@ class MarketRuleRecord:
     known_from: str
     snapshot_version: int
     revision_id: str
+    revision_order: int
     source_record_id: str
     source_id: str | None
     rule_version: str
@@ -63,6 +65,7 @@ class MarketRules:
     source_record_id: str = ""
     source_id: str | None = None
     revision_id: str = ""
+    revision_order: int | None = None
     valid_from: str = ""
     valid_to: str | None = None
     known_from: str = ""
@@ -192,6 +195,7 @@ class MarketRuleResolver:
             source_record_id=record.source_record_id,
             source_id=record.source_id,
             revision_id=record.revision_id,
+            revision_order=record.revision_order,
             valid_from=record.valid_from,
             valid_to=record.valid_to,
             known_from=record.known_from,
@@ -202,8 +206,7 @@ def _select_candidate(rows: list[dict[str, object]]) -> dict[str, object]:
     sortable = [
         (
             _known_from_timestamp(row),
-            _revision_id(row),
-            _source_record_id(row),
+            _revision_order(row),
             row,
         )
         for row in rows
@@ -211,15 +214,15 @@ def _select_candidate(rows: list[dict[str, object]]) -> dict[str, object]:
     latest_known = max(item[0] for item in sortable)
     top = [item for item in sortable if item[0] == latest_known]
     if len(top) == 1:
-        return top[0][3]
+        return top[0][2]
 
-    revision_ids = [item[1] for item in top]
-    if len(set(revision_ids)) != len(revision_ids):
+    revision_orders = [item[1] for item in top]
+    if len(set(revision_orders)) != len(revision_orders):
         raise PITInvalidMarketRule(
             "PIT_INVALID_EXECUTION_RULE: ambiguous revision order"
         )
-    top.sort(key=lambda item: (item[1], item[2]))
-    return top[-1][3]
+    top.sort(key=lambda item: item[1])
+    return top[-1][2]
 
 
 def _record_from_row(row: Mapping[str, object]) -> MarketRuleRecord:
@@ -232,7 +235,7 @@ def _record_from_row(row: Mapping[str, object]) -> MarketRuleRecord:
         tick_size=_required_positive_float(row.get("tick_size"), "tick_size"),
         price_limit_pct=price_limit_pct,
         price_limit_rule=_normalize_price_limit_rule(row.get("price_limit_rule"), price_limit_pct),
-        short_allowed=bool(row.get("short_allowed", False)),
+        short_allowed=_required_bool(row.get("short_allowed"), "short_allowed"),
         currency=_required_string(row.get("currency"), "currency"),
         valid_from=_format_date(_required_value(row.get("valid_from"), "valid_from")),
         valid_to=_optional_format_date(row.get("valid_to")),
@@ -241,6 +244,7 @@ def _record_from_row(row: Mapping[str, object]) -> MarketRuleRecord:
             row.get("snapshot_version"), "snapshot_version"
         ),
         revision_id=_revision_id(row),
+        revision_order=_revision_order(row),
         source_record_id=_source_record_id(row),
         source_id=_optional_string(row.get("source_id")),
         rule_version=_required_string(row.get("rule_version"), "rule_version"),
@@ -267,6 +271,10 @@ def _revision_id(row: Mapping[str, object]) -> str:
 
 def _source_record_id(row: Mapping[str, object]) -> str:
     return _required_string(row.get("source_record_id"), "source_record_id")
+
+
+def _revision_order(row: Mapping[str, object]) -> int:
+    return _required_non_negative_int(row.get("revision_order"), "revision_order")
 
 
 def _normalize_price_limit_rule(
@@ -306,7 +314,7 @@ def _optional_string(value: object) -> str | None:
 
 
 def _required_positive_int(value: object, field_name: str) -> int:
-    number = _coerce_int(_required_value(value, field_name))
+    number = _required_non_negative_int(value, field_name)
     if number < 1:
         raise PITInvalidMarketRule(
             f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
@@ -331,6 +339,49 @@ def _optional_float(value: object) -> float | None:
 
 def _coerce_int(value: object) -> int:
     return int(value)  # lets ValueError/TypeError surface if malformed
+
+
+def _required_non_negative_int(value: object, field_name: str) -> int:
+    required = _required_value(value, field_name)
+    if isinstance(required, bool):
+        raise PITInvalidMarketRule(
+            f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
+        )
+    if isinstance(required, Integral):
+        number = int(required)
+    elif isinstance(required, str) and required.strip().isdigit():
+        number = int(required.strip())
+    else:
+        raise PITInvalidMarketRule(
+            f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
+        )
+    if number < 0:
+        raise PITInvalidMarketRule(
+            f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
+        )
+    return number
+
+
+def _required_bool(value: object, field_name: str) -> bool:
+    required = _required_value(value, field_name)
+    if isinstance(required, bool):
+        return required
+    if isinstance(required, Integral):
+        numeric = int(required)
+        if numeric in (0, 1):
+            return bool(numeric)
+        raise PITInvalidMarketRule(
+            f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
+        )
+    if isinstance(required, str):
+        normalized = required.strip().lower()
+        if normalized in {"true", "1"}:
+            return True
+        if normalized in {"false", "0"}:
+            return False
+    raise PITInvalidMarketRule(
+        f"PIT_INVALID_EXECUTION_RULE: invalid {field_name}"
+    )
 
 
 def _to_timestamp(value: object, field_name: str) -> pd.Timestamp:

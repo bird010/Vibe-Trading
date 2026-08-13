@@ -8,11 +8,13 @@ import pytest
 from backtest.fund_rotation.pit_universe import (
     ExclusionLayer,
     ExclusionReasonCode,
+    FundInstrumentVersion,
     PITFundMaster,
     PITQueryMode,
     PITQualityStatus,
     UniversePolicy,
     UniverseResolver,
+    to_market_rule_instrument_version,
 )
 
 
@@ -498,3 +500,88 @@ def test_cross_source_missing_code_outputs_audit_and_research_only_quality() -> 
     assert resolution.quality_status == PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
     assert resolution.audit_metrics["cross_source_missing_count"] == 1
     assert resolution.cross_source_audit["only_in_b"] == frozenset({"missing.SH"})
+
+
+def test_market_rule_identity_adapter_prefers_explicit_instrument_type() -> None:
+    instrument = FundInstrumentVersion(
+        ts_code="510300.SH",
+        valid_from="2020-01-01",
+        valid_to=None,
+        known_from="2020-01-02T00:00:00",
+        revision_id="r1",
+        source_id="fixture",
+        source_record_id="src-510300-r1",
+        source_published_at=None,
+        ingested_at="2020-01-02T01:00:00",
+        list_date="2020-01-01",
+        delist_date="2099-12-31",
+        fund_status="ACTIVE",
+        name="沪深300ETF",
+        fund_type="ETF",
+        asset_class="equity",
+        tracking_index="000300.SH",
+        exchange="SH",
+        quality_status=PITQualityStatus.VERIFIED,
+        instrument_type="cross_border_etf",
+    )
+
+    identity = to_market_rule_instrument_version(instrument)
+
+    assert identity is not None
+    assert identity.ts_code == "510300.SH"
+    assert identity.instrument_type == "cross_border_etf"
+    assert identity.version == "src-510300-r1"
+
+
+def test_market_rule_identity_adapter_can_map_from_fund_type_and_asset_class() -> None:
+    instrument = FundInstrumentVersion(
+        ts_code="511990.SH",
+        valid_from="2020-01-01",
+        valid_to=None,
+        known_from="2020-01-02T00:00:00",
+        revision_id="r1",
+        source_id="fixture",
+        source_record_id="src-511990-r1",
+        source_published_at=None,
+        ingested_at="2020-01-02T01:00:00",
+        list_date="2020-01-01",
+        delist_date="2099-12-31",
+        fund_status="ACTIVE",
+        name="货币ETF",
+        fund_type="ETF",
+        asset_class="money_market",
+        tracking_index=None,
+        exchange="SH",
+        quality_status=PITQualityStatus.VERIFIED,
+    )
+
+    identity = to_market_rule_instrument_version(instrument)
+
+    assert identity is not None
+    assert identity.instrument_type == "money_market_etf"
+    assert identity.version == "src-511990-r1"
+
+
+def test_market_rule_identity_adapter_returns_none_for_unmappable_instrument() -> None:
+    instrument = FundInstrumentVersion(
+        ts_code="999999.SH",
+        valid_from="2020-01-01",
+        valid_to=None,
+        known_from="2020-01-02T00:00:00",
+        revision_id="r1",
+        source_id="fixture",
+        source_record_id="src-999999-r1",
+        source_published_at=None,
+        ingested_at="2020-01-02T01:00:00",
+        list_date="2020-01-01",
+        delist_date="2099-12-31",
+        fund_status="ACTIVE",
+        name="未知基金",
+        fund_type="LOF",
+        asset_class="alternatives",
+        tracking_index=None,
+        exchange="SZ",
+        quality_status=PITQualityStatus.VERIFIED,
+    )
+
+    assert to_market_rule_instrument_version(instrument) is None
