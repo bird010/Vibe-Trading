@@ -170,8 +170,13 @@ def test_production_provider_evaluates_formal_session_without_store_signal() -> 
     service = build_production_shadow_execution_service(
         store,
         strategy_provider=provider,
-        execution_adapter=object(),
-        accounting_adapter=object(),
+        execution_adapter=ProductionShadowExecutionAdapter(
+            engine=object(),
+            request_factory=lambda **_: None,
+            strategy_identity="strategy-1",
+            rule_identity="rule-1",
+        ),
+        accounting_adapter=ProductionShadowAccountingAdapter(),
         strategy_identity="strategy-1",
         rule_identity="rule-1",
     )
@@ -341,5 +346,49 @@ def test_production_wiring_blank_identity_is_not_configured() -> None:
         rule_identity="rule-1",
     )
 
+    assert service.execution_adapter is None
+    assert service.accounting_adapter is None
+
+
+def test_production_wiring_invalid_adapter_objects_are_not_configured() -> None:
+    service = build_production_shadow_execution_service(
+        InMemoryForwardValidationStore(),
+        strategy_provider=object(),
+        execution_adapter=object(),
+        accounting_adapter=object(),
+        strategy_identity="strategy-1",
+        rule_identity="rule-1",
+    )
+
+    assert service.execution_adapter is None
+    assert service.accounting_adapter is None
+
+
+class _WrongSignatureProvider:
+    def next_signal(self):
+        return None
+
+
+class _WrongSignatureExecutionAdapter:
+    def execute(self):
+        return (), ()
+
+
+class _WrongSignatureAccountingAdapter:
+    def apply(self):
+        return None
+
+
+def test_production_wiring_wrong_adapter_signatures_are_not_configured() -> None:
+    service = build_production_shadow_execution_service(
+        InMemoryForwardValidationStore(),
+        strategy_provider=_WrongSignatureProvider(),
+        execution_adapter=_WrongSignatureExecutionAdapter(),
+        accounting_adapter=_WrongSignatureAccountingAdapter(),
+        strategy_identity="strategy-1",
+        rule_identity="rule-1",
+    )
+
+    assert service.decision_provider is None
     assert service.execution_adapter is None
     assert service.accounting_adapter is None

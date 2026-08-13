@@ -283,6 +283,19 @@ class CorporateActionRecord:
             _require_non_negative(getattr(self, field_name), field_name)
         if self.adjustment_factor <= 0:
             raise ValueError("adjustment_factor must be positive")
+        if self.action_type in _SHARE_ADJUSTMENT_TYPES:
+            for quantity in (self.old_quantity, self.new_quantity):
+                if not isinstance(quantity, int) or isinstance(quantity, bool):
+                    raise ValueError("corporate action quantity must be an integer")
+            expected_new_quantity = self.old_quantity * self.adjustment_factor
+            if not math.isclose(self.new_quantity, expected_new_quantity, rel_tol=0.0, abs_tol=1e-9):
+                raise ValueError("share adjustment quantity conservation violated")
+            if self.old_quantity > 0 and self.old_cost_basis > 0:
+                if self.new_cost_basis <= 0:
+                    raise ValueError("share adjustment cost conservation violated")
+                expected_new_cost_basis = self.old_cost_basis / self.adjustment_factor
+                if not math.isclose(self.new_cost_basis, expected_new_cost_basis, rel_tol=1e-6, abs_tol=1e-6):
+                    raise ValueError("share adjustment cost conservation violated")
 
 
 @dataclass(frozen=True)

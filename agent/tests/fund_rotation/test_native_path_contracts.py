@@ -27,7 +27,7 @@ def test_runner_formal_path_never_calls_legacy_loop_or_old_diagnostics(monkeypat
     def forbidden(*args, **kwargs):  # pragma: no cover - call is the failure
         raise AssertionError("legacy execution source must not be used formally")
 
-    monkeypatch.setattr(runner_module, "run_execution_loop", forbidden)
+    assert not hasattr(runner_module, "run_execution_loop")
     monkeypatch.setattr(
         runner_module,
         "build_execution_ledger_from_pipeline_result",
@@ -96,19 +96,17 @@ def test_production_shadow_uses_explicit_provider_and_has_no_deterministic_defau
     service = build_production_shadow_execution_service(
         store,
         strategy_provider=provider,
-        execution_adapter=object(),
-        accounting_adapter=object(),
+        execution_adapter=None,
+        accounting_adapter=None,
         strategy_identity="strategy-1",
         rule_identity="rule-1",
     )
 
-    result = service.seal_scheduled_decision(
-        "sv-1", datetime(2026, 1, 5, 10, 0)
-    )
+    with pytest.raises(ValueError, match="NOT_CONFIGURED"):
+        service.seal_scheduled_decision("sv-1", datetime(2026, 1, 5, 10, 0))
 
-    assert service.decision_provider is provider
-    assert provider.calls == [("sv-1", datetime(2026, 1, 5, 10, 0))]
-    assert result.decision.raw_signal == {"source": "formal-provider"}
+    assert service.decision_provider is None
+    assert provider.calls == []
 
     unconfigured = build_production_shadow_execution_service(
         _shadow_store(),

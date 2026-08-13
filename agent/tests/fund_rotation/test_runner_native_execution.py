@@ -347,7 +347,7 @@ def test_runner_native_formal_path_does_not_touch_legacy_loop_or_pipeline_adapte
     def forbidden(*args, **kwargs):  # pragma: no cover - assertion is the call itself
         raise AssertionError("legacy formal execution path must not be called")
 
-    monkeypatch.setattr(runner_module, "run_execution_loop", forbidden)
+    assert not hasattr(runner_module, "run_execution_loop")
     monkeypatch.setattr(
         runner_module,
         "build_execution_ledger_from_pipeline_result",

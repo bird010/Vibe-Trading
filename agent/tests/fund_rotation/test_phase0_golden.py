@@ -317,23 +317,21 @@ def _approved_added_keys(approved: dict, section: str) -> frozenset[str]:
     return frozenset(raw)
 
 
-def _approved_value_mapping(approved: dict, section: str, field: str) -> dict:
-    mappings = approved.get("approved_value_mappings", {})
-    values = mappings.get(section, {}).get(field, {})
-    if not isinstance(values, dict) or any(not isinstance(key, str) for key in values):
-        raise AssertionError(f"approved value mappings must be exact maps: {section}.{field}")
-    return values
-
-
-def _mapped_value(value: object, mapping: dict) -> object:
-    return mapping.get(str(value), value)
-
-
-def _approved_row_mappings(approved: dict, section: str, row: dict) -> dict:
+def _approved_row_mapping(approved: dict, section: str, row: dict) -> dict:
+    matches: list[dict] = []
     for item in approved.get("approved_row_mappings", []):
-        if item.get("section") == section and _row_matches_predicate(row, item):
-            return dict(item.get("expected_to_actual", {}))
-    return {}
+        if item.get("section") != section:
+            continue
+        match = item.get("match", {})
+        if not isinstance(match, dict) or not match:
+            raise AssertionError("approved row mappings require an exact non-empty match")
+        if any("*" in str(key) or "?" in str(key) for key in match):
+            raise AssertionError("approved row mappings cannot use wildcard keys")
+        if _row_matches_predicate(row, item):
+            matches.append(item)
+    if len(matches) > 1:
+        raise AssertionError(f"approved row mapping is ambiguous: {section} {row}")
+    return dict(matches[0].get("expected_to_actual", {})) if matches else {}
 
 
 def compare_golden(exp: dict, act: dict, approved: dict | None = None) -> list[str]:
@@ -396,26 +394,7 @@ def compare_golden(exp: dict, act: dict, approved: dict | None = None) -> list[s
             continue
         for i, (e_row, a_row) in enumerate(zip(comparable_er, ar)):
             mapped_row = dict(e_row)
-            mapped_row.update(_approved_row_mappings(approved, section, e_row))
-            for field in set(e_row) & set(a_row):
-                mapped_row[field] = _mapped_value(
-                    e_row[field],
-                    _approved_value_mapping(approved, section, field),
-                )
-            mapped_row.update(_approved_row_mappings(approved, section, e_row))
-            event_mapping = _approved_value_mapping(approved, section, "__event_identity__")
-            if event_mapping:
-                for field in ("event_id", "signal_event_id"):
-                    if field in mapped_row:
-                        mapped_row[field] = event_mapping.get(str(e_row[field]), mapped_row[field])
-                if e_row.get("event_id") or e_row.get("signal_event_id"):
-                    if "order_id" in mapped_row and "ts_code" in e_row:
-                        mapped_row["order_id"] = f"{event_mapping.get(str(e_row.get('event_id', e_row.get('signal_event_id', ''))), e_row.get('event_id', e_row.get('signal_event_id', '')))}-{e_row['ts_code']}"
-                if e_row.get("event_id") or e_row.get("signal_event_id"):
-                    if "attempt_id" in mapped_row and "order_id" in e_row:
-                        old_order = str(e_row["order_id"])
-                        new_order = str(mapped_row.get("order_id", old_order))
-                        mapped_row["attempt_id"] = str(e_row["attempt_id"]).replace(old_order, new_order, 1)
+            mapped_row.update(_approved_row_mapping(approved, section, e_row))
             diffs.extend(
                 _row_diffs(
                     f"{section}[{i}]",

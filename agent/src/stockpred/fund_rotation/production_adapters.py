@@ -13,7 +13,8 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any
+from inspect import Parameter, signature
+from typing import Any, Protocol, runtime_checkable
 
 from backtest.fund_rotation.attribution import (
     AccountDayInput,
@@ -46,6 +47,45 @@ from src.stockpred.fund_rotation.forward_validation import (
 
 class ProductionAdapterError(ValueError):
     """Raised when formal production facts cannot be constructed safely."""
+
+
+@runtime_checkable
+class _StrategyProviderContract(Protocol):
+    def next_signal(self, *, store: InMemoryForwardValidationStore, strategy_version_id: str, as_of_time: datetime) -> ScheduledSignal | None: ...
+
+
+@runtime_checkable
+class _ExecutionAdapterContract(Protocol):
+    def execute(self, *, decision: ShadowDecision, orders: tuple, market_data: MarketDataForExecution, execution_as_of_time: datetime) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]: ...
+
+
+@runtime_checkable
+class _AccountingAdapterContract(Protocol):
+    def apply(self, *, decision: ShadowDecision, previous_state: ShadowAccountState, fills: tuple[ShadowFill, ...], market_data: MarketDataForExecution, execution_as_of_time: datetime) -> ShadowAccountState: ...
+
+
+def _implements_contract(value: object, contract: type[Protocol]) -> bool:
+    if value is None or isinstance(value, type) or not isinstance(value, contract):
+        return False
+    method_name = next(name for name in contract.__dict__ if not name.startswith("_"))
+    method = getattr(value, method_name, None)
+    if method is None:
+        return False
+    try:
+        params = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    expected_names = {
+        _StrategyProviderContract: {"store", "strategy_version_id", "as_of_time"},
+        _ExecutionAdapterContract: {"decision", "orders", "market_data", "execution_as_of_time"},
+        _AccountingAdapterContract: {"decision", "previous_state", "fills", "market_data", "execution_as_of_time"},
+    }[contract]
+    return {
+        p.name for p in params if p.kind is Parameter.KEYWORD_ONLY
+    } == expected_names and all(
+        p.kind is Parameter.KEYWORD_ONLY and p.default is Parameter.empty
+        for p in params
+    )
 
 
 def _require_identity(value: object, name: str) -> str:
@@ -364,9 +404,9 @@ def build_production_shadow_execution_service(
     try:
         formal_ready = all(
             (
-                strategy_provider is not None,
-                execution_adapter is not None,
-                accounting_adapter is not None,
+                _implements_contract(strategy_provider, _StrategyProviderContract),
+                _implements_contract(execution_adapter, _ExecutionAdapterContract),
+                _implements_contract(accounting_adapter, _AccountingAdapterContract),
                 strategy_identity is not None,
                 rule_identity is not None,
             )

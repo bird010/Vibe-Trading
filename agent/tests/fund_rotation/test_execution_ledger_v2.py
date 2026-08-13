@@ -755,6 +755,60 @@ def test_corporate_action_requires_a_symbol():
         )
 
 
+def test_share_corporate_action_requires_quantity_and_cost_conservation():
+    with pytest.raises(ValueError, match="quantity conservation"):
+        CorporateActionRecord(
+            corporate_action_id="CA-BAD-QUANTITY",
+            ts_code="510300.SH",
+            action_type=CorporateActionType.SHARE_SPLIT,
+            effective_date="20240110",
+            old_quantity=500,
+            new_quantity=900,
+            old_cost_basis=10.0,
+            new_cost_basis=5.0,
+            adjustment_factor=2.0,
+        )
+
+    with pytest.raises(ValueError, match="cost conservation"):
+        CorporateActionRecord(
+            corporate_action_id="CA-BAD-COST",
+            ts_code="510300.SH",
+            action_type=CorporateActionType.SHARE_SPLIT,
+            effective_date="20240110",
+            old_quantity=500,
+            new_quantity=1_000,
+            old_cost_basis=10.0,
+            new_cost_basis=6.0,
+            adjustment_factor=2.0,
+        )
+
+    with pytest.raises(ValueError, match="quantity must be an integer"):
+        CorporateActionRecord(
+            corporate_action_id="CA-FRACTIONAL-QUANTITY",
+            ts_code="510300.SH",
+            action_type=CorporateActionType.SHARE_SPLIT,
+            effective_date="20240110",
+            old_quantity=100.5,
+            new_quantity=201,
+            old_cost_basis=10.0,
+            new_cost_basis=5.0,
+            adjustment_factor=2.0,
+        )
+
+    with pytest.raises(ValueError, match="cost conservation"):
+        CorporateActionRecord(
+            corporate_action_id="CA-MISSING-COST",
+            ts_code="510300.SH",
+            action_type=CorporateActionType.SHARE_SPLIT,
+            effective_date="20240110",
+            old_quantity=100,
+            new_quantity=200,
+            old_cost_basis=10.0,
+            new_cost_basis=0.0,
+            adjustment_factor=2.0,
+        )
+
+
 def test_ledger_requires_parent_attempt_and_trade_quantity_closure():
     parent = _parent(filled=500, status=ParentOrderStatus.PARTIALLY_FILLED)
 

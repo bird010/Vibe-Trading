@@ -34,15 +34,7 @@ from backtest.fund_rotation.contracts import (
     validate_target_decision,
 )
 from backtest.fund_rotation.evaluation import EvaluationContext, iso_week_endings
-from backtest.fund_rotation.execution import (
-    PipelineResult,
-    build_execution_context,
-    run_execution_loop,
-)
-from backtest.fund_rotation.execution_ledger_v2 import (
-    compute_execution_diagnostics_v2,
-    compute_pipeline_execution_diagnostics_v2,
-)
+from backtest.fund_rotation.execution_ledger_v2 import compute_execution_diagnostics_v2
 from backtest.fund_rotation.market_rules import (
     FundInstrumentVersion,
     MarketRuleResolver,
@@ -932,67 +924,6 @@ def _summarize_universe_diagnostics(
     latest = dict(universe_diagnostics_by_date[latest_date])
     latest.pop("signal_date", None)
     return latest
-
-
-def _execution_diagnostics(
-    result: PipelineResult,
-    execution: ExecutionConfig,
-) -> dict[str, float]:
-    trades = [
-        event
-        for event in result.trade_events
-        if str(event.get("event_type", "")) != "CORPORATE_ACTION"
-    ]
-    requested = sum(
-        max(float(event.get("requested", 0) or 0), 0.0)
-        for event in trades
-    )
-    filled = sum(
-        max(float(event.get("filled", 0) or 0), 0.0)
-        for event in trades
-    )
-    notionals = [
-        abs(float(event.get("filled", 0) or 0))
-        * max(float(event.get("price", 0) or 0), 0.0)
-        for event in trades
-    ]
-    total_notional = float(sum(notionals))
-    commission = float(
-        sum(float(event.get("commission", 0) or 0) for event in trades)
-    )
-    slippage_cost = float(
-        sum(
-            notional
-            * max(float(event.get("slippage_bps", 0) or 0), 0.0)
-            / 10_000.0
-            for event, notional in zip(trades, notionals)
-        )
-    )
-    participation = [
-        float(event.get("participation_rate", 0) or 0)
-        for event in trades
-        if float(event.get("filled", 0) or 0) > 0
-    ]
-    blocked = sum(
-        1
-        for event in trades
-        if float(event.get("requested", 0) or 0) > 0
-        and float(event.get("filled", 0) or 0) <= 0
-    )
-    return {
-        "turnover": total_notional / execution.initial_capital,
-        "total_notional": total_notional,
-        "total_commission": commission,
-        "total_slippage_cost": slippage_cost,
-        "fill_rate": filled / requested if requested > 0 else 1.0,
-        "blocked_order_count": float(blocked),
-        "trade_count": float(sum(1 for value in notionals if value > 0)),
-        "average_participation_rate": (
-            float(sum(participation) / len(participation))
-            if participation
-            else 0.0
-        ),
-    }
 
 
 def _relative_metrics(
