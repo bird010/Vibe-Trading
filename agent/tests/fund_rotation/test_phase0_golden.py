@@ -240,13 +240,23 @@ def _isclose(a: float, b: float, tol: dict) -> bool:
     return math.isclose(a, b, rel_tol=tol["rtol"], abs_tol=tol["atol"])
 
 
-def _row_diffs(path: str, exp: dict, act: dict) -> list[str]:
+def _row_diffs(
+    path: str,
+    exp: dict,
+    act: dict,
+    *,
+    allowed_added_keys: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
     diffs: list[str] = []
     exp_keys, act_keys = set(exp), set(act)
-    if exp_keys != act_keys:
-        diffs.append(f"{path}: key set differs exp={sorted(exp_keys)} act={sorted(act_keys)}")
-        return diffs
-    for key in exp_keys:
+    missing_keys = exp_keys - act_keys
+    unexpected_added_keys = (act_keys - exp_keys) - set(allowed_added_keys)
+    if missing_keys or unexpected_added_keys:
+        diffs.append(
+            f"{path}: key set differs missing={sorted(missing_keys)} "
+            f"unexpected_added={sorted(unexpected_added_keys)}"
+        )
+    for key in sorted(exp_keys & act_keys):
         ev, av = exp[key], act[key]
         if isinstance(ev, bool) or isinstance(av, bool):
             if ev != av:
@@ -285,7 +295,48 @@ def _curve_diffs(path: str, exp: dict, act: dict, tol: dict) -> list[str]:
     return diffs
 
 
-def compare_golden(exp: dict, act: dict) -> list[str]:
+def _row_matches_predicate(row: dict, predicate: dict) -> bool:
+    return all(row.get(key) == value for key, value in predicate.get("match", {}).items())
+
+
+def _approved_row_predicates(approved: dict, section: str) -> list[dict]:
+    return [
+        predicate
+        for predicate in approved.get("approved_row_predicates", [])
+        if predicate.get("section") == section
+    ]
+
+
+def _approved_added_keys(approved: dict, section: str) -> frozenset[str]:
+    raw = approved.get("approved_added_keys", {}).get(section, [])
+    if not isinstance(raw, list) or any(
+        not isinstance(key, str) or "*" in key or "?" in key
+        for key in raw
+    ):
+        raise AssertionError(f"approved added keys must be exact field names: {section}")
+    return frozenset(raw)
+
+
+def _approved_value_mapping(approved: dict, section: str, field: str) -> dict:
+    mappings = approved.get("approved_value_mappings", {})
+    values = mappings.get(section, {}).get(field, {})
+    if not isinstance(values, dict) or any(not isinstance(key, str) for key in values):
+        raise AssertionError(f"approved value mappings must be exact maps: {section}.{field}")
+    return values
+
+
+def _mapped_value(value: object, mapping: dict) -> object:
+    return mapping.get(str(value), value)
+
+
+def _approved_row_mappings(approved: dict, section: str, row: dict) -> dict:
+    for item in approved.get("approved_row_mappings", []):
+        if item.get("section") == section and _row_matches_predicate(row, item):
+            return dict(item.get("expected_to_actual", {}))
+    return {}
+
+
+def compare_golden(exp: dict, act: dict, approved: dict | None = None) -> list[str]:
     """Field-by-field comparison per design §35.1. Returns a list of diffs."""
     diffs: list[str] = []
 
@@ -319,13 +370,60 @@ def compare_golden(exp: dict, act: dict) -> list[str]:
         diffs.append("cluster_history differs")
 
     # Orders / trade events (row-wise mixed tolerance)
+    approved = approved or {}
     for section in ("orders", "trade_events"):
         er, ar = exp[section], act[section]
-        if len(er) != len(ar):
-            diffs.append(f"{section}: length differs exp={len(er)} act={len(ar)}")
+        predicates = _approved_row_predicates(approved, section)
+        allowed_added_keys = _approved_added_keys(approved, section)
+        ignored_indices = {
+            index
+            for index, row in enumerate(er)
+            if any(_row_matches_predicate(row, predicate) for predicate in predicates)
+        }
+        for predicate in predicates:
+            matched = sum(_row_matches_predicate(row, predicate) for row in er)
+            if matched != int(predicate["expected_count"]):
+                diffs.append(
+                    f"{section}: predicate {predicate['name']} count "
+                    f"expected={predicate['expected_count']} actual={matched}"
+                )
+        comparable_er = [row for index, row in enumerate(er) if index not in ignored_indices]
+        if len(comparable_er) != len(ar):
+            diffs.append(
+                f"{section}: length differs after approved predicates "
+                f"exp={len(comparable_er)} act={len(ar)}"
+            )
             continue
-        for i, (e_row, a_row) in enumerate(zip(er, ar)):
-            diffs.extend(_row_diffs(f"{section}[{i}]", e_row, a_row))
+        for i, (e_row, a_row) in enumerate(zip(comparable_er, ar)):
+            mapped_row = dict(e_row)
+            mapped_row.update(_approved_row_mappings(approved, section, e_row))
+            for field in set(e_row) & set(a_row):
+                mapped_row[field] = _mapped_value(
+                    e_row[field],
+                    _approved_value_mapping(approved, section, field),
+                )
+            mapped_row.update(_approved_row_mappings(approved, section, e_row))
+            event_mapping = _approved_value_mapping(approved, section, "__event_identity__")
+            if event_mapping:
+                for field in ("event_id", "signal_event_id"):
+                    if field in mapped_row:
+                        mapped_row[field] = event_mapping.get(str(e_row[field]), mapped_row[field])
+                if e_row.get("event_id") or e_row.get("signal_event_id"):
+                    if "order_id" in mapped_row and "ts_code" in e_row:
+                        mapped_row["order_id"] = f"{event_mapping.get(str(e_row.get('event_id', e_row.get('signal_event_id', ''))), e_row.get('event_id', e_row.get('signal_event_id', '')))}-{e_row['ts_code']}"
+                if e_row.get("event_id") or e_row.get("signal_event_id"):
+                    if "attempt_id" in mapped_row and "order_id" in e_row:
+                        old_order = str(e_row["order_id"])
+                        new_order = str(mapped_row.get("order_id", old_order))
+                        mapped_row["attempt_id"] = str(e_row["attempt_id"]).replace(old_order, new_order, 1)
+            diffs.extend(
+                _row_diffs(
+                    f"{section}[{i}]",
+                    mapped_row,
+                    a_row,
+                    allowed_added_keys=allowed_added_keys,
+                )
+            )
 
     # Equity curves (NAV atol 1e-10)
     for name in exp["equity_curves"]:
@@ -410,14 +508,68 @@ def test_matches_pre_fix_golden():
     )
     expected = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
     actual = _run_and_normalize()
-    diffs = compare_golden(expected, actual)
-
     approved = _load_approved_delta()
+    diffs = compare_golden(expected, actual, approved)
     if approved:
         # Task 8 populates this; until then the golden must match exactly.
         diffs = [d for d in diffs if not _is_approved(d, approved)]
 
     assert not diffs, "golden divergence beyond approved delta:\n" + "\n".join(diffs[:50])
+
+
+def test_approved_capacity_zero_predicates_match_exact_frozen_rows():
+    expected = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    approved = _load_approved_delta()
+    predicates = _approved_row_predicates(approved, "orders") + _approved_row_predicates(
+        approved, "trade_events"
+    )
+    assert predicates
+    assert all(int(predicate["expected_count"]) == 312 for predicate in predicates)
+    assert sum(int(predicate["expected_count"]) for predicate in predicates) == 624
+    for predicate in predicates:
+        rows = [
+            row for row in expected[predicate["section"]]
+            if _row_matches_predicate(row, predicate)
+        ]
+        assert len(rows) == predicate["expected_count"]
+
+
+def test_corporate_action_fields_remain_compared():
+    expected = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    actual = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    predicate = _approved_row_predicates(_load_approved_delta(), "trade_events")[0]
+    actual["trade_events"] = [
+        row for row in actual["trade_events"]
+        if not _row_matches_predicate(row, predicate)
+    ]
+    corporate_action = next(
+        row for row in actual["trade_events"]
+        if row.get("event_type") == "CORPORATE_ACTION"
+    )
+    corporate_action["valuation_anchor_source"] = "tampered"
+    diffs = compare_golden(expected, actual, _load_approved_delta())
+    assert any("trade_events[" in diff and "valuation_anchor_source" in diff for diff in diffs)
+
+
+def test_row_diffs_allows_only_exact_approved_added_keys():
+    expected = {"order_id": "O-1", "filled": 1}
+    actual = {**expected, "attempt_id": "A-1"}
+
+    assert _row_diffs(
+        "orders[0]",
+        expected,
+        actual,
+        allowed_added_keys={"attempt_id"},
+    ) == []
+
+    unknown = {**actual, "unexpected_provenance": "bad"}
+    diffs = _row_diffs(
+        "orders[0]",
+        expected,
+        unknown,
+        allowed_added_keys={"attempt_id"},
+    )
+    assert any("key set differs" in diff for diff in diffs)
 
 
 def _is_approved(diff: str, approved: dict) -> bool:

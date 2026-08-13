@@ -55,5 +55,128 @@
       "prefixes": ["positions_summary: length differs"],
       "explanation": "Daily positions now span the full evaluation calendar. Only the length-difference line is approved; overlapping row content remains compared exactly."
     }
-  }
+  },
+  "approved_added_keys": {
+    "orders": [
+      "attempt_id",
+      "corporate_action_id",
+      "decision_id",
+      "parent_order_id",
+      "replacement_chain_id",
+      "replacement_of_order_id",
+      "rule_version",
+      "source_record_id"
+    ],
+    "trade_events": [
+      "code",
+      "rule_version",
+      "source_record_id"
+    ]
+  },
+  "approved_value_mappings": {
+    "orders": {
+      "attempt_status": {"PARTIAL": "PARTIALLY_FILLED"},
+      "final_status": {"CANCELLED": "CANCELED", "PARTIAL": "PARTIALLY_FILLED"},
+      "__event_identity__": {
+        "SIG-20230106-0001": "20230106-correlation_all_members",
+        "SIG-20230113-0002": "20230113-correlation_all_members",
+        "SIG-20230120-0003": "20230120-correlation_all_members",
+        "SIG-20230127-0004": "20230127-correlation_all_members",
+        "SIG-20230203-0005": "20230203-correlation_all_members",
+        "SIG-20230210-0006": "20230210-correlation_all_members",
+        "SIG-20230217-0007": "20230217-correlation_all_members",
+        "SIG-20230224-0008": "20230224-correlation_all_members",
+        "SIG-20230303-0009": "20230303-correlation_all_members",
+        "SIG-20230310-0010": "20230310-correlation_all_members",
+        "SIG-20230317-0011": "20230317-correlation_all_members",
+        "SIG-20230324-0012": "20230324-correlation_all_members",
+        "SIG-20230331-0013": "20230331-correlation_all_members",
+        "SIG-20230407-0014": "20230407-correlation_all_members",
+        "SIG-20230414-0015": "20230414-correlation_all_members",
+        "SIG-20230421-0016": "20230421-correlation_all_members",
+        "SIG-20230428-0017": "20230428-correlation_all_members",
+        "SIG-20230505-0018": "20230505-correlation_all_members",
+        "SIG-20230512-0019": "20230512-correlation_all_members",
+        "SIG-20230519-0020": "20230519-correlation_all_members",
+        "SIG-20230526-0021": "20230526-correlation_all_members",
+        "SIG-20230602-0022": "20230602-correlation_all_members",
+        "SIG-20230609-0023": "20230609-correlation_all_members",
+        "SIG-20230616-0024": "20230616-correlation_all_members",
+        "SIG-20230623-0025": "20230623-correlation_all_members",
+        "SIG-20230630-0026": "20230630-correlation_all_members",
+        "SIG-20230707-0027": "20230707-correlation_all_members"
+      }
+    },
+    "trade_events": {
+      "__event_identity__": {
+        "SIG-20230106-0001": "20230106-correlation_all_members",
+        "SIG-20230113-0002": "20230113-correlation_all_members",
+        "SIG-20230120-0003": "20230120-correlation_all_members",
+        "SIG-20230127-0004": "20230127-correlation_all_members",
+        "SIG-20230203-0005": "20230203-correlation_all_members",
+        "SIG-20230210-0006": "20230210-correlation_all_members",
+        "SIG-20230217-0007": "20230217-correlation_all_members",
+        "SIG-20230224-0008": "20230224-correlation_all_members",
+        "SIG-20230303-0009": "20230303-correlation_all_members",
+        "SIG-20230310-0010": "20230310-correlation_all_members",
+        "SIG-20230317-0011": "20230317-correlation_all_members",
+        "SIG-20230324-0012": "20230324-correlation_all_members",
+        "SIG-20230331-0013": "20230331-correlation_all_members",
+        "SIG-20230407-0014": "20230407-correlation_all_members",
+        "SIG-20230414-0015": "20230414-correlation_all_members",
+        "SIG-20230421-0016": "20230421-correlation_all_members",
+        "SIG-20230428-0017": "20230428-correlation_all_members",
+        "SIG-20230505-0018": "20230505-correlation_all_members",
+        "SIG-20230512-0019": "20230512-correlation_all_members",
+        "SIG-20230519-0020": "20230519-correlation_all_members",
+        "SIG-20230526-0021": "20230526-correlation_all_members",
+        "SIG-20230602-0022": "20230602-correlation_all_members",
+        "SIG-20230609-0023": "20230609-correlation_all_members",
+        "SIG-20230616-0024": "20230616-correlation_all_members",
+        "SIG-20230623-0025": "20230623-correlation_all_members",
+        "SIG-20230630-0026": "20230630-correlation_all_members",
+        "SIG-20230707-0027": "20230707-correlation_all_members"
+      }
+    }
+  },
+  "approved_row_predicates": [
+    {
+      "section": "orders",
+      "name": "legacy_sell_capacity_zero_zero_residual_attempt",
+      "expected_count": 312,
+      "match": {
+        "direction": "SELL",
+        "reason": "capacity_zero",
+        "attempt_status": "BLOCKED",
+        "attempt_filled": 0,
+        "remaining": 0
+      }
+    },
+    {
+      "section": "trade_events",
+      "name": "legacy_sell_capacity_zero_zero_residual_event",
+      "expected_count": 312,
+      "match": {
+        "action": "SELL",
+        "reason": "capacity_zero",
+        "status": "BLOCKED",
+        "requested": 0,
+        "filled": 0,
+        "unfilled": 0,
+        "remaining": 0
+      }
+    }
+  ],
+  "approved_row_mappings": [
+    {
+      "section": "orders",
+      "match": {"event_id": "SIG-20230324-0012", "ts_code": "510010.SH", "trade_date": "20230327", "attempt_number": 1},
+      "expected_to_actual": {
+        "requested": 2820,
+        "filled": 2820,
+        "current_quantity_basis": 1.0,
+        "corporate_action_adjustments": "[]"
+      }
+    }
+  ]
 }

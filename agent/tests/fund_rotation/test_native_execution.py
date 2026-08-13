@@ -276,6 +276,8 @@ def test_native_engine_sells_before_buys_and_carries_residual_attempts():
     ]
     assert sell_indexes and buy_indexes
     assert max(sell_indexes) < min(buy_indexes)
+    assert all(event["signal_event_id"] for event in rotation_events)
+    assert all(event["signal_week"] for event in rotation_events)
 
 
 def test_native_engine_continues_cash_positions_residual_parent_and_ids_across_calls():
@@ -421,6 +423,55 @@ def test_native_engine_records_corporate_action_replacement_lineage():
     assert replacement.corporate_action_id == action.corporate_action_id
     assert replacement.replacement_chain_id == old_parent.order_id
     assert replacement.original_requested_quantity == old_parent.remaining_quantity * 2
+
+    event = next(
+        event for event in result.trade_events
+        if event.get("event_type") == "CORPORATE_ACTION"
+    )
+    assert event["price"] == 0.0
+    assert event["commission"] == 0.0
+    assert event["adv20"] == 0.0
+    assert event["post_holding"] == action.new_quantity
+    assert event["remaining"] == 0
+    assert event["last_valid_close_date"] == "20240102"
+    assert event["valuation_anchor_date"] == "20240102"
+    assert event["valuation_anchor_source"] == "close"
+
+
+def test_native_engine_records_completed_parent_corporate_action_lineage():
+    dates = _dates()
+    market, adj = _market(
+        codes=("A",),
+        dates=dates,
+        amount=2_000_000.0,
+        adj_change=("A", "20240103", 2.0),
+    )
+
+    result = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.5}},
+            evaluation_dates=dates,
+            market=market,
+            adj=adj,
+        )
+    )
+
+    parents = [parent for parent in result.ledger.parent_orders if parent.ts_code == "A"]
+    assert len(parents) == 1
+    parent = parents[0]
+    assert parent.replacement_of_order_id == ""
+    assert parent.replacement_chain_id == ""
+    assert parent.original_requested_quantity == 5_000
+    assert parent.cumulative_filled_quantity == 5_000
+    assert parent.remaining_quantity == 0
+    assert parent.quantity_basis_id == "A:shares:1"
+
+    order = next(row for row in result.orders if row["order_id"] == parent.order_id)
+    assert order["requested"] == 5_000
+    assert order["filled"] == 5_000
+    assert order["current_quantity_basis"] == 1.0
+    assert order["corporate_action_adjustments"] == "[]"
+    assert result.ending_positions["A"]["size"] == 10_000
 
 
 def test_native_engine_preserves_cash_nav_and_exact_evaluation_calendar():

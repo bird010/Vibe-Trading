@@ -97,6 +97,7 @@ class NativeExecutionResult:
 class _ParentState:
     order_id: str
     decision_id: str
+    signal_week: str
     ts_code: str
     direction: str
     created_date: str
@@ -164,6 +165,7 @@ class _ParentState:
         return {
             "order_id": self.order_id,
             "decision_id": self.decision_id,
+            "signal_week": self.signal_week,
             "ts_code": self.ts_code,
             "direction": self.direction,
             "created_date": self.created_date,
@@ -188,6 +190,7 @@ class _ParentState:
         parent = cls(
             order_id=str(data["order_id"]),
             decision_id=str(data["decision_id"]),
+            signal_week=str(data.get("signal_week", "")),
             ts_code=str(data["ts_code"]),
             direction=str(data["direction"]),
             created_date=str(data["created_date"]),
@@ -386,6 +389,7 @@ class FundRotationExecutionEngine:
                     parent_states[order_id] = _ParentState(
                         order_id=order_id,
                         decision_id=signal_event_id,
+                        signal_week=signal_week,
                         ts_code=code,
                         direction="BUY" if delta > 0 else "SELL",
                         created_date=trade_date,
@@ -933,6 +937,17 @@ def _apply_corporate_actions(
             )
 
             old_parent_id = active_parent_by_code.get(code)
+            if old_parent_id is None:
+                prior_parents = [
+                    parent
+                    for parent in parent_states.values()
+                    if parent.ts_code == code and parent.created_date < trade_date
+                ]
+                if prior_parents:
+                    old_parent_id = max(
+                        prior_parents,
+                        key=lambda parent: (parent.created_date, parent.order_id),
+                    ).order_id
             if old_parent_id:
                 old_parent = parent_states[old_parent_id]
                 if old_parent.remaining_quantity > 0:
@@ -971,6 +986,7 @@ def _apply_corporate_actions(
                     parent_states[replacement_id] = _ParentState(
                         order_id=replacement_id,
                         decision_id=old_parent.decision_id,
+                        signal_week=old_parent.signal_week,
                         ts_code=code,
                         direction=old_parent.direction,
                         created_date=trade_date,
@@ -982,6 +998,7 @@ def _apply_corporate_actions(
                             old_parent.replacement_chain_id or old_parent_id
                         ),
                         corporate_action_id=corporate_action_id,
+                        corporate_action_adjustments=(adjustment,),
                     )
                     active_parent_by_code[code] = replacement_id
 
@@ -1011,12 +1028,30 @@ def _apply_corporate_actions(
                     "filled": new_size,
                     "unfilled": 0,
                     "reason": "fund_adj_factor_change",
+                    "price": 0.0,
+                    "commission": 0.0,
+                    "slippage_bps": 0.0,
+                    "adv20": 0.0,
+                    "adv_observations": 0,
+                    "participation_rate": 0.0,
+                    "post_holding": new_size,
+                    "remaining": 0,
                     "cash_in_lieu": cash_in_lieu,
                     "old_adj_factor": old_factor,
                     "new_adj_factor": new_factor,
                     "fractional_remainder": fractional,
                     "last_close_before": last_close_before,
                     "last_close_after": last_close_after,
+                    "last_valid_close_date": (
+                        executor._last_close_date.get(code, "")
+                        if executor._last_close_source.get(code) == "close" else ""
+                    ),
+                    "valuation_anchor_date": executor._last_close_date.get(code, ""),
+                    "valuation_anchor_source": executor._last_close_source.get(code, ""),
+                    "signal_event_id": "",
+                    "signal_week": "",
+                    "order_id": "",
+                    "attempt_id": "",
                 }
             )
         position_adj_factor[code] = new_factor
@@ -1108,6 +1143,8 @@ def _record_execution_event(
         "code": code,
         "order_id": parent_id,
         "attempt_id": attempt_id,
+        "signal_event_id": parent.decision_id,
+        "signal_week": parent.signal_week,
         "target_weight": float(active_targets.get(code, 0.0)),
         "rule_version": provenance.rule_version if provenance else parent.rule_version,
         "source_record_id": (
@@ -1199,6 +1236,9 @@ def _orders_from_ledger(
                 {
                     "order_id": parent.order_id,
                     "parent_order_id": parent.order_id,
+                    "replacement_of_order_id": parent.replacement_of_order_id,
+                    "replacement_chain_id": parent.replacement_chain_id,
+                    "corporate_action_id": parent.corporate_action_id,
                     "event_id": parent.decision_id,
                     "decision_id": parent.decision_id,
                     "ts_code": parent.ts_code,
