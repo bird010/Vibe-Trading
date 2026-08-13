@@ -88,6 +88,7 @@ class AccountingDayResult:
     reconciliation: ReconciliationResult
     quality_status: str
     quality_flags: tuple[str, ...]
+    daily_accounting_event_order: tuple[str, ...] = DAILY_ACCOUNTING_EVENT_ORDER
 
 
 @dataclass(frozen=True)
@@ -221,6 +222,7 @@ def compute_accounting_day(day: AccountDayInput) -> AccountingDayResult:
         reconciliation=reconciliation,
         quality_status=quality_status,
         quality_flags=tuple(flags),
+        daily_accounting_event_order=DAILY_ACCOUNTING_EVENT_ORDER,
     )
 
 
@@ -300,13 +302,26 @@ def compute_execution_ladder_effects(variants: Mapping[str, VariantSnapshot]) ->
     _require_declared_differences(
         variants,
         {
-            "X1": ("tradability_filter",),
-            "X2": ("limit_and_suspend_filter",),
-            "X3": ("lot_rounding",),
-            "X4": ("capacity",),
-            "X5": ("fees_and_slippage",),
+            "X1": ("eligibility_price_limit_settlement",),
+            "X2": ("lot_tick_rounding",),
+            "X3": ("capacity_participation_residual_retry",),
+            "X4": ("spread_slippage_market_impact",),
+            "X5": ("commission_taxes_explicit_fees",),
         },
     )
+    expected_stages = {
+        "X0": "reference_price_ideal_target",
+        "X1": "eligibility_price_limit_settlement",
+        "X2": "lot_tick_rounding",
+        "X3": "capacity_participation_residual_retry",
+        "X4": "spread_slippage_market_impact",
+        "X5": "commission_taxes_explicit_fees",
+    }
+    for name, expected_stage in expected_stages.items():
+        if variants[name].identity.get("execution_ladder_stage") != expected_stage:
+            raise AttributionContractError(
+                f"{name} must declare execution_ladder_stage={expected_stage}"
+            )
 
     effects: dict[str, float] = {}
     base_return = variants["X0"].executable_return

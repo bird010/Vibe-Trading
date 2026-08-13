@@ -261,6 +261,8 @@ class CorporateActionRecord:
         )
         if not self.corporate_action_id:
             raise ValueError("corporate_action_id is required")
+        if not self.ts_code:
+            raise ValueError("corporate_action ts_code is required")
         for field_name in (
             "old_quantity",
             "new_quantity",
@@ -321,6 +323,8 @@ class ExecutionLedger:
                     )
                 if action.action_type not in _SHARE_ADJUSTMENT_TYPES:
                     raise ValueError("replacement requires a share adjustment corporate action")
+                if action.ts_code != parent.ts_code or action.ts_code != old_parent.ts_code:
+                    raise ValueError("corporate action ts_code must match replacement lineage")
                 if parent.quantity_basis_id == old_parent.quantity_basis_id:
                     raise ValueError(
                         "replacement quantity_basis_id must differ from old parent"
@@ -335,10 +339,6 @@ class ExecutionLedger:
                     raise ValueError(
                         "replacement original_requested_quantity must equal adjusted residual"
                     )
-                if parent.cumulative_filled_quantity != 0:
-                    raise ValueError("replacement parent must start with zero cumulative filled")
-                if parent.remaining_quantity != parent.original_requested_quantity:
-                    raise ValueError("replacement parent must start with full remaining quantity")
 
         attempts_by_id = {attempt.attempt_id: attempt for attempt in self.attempts}
         if len(attempts_by_id) != len(self.attempts):
@@ -369,10 +369,20 @@ class ExecutionLedger:
                 raise ValueError(
                     "attempt cumulative filled must equal parent cumulative_filled_quantity"
                 )
+            if parent.status is ParentOrderStatus.FILLED and parent.remaining_quantity != 0:
+                raise ValueError("FILLED parent must have zero remaining quantity")
+            if parent.status is ParentOrderStatus.FILLED and parent.cumulative_filled_quantity != parent.original_requested_quantity:
+                raise ValueError("FILLED parent must have cumulative filled equal to original requested quantity")
+            if parent.status in {ParentOrderStatus.OPEN, ParentOrderStatus.PARTIALLY_FILLED} and parent.remaining_quantity <= 0:
+                raise ValueError(f"{parent.status.value} parent must have positive remaining quantity")
             cumulative_filled = 0
             for attempt in sorted(parent_attempts, key=lambda item: item.attempt_number):
                 if cumulative_filled >= parent.original_requested_quantity:
                     raise ValueError("FILLED parent cannot have later attempts")
+                if attempt.status is AttemptStatus.FILLED and attempt.filled_quantity != attempt.requested_quantity:
+                    raise ValueError("FILLED attempt must have filled equal to requested quantity")
+                if attempt.status is AttemptStatus.PARTIALLY_FILLED and not 0 < attempt.filled_quantity < attempt.requested_quantity:
+                    raise ValueError("PARTIALLY_FILLED attempt must have partial positive fill")
                 cumulative_filled += attempt.filled_quantity
 
         trades_by_id = {trade.trade_id: trade for trade in self.trades}
@@ -385,9 +395,15 @@ class ExecutionLedger:
                 raise ValueError(f"trade {trade.trade_id} references unknown attempt")
             if trade.order_id != attempt.order_id:
                 raise ValueError("trade order_id must match attempt order_id")
+            if trade.trade_date != attempt.trade_date:
+                raise ValueError("trade trade_date must match attempt trade_date")
             parent = parents_by_id.get(trade.order_id)
             if parent is None:
                 raise ValueError("trade references unknown parent")
+            if trade.ts_code != parent.ts_code:
+                raise ValueError("trade ts_code must match parent ts_code")
+            if trade.direction is not parent.direction:
+                raise ValueError("trade direction must match parent direction")
             if trade.quantity_basis_id != parent.quantity_basis_id:
                 raise ValueError("trade quantity_basis_id must match parent quantity_basis_id")
             trade_quantities_by_attempt[trade.attempt_id] = (
@@ -683,12 +699,19 @@ def build_execution_ledger_from_pipeline_result(result: Any) -> ExecutionLedger:
             seen_parents.add(order_id)
             quantity_basis_by_order[order_id] = old_quantity_basis_id
 
+            source_parent_id = order_id
+            source_remaining = old_remaining
+            source_quantity_basis = old_quantity_basis
             for index, adjustment in enumerate(adjustments, 1):
                 after = dict(adjustment.get("after", {}) or {})
                 replacement_order_id = f"{order_id}-R{index}"
+                adjustment_before = dict(adjustment.get("before", {}) or {})
+                source_remaining = int(
+                    float(adjustment_before.get("remaining", source_remaining) or 0)
+                )
                 replacement_quantity_basis = after.get(
                     "quantity_basis",
-                    row.get("current_quantity_basis", old_quantity_basis),
+                    row.get("current_quantity_basis", source_quantity_basis),
                 )
                 replacement_quantity_basis_id = _quantity_basis_id(
                     ts_code,
@@ -709,17 +732,18 @@ def build_execution_ledger_from_pipeline_result(result: Any) -> ExecutionLedger:
                     for attempt_row in replacement_attempt_rows
                 )
                 scale = float(adjustment.get("scale", 1.0) or 1.0)
-                replacement_requested = max(
-                    _replacement_residual_quantity(
-                        str(row.get("direction", "")),
-                        old_remaining,
-                        scale,
-                        lot_size=lot_size,
-                    ),
-                    replacement_filled,
+                replacement_requested = _replacement_residual_quantity(
+                    str(row.get("direction", "")),
+                    source_remaining,
+                    scale,
+                    lot_size=lot_size,
                 )
+                if replacement_filled > replacement_requested:
+                    raise ValueError(
+                        "replacement filled quantity exceeds corporate-action residual"
+                    )
                 residual_adjustment_factor_by_ca[str(adjustment.get("corporate_action_id", ""))] = (
-                    replacement_requested / old_remaining if old_remaining > 0 else 1.0
+                    replacement_requested / source_remaining if source_remaining > 0 else 1.0
                 )
                 parent_orders.append(
                     ParentOrderRecord(
@@ -732,14 +756,31 @@ def build_execution_ledger_from_pipeline_result(result: Any) -> ExecutionLedger:
                         cumulative_filled_quantity=replacement_filled,
                         remaining_quantity=max(replacement_requested - replacement_filled, 0),
                         quantity_basis_id=replacement_quantity_basis_id,
-                        replacement_of_order_id=order_id,
+                        replacement_of_order_id=source_parent_id,
                         replacement_chain_id=order_id,
                         corporate_action_id=str(adjustment.get("corporate_action_id", "")),
                         lot_size=lot_size,
-                        status=_parent_status(row.get("final_status", "")),
+                        status=(
+                            ParentOrderStatus.CANCELED
+                            if index < len(adjustments)
+                            else _parent_status(row.get("final_status", ""))
+                        ),
+                        completed_date=(
+                            str(adjustment.get("trade_date", ""))
+                            if index < len(adjustments)
+                            else ""
+                        ),
+                        cancel_reason=(
+                            "CORPORATE_ACTION_REPLACED"
+                            if index < len(adjustments)
+                            else ""
+                        ),
                     )
                 )
                 quantity_basis_by_order[replacement_order_id] = replacement_quantity_basis_id
+                source_parent_id = replacement_order_id
+                source_remaining = max(replacement_requested - replacement_filled, 0)
+                source_quantity_basis = replacement_quantity_basis
         else:
             quantity_basis_id = _quantity_basis_id(
                 ts_code,

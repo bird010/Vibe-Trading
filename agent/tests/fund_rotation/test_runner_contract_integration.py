@@ -19,6 +19,11 @@ from backtest.fund_rotation.runner import (
     FundRotationBacktestRunner,
     SubRunStatus,
 )
+from backtest.fund_rotation.pit_universe import (
+    FundRotationPITUniverseAdapter,
+    PITQueryMode,
+    UniversePolicy,
+)
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 
 
@@ -105,6 +110,39 @@ class StaticPITResolver:
             "quality_status": self.quality_status,
             "diagnostics": {"resolver": "static-test"},
         }
+
+
+class FormalResolverSpy:
+    def __init__(self):
+        self.calls = []
+
+    def resolve(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"universe_codes": ("A",), "quality_status": "VERIFIED"}
+
+
+def test_formal_pit_adapter_forwards_universe_resolver_context():
+    resolver = FormalResolverSpy()
+    adapter = FundRotationPITUniverseAdapter(
+        resolver,
+        strategy_policy=UniversePolicy(asset_classes=frozenset({"ETF"})),
+        causal_view_factory=lambda **kwargs: kwargs["signal_date"],
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    result = adapter.resolve_universe(
+        snapshot=object(),
+        signal_date="20240112",
+        knowledge_cutoff="20240112",
+        fallback_universe=frozenset({"A", "B"}),
+    )
+
+    assert result["universe_codes"] == ("A",)
+    assert resolver.calls[0]["strategy_policy"].asset_classes == frozenset({"ETF"})
+    assert resolver.calls[0]["causal_view"] == "20240112"
+    assert resolver.calls[0]["snapshot_version"] == 7
+    assert resolver.calls[0]["mode"] is PITQueryMode.AS_WAS_KNOWN
 
 
 def _market_frames():

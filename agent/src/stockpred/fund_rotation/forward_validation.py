@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol
 
-from backtest.fund_rotation.accounting_contract import ACCOUNTING_CONTRACT_VERSION
+from backtest.fund_rotation.accounting_contract import (
+    ACCOUNTING_CONTRACT_VERSION,
+    DAILY_ACCOUNTING_EVENT_ORDER,
+)
 
 
 class StrategyVersionLifecycle(str, Enum):
@@ -302,6 +306,8 @@ class ShadowAccountState:
     shadow_executable_nav: float
     accounting_contract_version: str
     completed_rebalance_cycles: int
+    cash_weight: float = 0.0
+    daily_accounting_event_order: tuple[str, ...] = DAILY_ACCOUNTING_EVENT_ORDER
 
 
 @dataclass
@@ -323,6 +329,7 @@ class ScheduledSignal:
     target_weights: tuple[tuple[str, float], ...]
     target_change_reasons: tuple[str, ...]
     expected_execution_date: str
+    cash_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -355,6 +362,7 @@ class ShadowDecision:
     decision_idempotency_key: str
     accounting_contract_version: str
     generated_before_execution_price: bool = True
+    new_cash_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -465,6 +473,7 @@ class InMemoryForwardValidationStore:
         target_weights: tuple[tuple[str, float], ...],
         target_change_reasons: tuple[str, ...],
         expected_execution_date: str,
+        cash_weight: float = 0.0,
     ) -> None:
         self.scheduled_signals.append(
             ScheduledSignal(
@@ -477,6 +486,7 @@ class InMemoryForwardValidationStore:
                 target_weights=target_weights,
                 target_change_reasons=target_change_reasons,
                 expected_execution_date=expected_execution_date,
+                cash_weight=cash_weight,
             )
         )
 
@@ -541,11 +551,14 @@ class ShadowTargetValidator(Protocol):
 class DefaultShadowTargetValidator:
     def validate(self, signal: ScheduledSignal) -> tuple[bool, tuple[str, ...]]:
         if not signal.target_weights:
-            return False, ("TARGETS_EMPTY",)
-        if any(weight < 0 for _, weight in signal.target_weights):
+            if signal.cash_weight < 1.0 - 1e-9:
+                return False, ("TARGETS_EMPTY",)
+        if not math.isfinite(signal.cash_weight) or signal.cash_weight < 0:
+            return False, ("CASH_WEIGHT_NEGATIVE",)
+        if any(not math.isfinite(weight) or weight < 0 for _, weight in signal.target_weights):
             return False, ("TARGET_WEIGHT_NEGATIVE",)
         total_weight = sum(weight for _, weight in signal.target_weights)
-        if abs(total_weight - 1.0) > 1e-9:
+        if abs(total_weight + signal.cash_weight - 1.0) > 1e-9:
             return False, ("TARGET_WEIGHTS_NOT_NORMALIZED",)
         return True, ()
 
@@ -612,6 +625,7 @@ class ShadowDecisionService:
             status = ShadowDecisionStatus.DATA_NOT_READY
             reason_codes = ("DATA_NOT_READY",)
         new_targets = signal.target_weights if can_seal else previous_state.target_weights
+        new_cash_weight = signal.cash_weight if can_seal else previous_state.cash_weight
         snapshot_fingerprint = signal.snapshot_fingerprint if can_seal else f"pending:{signal.snapshot_fingerprint}"
         decision_id = _stable_id("sd", key)
         decision = ShadowDecision(
@@ -634,6 +648,7 @@ class ShadowDecisionService:
             decision_idempotency_key=key,
             accounting_contract_version=version.accounting_contract_version,
             generated_before_execution_price=not execution_price_visible,
+            new_cash_weight=new_cash_weight,
         )
         self.store.decisions.append(decision)
         orders = tuple(
@@ -824,6 +839,8 @@ class ShadowExecutionService:
             violations.append("ACCOUNTING_CONTRACT_MISMATCH")
         if previous_state.accounting_contract_version != decision.accounting_contract_version:
             violations.append("STARTING_ACCOUNTING_CONTRACT_MISMATCH")
+        if previous_state.daily_accounting_event_order != DAILY_ACCOUNTING_EVENT_ORDER:
+            violations.append("STARTING_ACCOUNTING_EVENT_ORDER_MISMATCH")
         if previous_state.strategy_version_id != decision.strategy_version_id:
             violations.append("STARTING_ACCOUNT_STRATEGY_MISMATCH")
         if (
@@ -832,6 +849,17 @@ class ShadowExecutionService:
             or previous_state.target_weights != decision.previous_targets
         ):
             violations.append("STARTING_ACCOUNT_STATE_MISMATCH")
+        if previous_state.cash_weight < 0 or previous_state.cash_weight > 1:
+            violations.append("STARTING_CASH_WEIGHT_INVALID")
+        if not math.isfinite(previous_state.shadow_executable_nav) or previous_state.shadow_executable_nav <= 0:
+            violations.append("STARTING_ACCOUNT_NAV_INVALID")
+        elif not math.isclose(
+            previous_state.cash / previous_state.shadow_executable_nav,
+            previous_state.cash_weight,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            violations.append("STARTING_CASH_WEIGHT_NOT_BACKED_BY_CASH")
         return tuple(violations)
 
     def _validate_adapter_output(
@@ -876,10 +904,23 @@ class ShadowExecutionService:
             violations.append("ACCOUNTING_CONTRACT_MISMATCH")
         if account_state.accounting_contract_version != decision.accounting_contract_version:
             violations.append("ACCOUNTING_CONTRACT_MISMATCH")
+        if account_state.daily_accounting_event_order != DAILY_ACCOUNTING_EVENT_ORDER:
+            violations.append("ACCOUNTING_EVENT_ORDER_MISMATCH")
         if account_state.as_of_time != execution_as_of_time:
             violations.append("ACCOUNT_AS_OF_TIME_MISMATCH")
         if account_state.target_weights != decision.new_targets:
             violations.append("ACCOUNT_TARGET_MISMATCH")
+        if not math.isclose(account_state.cash_weight, decision.new_cash_weight, abs_tol=1e-9):
+            violations.append("ACCOUNT_CASH_WEIGHT_MISMATCH")
+        if not math.isfinite(account_state.shadow_executable_nav) or account_state.shadow_executable_nav <= 0:
+            violations.append("ACCOUNT_NAV_INVALID")
+        elif not math.isclose(
+            account_state.cash / account_state.shadow_executable_nav,
+            account_state.cash_weight,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            violations.append("ACCOUNT_CASH_WEIGHT_NOT_BACKED_BY_CASH")
         if account_state.completed_rebalance_cycles != previous_state.completed_rebalance_cycles + 1:
             violations.append("ACCOUNT_CYCLE_NOT_CONTINUOUS")
 

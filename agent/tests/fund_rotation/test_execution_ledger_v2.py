@@ -100,13 +100,15 @@ def _trade(
     price: float = 10.0,
     quantity_basis_id: str = "510300.SH:shares:v1",
     trade_date: str = "20240102",
+    ts_code: str = "510300.SH",
+    direction: OrderDirection = OrderDirection.BUY,
 ) -> ExecutedTradeRecord:
     return ExecutedTradeRecord(
         trade_id=trade_id,
         attempt_id=attempt_id,
         order_id=order_id,
-        ts_code="510300.SH",
-        direction=OrderDirection.BUY,
+        ts_code=ts_code,
+        direction=direction,
         quantity=quantity,
         quantity_basis_id=quantity_basis_id,
         price=price,
@@ -628,6 +630,127 @@ def test_pipeline_adapter_preserves_replacement_identity_and_lot_rounded_quantit
 def test_replacement_rounding_uses_order_lot_size():
     assert _replacement_residual_quantity(OrderDirection.BUY, 100, 1.5, lot_size=50) == 150
     assert _replacement_residual_quantity(OrderDirection.BUY, 100, 1.5, lot_size=100) == 100
+
+
+def test_replacement_parent_can_be_validated_after_follow_up_fill():
+    old_parent = _parent(
+        requested=1_000,
+        filled=500,
+        status=ParentOrderStatus.CANCELED,
+        cancel_reason="CORPORATE_ACTION_REPLACED",
+    )
+    split = CorporateActionRecord(
+        corporate_action_id="CA-SPLIT-AFTER-FILL",
+        ts_code="510300.SH",
+        action_type=CorporateActionType.SHARE_SPLIT,
+        effective_date="20240110",
+        old_quantity=500,
+        new_quantity=1_000,
+        old_cost_basis=10.0,
+        new_cost_basis=5.0,
+        adjustment_factor=2.0,
+    )
+    replacement = _parent(
+        order_id="O-1-R1",
+        requested=1_000,
+        filled=500,
+        remaining=500,
+        status=ParentOrderStatus.PARTIALLY_FILLED,
+        replacement_of_order_id="O-1",
+        replacement_chain_id="O-1",
+        corporate_action_id="CA-SPLIT-AFTER-FILL",
+        quantity_basis_id="510300.SH:shares:v2",
+    )
+
+    ledger = ExecutionLedger(
+        parent_orders=(old_parent, replacement),
+        attempts=(
+            _attempt(
+                attempt_id="A-OLD",
+                requested=1_000,
+                filled=500,
+                status=AttemptStatus.PARTIALLY_FILLED,
+                trade_date="20240108",
+            ),
+            _attempt(
+                attempt_id="A-REPLACEMENT",
+                order_id="O-1-R1",
+                requested=1_000,
+                filled=500,
+                status=AttemptStatus.PARTIALLY_FILLED,
+                quantity_basis_id="510300.SH:shares:v2",
+                trade_date="20240111",
+            ),
+        ),
+        trades=(
+            _trade(trade_id="T-OLD", attempt_id="A-OLD", quantity=500, trade_date="20240108"),
+            _trade(
+                trade_id="T-REPLACEMENT",
+                attempt_id="A-REPLACEMENT",
+                order_id="O-1-R1",
+                quantity=500,
+                quantity_basis_id="510300.SH:shares:v2",
+                trade_date="20240111",
+            ),
+        ),
+        corporate_actions=(split,),
+    )
+
+    assert ledger.parent_orders[1].cumulative_filled_quantity == 500
+
+
+def test_pipeline_adapter_rejects_replacement_overfill():
+    order_id = "SIG-20240105-OVERFILL-510300.SH"
+    result = SimpleNamespace(
+        orders=[{
+            "order_id": order_id, "event_id": "SIG-20240105-OVERFILL",
+            "ts_code": "510300.SH", "direction": "BUY", "requested": 150,
+            "filled": 50, "remaining": 100, "attempt_number": 1,
+            "trade_date": "20240108", "attempt_filled": 50, "attempt_status": "PARTIAL",
+            "attempt_quantity_basis": 1.0, "current_quantity_basis": 1.5,
+            "lot_size": 50, "final_status": "PENDING",
+            "corporate_action_adjustments": json.dumps([{
+                "corporate_action_id": "CA-OVERFILL", "trade_date": "20240109", "scale": 1.5,
+                "before": {"requested": 150, "filled": 50, "remaining": 100, "quantity_basis": 1.0},
+                "after": {"quantity_basis": 1.5},
+            }]),
+        }, {
+            "order_id": order_id, "event_id": "SIG-20240105-OVERFILL",
+            "ts_code": "510300.SH", "direction": "BUY", "requested": 150,
+            "filled": 200, "remaining": 0, "attempt_number": 2,
+            "trade_date": "20240111", "attempt_filled": 200, "attempt_status": "PARTIAL",
+            "attempt_quantity_basis": 1.5, "current_quantity_basis": 1.5,
+            "lot_size": 50, "final_status": "PENDING",
+            "corporate_action_adjustments": json.dumps([{
+                "corporate_action_id": "CA-OVERFILL", "trade_date": "20240109", "scale": 1.5,
+                "before": {"requested": 150, "filled": 50, "remaining": 100, "quantity_basis": 1.0},
+                "after": {"quantity_basis": 1.5},
+            }]),
+        }],
+        trade_events=[{
+            "trade_date": "20240108", "order_id": order_id,
+            "attempt_id": f"{order_id}-A1", "ts_code": "510300.SH", "action": "BUY",
+            "status": "PARTIAL", "requested": 150, "filled": 50, "price": 10.0,
+        }],
+        executed_equity=None,
+    )
+    with pytest.raises(ValueError, match="replacement filled quantity exceeds"):
+        build_execution_ledger_from_pipeline_result(result)
+
+
+def test_corporate_action_requires_a_symbol():
+    with pytest.raises(ValueError, match="corporate_action ts_code is required"):
+        CorporateActionRecord(
+            corporate_action_id="CA-MISSING-SYMBOL",
+            ts_code="",
+            action_type=CorporateActionType.SHARE_SPLIT,
+            effective_date="20240110",
+            old_quantity=100,
+            new_quantity=200,
+            old_cost_basis=10.0,
+            new_cost_basis=5.0,
+            adjustment_factor=2.0,
+        )
 
 
 def test_ledger_requires_parent_attempt_and_trade_quantity_closure():

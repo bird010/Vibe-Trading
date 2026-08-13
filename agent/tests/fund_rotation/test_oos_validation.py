@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -48,6 +49,14 @@ def _variant(
         data_identity_hash="data-v1",
         code_identity_hash="code-v1",
         evaluation_identity_hash="eval-v1",
+        framework_implementation_hash="framework-v1",
+        knowledge_cutoff="2026-01-01T00:00:00Z",
+        market_rule_policy_hash="market-rules-v1",
+        benchmark_policy_hash="benchmark-v1",
+        execution_policy_hash=oos_validation.canonical_identity_hash("exec-v1"),
+        accounting_policy_hash=oos_validation.canonical_identity_hash("daily_accounting_v1"),
+        evaluation_calendar_hash="calendar-v1",
+        formal_identity=True,
     )
 
 
@@ -83,6 +92,21 @@ def _qualified_experiment_kwargs(
     walk_forward_policy: RollingWalkForwardPolicy | None = None,
 ) -> dict[str, object]:
     weeks = _weeks(320)
+    benchmark_policy = BenchmarkPolicy(
+        primary_benchmark="000300.SH",
+        secondary_benchmarks=("510300.SH",),
+        cash_benchmark="cash_cny",
+        universe_equal_weight_benchmark="cn_equity_etf_equal_weight",
+        benchmark_data_version="bench-v1",
+    )
+    qualified_variants = tuple(
+        replace(
+            variant,
+            evaluation_calendar_hash=oos_validation.canonical_identity_hash(tuple(weeks[216:])),
+            benchmark_policy_hash=oos_validation.canonical_identity_hash(benchmark_policy),
+        )
+        for variant in (variants or (_variant("absolute-12m"),))
+    )
     kwargs: dict[str, object] = {
         "hypothesis": "direct ETF momentum has persistent OOS edge",
         "primary_metric": "sharpe",
@@ -94,15 +118,9 @@ def _qualified_experiment_kwargs(
             validation_weeks=weeks[160:216],
             oos_weeks=weeks[216:],
         ),
-        "benchmark_policy": BenchmarkPolicy(
-            primary_benchmark="000300.SH",
-            secondary_benchmarks=("510300.SH",),
-            cash_benchmark="cash_cny",
-            universe_equal_weight_benchmark="cn_equity_etf_equal_weight",
-            benchmark_data_version="bench-v1",
-        ),
+        "benchmark_policy": benchmark_policy,
         "qualification_policy": QualificationPolicy(),
-        "candidate_variants": variants or (_variant("absolute-12m"),),
+        "candidate_variants": qualified_variants,
     }
     if walk_forward_policy is not None:
         kwargs["walk_forward_policy"] = walk_forward_policy
@@ -118,15 +136,15 @@ def _formal_non_cluster_baseline(experiment) -> dict[str, object]:
         "strategy_implementation_hash": "code-v1",
         "framework_implementation_hash": "framework-default-v1",
         "resolved_config_hash": oos_validation.canonical_identity_hash({"lookback_weeks": 12}),
-        "knowledge_cutoff": "knowledge-cutoff-default-v1",
+        "knowledge_cutoff": "2026-01-01T00:00:00Z",
         "universe_id": "cn_equity_etf",
         "execution_contract_version": "exec-v1",
-        "execution_policy_hash": oos_validation.canonical_identity_hash("exec-v1"),
+        "execution_policy_hash": experiment.candidate_variants[0].execution_policy_hash,
         "accounting_contract_version": "daily_accounting_v1",
-        "accounting_policy_hash": oos_validation.canonical_identity_hash("daily_accounting_v1"),
-        "market_rule_policy_hash": oos_validation.canonical_identity_hash("market-rule-default-v1"),
-        "evaluation_calendar_hash": oos_validation.canonical_identity_hash(tuple(experiment.split_policy.oos_weeks)),
-        "benchmark_policy_hash": oos_validation.canonical_identity_hash(experiment.benchmark_policy),
+        "accounting_policy_hash": experiment.candidate_variants[0].accounting_policy_hash,
+        "market_rule_policy_hash": experiment.candidate_variants[0].market_rule_policy_hash,
+        "evaluation_calendar_hash": experiment.candidate_variants[0].evaluation_calendar_hash,
+        "benchmark_policy_hash": experiment.candidate_variants[0].benchmark_policy_hash,
         "qualification_policy_hash": experiment.qualification_policy_hash,
         "data_snapshot_fingerprint": "data-v1",
         "research_experiment_id": experiment.experiment_id,
@@ -225,6 +243,17 @@ def test_qualified_oos_evidence_requires_completed_non_cluster_baseline_contract
     )
 
     assert label == "QUALIFIED_OOS_EVIDENCE"
+
+
+def test_qualified_oos_evidence_rejects_placeholder_variant_identity():
+    variant = replace(_variant("placeholder"), framework_implementation_hash="framework-default-v1")
+    experiment = create_research_experiment(**_qualified_experiment_kwargs(variants=(variant,)))
+
+    with pytest.raises(ValueError, match="placeholder"):
+        oos_validation.require_qualified_oos_evidence(
+            experiment,
+            qualification_policy=QualificationPolicy(require_non_cluster_baseline=False),
+        )
 
 
 def test_oos_accounting_contract_defaults_match_daily_accounting_v1() -> None:

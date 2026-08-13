@@ -99,11 +99,11 @@ class MomentumResult:
 
 
 def _compound_return(values: pd.Series) -> float | None:
-    finite = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    finite = finite.dropna()
-    if finite.empty:
+    numeric = pd.to_numeric(values, errors="coerce")
+    if numeric.empty or numeric.isna().any() or not np.isfinite(numeric.to_numpy(dtype=float)).all():
         return None
-    return float(np.prod(1.0 + finite.to_numpy(dtype=float)) - 1.0)
+    result = float(np.prod(1.0 + numeric.to_numpy(dtype=float)) - 1.0)
+    return result if math.isfinite(result) else None
 
 
 def _window_for_family(series: pd.Series, family: str, single_window: int) -> pd.Series:
@@ -144,7 +144,8 @@ def compute_momentum_families(
                 if scores[cluster_id] is None:
                     reasons[cluster_id] = ("UNAVAILABLE_MOMENTUM",)
             if scores[cluster_id] is not None and not math.isfinite(float(scores[cluster_id])):
-                scores[cluster_id] = 0.0
+                scores[cluster_id] = None
+                reasons[cluster_id] = ("UNAVAILABLE_MOMENTUM",)
         scores_by_family[family] = scores
         reason_codes_by_family[family] = reasons
     return MomentumResult(
@@ -864,7 +865,11 @@ def run_decision_pipeline(
     missing_representative_count = sum(
         1 for value in selected_reps.values() if not _representative_codes(value)
     )
-    if selected_reps and missing_representative_count:
+    if (
+        selected_reps
+        and missing_representative_count
+        and portfolio_policy.method != "equal_weight_by_cluster_slot"
+    ):
         investable = 1.0 - portfolio_policy.minimum_cash_weight
         if 0.0 <= investable <= 1.0:
             reserved_cash = investable * missing_representative_count / len(selected_reps)
@@ -872,6 +877,11 @@ def run_decision_pipeline(
                 portfolio_policy,
                 minimum_cash_weight=portfolio_policy.minimum_cash_weight + reserved_cash,
             )
+    if portfolio_policy.method == "equal_weight_by_cluster_slot" and portfolio_policy.target_cluster_slots is None:
+        portfolio_build_policy = replace(
+            portfolio_build_policy,
+            target_cluster_slots=len(selected_reps),
+        )
     portfolio = build_portfolio_weights(assets, policy=portfolio_build_policy)
     records.append(
         StageRecord(

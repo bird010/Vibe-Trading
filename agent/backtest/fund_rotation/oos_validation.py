@@ -500,6 +500,7 @@ class VariantSpec:
     market_rule_policy_hash: str = ""
     evaluation_calendar_hash: str = ""
     benchmark_policy_hash: str = ""
+    formal_identity: bool = False
 
     def __post_init__(self) -> None:
         if self.component_stage not in COMPONENT_CHAIN_STAGES:
@@ -524,6 +525,39 @@ class VariantSpec:
             object.__setattr__(self, "evaluation_calendar_hash", self.evaluation_identity_hash)
         if not self.benchmark_policy_hash:
             object.__setattr__(self, "benchmark_policy_hash", _identity_hash(_DEFAULT_BENCHMARK_POLICY_HASH))
+
+    def require_formal_identity(self) -> None:
+        """Reject auto-filled identities before sealed/qualified OOS use."""
+        if not self.formal_identity:
+            raise ValueError("formal OOS identity must be explicitly declared")
+        placeholders = {
+            "framework_implementation_hash": _DEFAULT_FRAMEWORK_IMPLEMENTATION_HASH,
+            "knowledge_cutoff": _DEFAULT_KNOWLEDGE_CUTOFF,
+            "market_rule_policy_hash": _identity_hash(_DEFAULT_MARKET_RULE_POLICY_HASH),
+            "benchmark_policy_hash": _identity_hash(_DEFAULT_BENCHMARK_POLICY_HASH),
+        }
+        for field_name, placeholder in placeholders.items():
+            if getattr(self, field_name) == placeholder:
+                raise ValueError(
+                    f"formal OOS identity requires explicit {field_name}; placeholder is not allowed"
+                )
+        for field_name in (
+            "strategy_implementation_hash",
+            "framework_implementation_hash",
+            "resolved_config_hash",
+            "data_identity_hash",
+            "universe_id",
+            "execution_contract_version",
+            "evaluation_identity_hash",
+            "knowledge_cutoff",
+            "execution_policy_hash",
+            "accounting_policy_hash",
+            "market_rule_policy_hash",
+            "evaluation_calendar_hash",
+            "benchmark_policy_hash",
+        ):
+            if not getattr(self, field_name):
+                raise ValueError(f"formal OOS identity requires non-empty {field_name}")
 
     @property
     def sealed_identity_hash(self) -> str:
@@ -551,6 +585,7 @@ class VariantSpec:
             "market_rule_policy_hash": self.market_rule_policy_hash,
             "evaluation_calendar_hash": self.evaluation_calendar_hash,
             "benchmark_policy_hash": self.benchmark_policy_hash,
+            "formal_identity": self.formal_identity,
         }
 
 
@@ -707,6 +742,8 @@ def require_qualified_oos_evidence(
     qualification_policy: OOSQualificationPolicySpec | None = None,
     non_cluster_baseline_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
+    for variant in experiment.candidate_variants:
+        variant.require_formal_identity()
     policy = qualification_policy or OOSQualificationPolicySpec()
     label = experiment.split_policy.require_qualified_oos_evidence(policy)
     if not policy.require_non_cluster_baseline:

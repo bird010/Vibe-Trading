@@ -133,6 +133,8 @@ def test_unavailable_momentum_is_null_reasoned_and_excluded_from_rankings():
 
     assert result.scores_by_family["single_window"]["missing"] is None
     assert result.reason_codes_by_family["single_window"]["missing"] == ("UNAVAILABLE_MOMENTUM",)
+
+
     assert result.scores_by_family["risk_adjusted"]["flat"] is None
     assert result.reason_codes_by_family["risk_adjusted"]["flat"] == ("UNAVAILABLE_MOMENTUM",)
 
@@ -146,6 +148,18 @@ def test_unavailable_momentum_is_null_reasoned_and_excluded_from_rankings():
     )
     assert list(weighted) == ["winner", "flat"]
     assert "missing" not in weighted
+
+
+def test_nonfinite_momentum_is_unavailable_not_zero():
+    result = compute_momentum_families(
+        pd.DataFrame({"overflow": [1e308, 1e308]}),
+        MomentumPolicy(single_window=2),
+    )
+
+    assert result.scores_by_family["single_window"]["overflow"] is None
+    assert result.reason_codes_by_family["single_window"]["overflow"] == (
+        "UNAVAILABLE_MOMENTUM",
+    )
 
 
 def test_hysteresis_respects_buffer_min_holding_score_improvement_cycle_reset_and_hard_failure():
@@ -499,3 +513,46 @@ def test_pipeline_keeps_missing_representative_slot_as_cash_without_renormalizin
     portfolio_stage = next(r for r in decision.stage_records if r.stage == "raw_portfolio_weights")
     assert portfolio_stage.output == {"AAA": pytest.approx(0.45)}
     assert portfolio_stage.reason_codes == ("NO_REPRESENTATIVE_CASH",)
+
+
+def test_cluster_slot_pipeline_reserves_vacant_slot_only_once():
+    decision = run_decision_pipeline(
+        raw_signal_scores={"c1": 0.30, "c2": 0.20},
+        coverage_available={"c1": True, "c2": True},
+        representatives={"c1": "AAA", "c2": None},
+        asset_metadata={"AAA": {"cluster_id": "c1", "asset_class": "equity"}},
+        selection_policy=SelectionPolicy(top_n=2, exit_buffer=0),
+        portfolio_policy=PortfolioPolicy(
+            enabled=True,
+            method="equal_weight_by_cluster_slot",
+            target_cluster_slots=2,
+            minimum_cash_weight=0.10,
+        ),
+        risk_policy=RiskPolicy(enabled=False),
+        policy_versions={
+            "signal": "sig-v1", "coverage": "cov-v1", "selection": "sel-v1",
+            "representative": "rep-v1", "portfolio": "port-v1", "risk": "risk-v1",
+        },
+    )
+
+    assert decision.status == "VALID"
+    assert decision.stage_records[-1].output["weights"] == {"AAA": pytest.approx(0.45)}
+    assert decision.stage_records[-1].output["cash_weight"] == pytest.approx(0.55)
+
+
+def test_cluster_slot_pipeline_infers_selected_slots_when_policy_omits_count():
+    decision = run_decision_pipeline(
+        raw_signal_scores={"c1": 0.30, "c2": 0.20},
+        coverage_available={"c1": True, "c2": True},
+        representatives={"c1": "AAA", "c2": None},
+        asset_metadata={"AAA": {"cluster_id": "c1", "asset_class": "equity"}},
+        selection_policy=SelectionPolicy(top_n=2, exit_buffer=0),
+        portfolio_policy=PortfolioPolicy(enabled=True, method="equal_weight_by_cluster_slot", minimum_cash_weight=0.10),
+        risk_policy=RiskPolicy(enabled=False),
+        policy_versions={
+            "signal": "sig-v1", "coverage": "cov-v1", "selection": "sel-v1",
+            "representative": "rep-v1", "portfolio": "port-v1", "risk": "risk-v1",
+        },
+    )
+
+    assert decision.stage_records[-1].output["weights"] == {"AAA": pytest.approx(0.45)}

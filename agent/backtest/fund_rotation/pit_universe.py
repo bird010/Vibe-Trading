@@ -882,3 +882,45 @@ def _optional_format_datetime(value: object) -> str | None:
     if not _has_value(value):
         return None
     return _format_datetime(value)
+
+
+class FundRotationPITUniverseAdapter:
+    """Production adapter from the Runner boundary to ``UniverseResolver``."""
+
+    def __init__(
+        self,
+        resolver: UniverseResolver,
+        *,
+        strategy_policy: UniversePolicy,
+        causal_view_factory,
+        snapshot_version: int | None = None,
+        mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
+    ) -> None:
+        self._resolver = resolver
+        self._strategy_policy = strategy_policy
+        self._causal_view_factory = causal_view_factory
+        self._snapshot_version = snapshot_version
+        self._mode = mode
+
+    def resolve_universe(
+        self,
+        *,
+        snapshot: object,
+        signal_date: str,
+        knowledge_cutoff: str,
+        fallback_universe: frozenset[str],
+    ) -> UniverseResolution:
+        snapshot_version = getattr(snapshot, "snapshot_version", self._snapshot_version)
+        causal_view = self._causal_view_factory(
+            snapshot=snapshot,
+            signal_date=signal_date,
+            universe=fallback_universe,
+        )
+        return self._resolver.resolve(
+            signal_date=signal_date,
+            knowledge_cutoff=knowledge_cutoff,
+            strategy_policy=self._strategy_policy,
+            causal_view=causal_view,
+            snapshot_version=snapshot_version,
+            mode=self._mode,
+        )

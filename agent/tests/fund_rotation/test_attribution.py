@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from backtest.fund_rotation.accounting_contract import DAILY_ACCOUNTING_EVENT_ORDER
 from backtest.fund_rotation.attribution import (
     AccountDayInput,
     CashAttributionEvent,
@@ -21,6 +22,20 @@ from backtest.fund_rotation.attribution import (
     compute_strategy_component_effects,
     reconcile_attribution,
 )
+
+
+def test_daily_accounting_contract_uses_frozen_nine_step_order():
+    assert DAILY_ACCOUNTING_EVENT_ORDER == (
+        "load_beginning_account_state",
+        "apply_corporate_actions",
+        "normalize_comparable_prior_close",
+        "create_or_replace_parent_orders",
+        "execute_sell_attempts",
+        "execute_buy_attempts",
+        "closing_valuation",
+        "persist_ending_account_state",
+        "compute_pnl_and_reconciliation",
+    )
 
 
 def test_accounting_day_uses_executed_price_once_for_cash_nav_and_pnl_bridge():
@@ -221,13 +236,30 @@ def test_strategy_component_chain_outputs_prefixed_effects_and_enforces_fairness
 def test_execution_ladder_uses_fixed_x0_x5_targets_and_reports_effect_and_drag():
     """Catches variable strategy targets or missing X-ladder incremental drag."""
     identity = {"strategy_target_hash": "target-v1", "rule_version": "r1", "cost_model_version": "c1"}
+    ladder_stages = {
+        "X0": "reference_price_ideal_target",
+        "X1": "eligibility_price_limit_settlement",
+        "X2": "lot_tick_rounding",
+        "X3": "capacity_participation_residual_retry",
+        "X4": "spread_slippage_market_impact",
+        "X5": "commission_taxes_explicit_fees",
+    }
     ladder = {
-        "X0": VariantSnapshot("X0", ideal_target_return=0.020, executable_return=0.020, identity=identity),
-        "X1": VariantSnapshot("X1", ideal_target_return=0.020, executable_return=0.018, identity=identity, declared_differences=("tradability_filter",)),
-        "X2": VariantSnapshot("X2", ideal_target_return=0.020, executable_return=0.017, identity=identity, declared_differences=("limit_and_suspend_filter",)),
-        "X3": VariantSnapshot("X3", ideal_target_return=0.020, executable_return=0.019, identity=identity, declared_differences=("lot_rounding",)),
-        "X4": VariantSnapshot("X4", ideal_target_return=0.020, executable_return=0.016, identity=identity, declared_differences=("capacity",)),
-        "X5": VariantSnapshot("X5", ideal_target_return=0.020, executable_return=0.014, identity=identity, declared_differences=("fees_and_slippage",)),
+        name: VariantSnapshot(
+            name,
+            ideal_target_return=0.020,
+            executable_return=return_value,
+            identity=dict(identity, execution_ladder_stage=ladder_stages[name]),
+            declared_differences=declared_differences,
+        )
+        for name, return_value, declared_differences in (
+            ("X0", 0.020, ()),
+            ("X1", 0.018, ("eligibility_price_limit_settlement",)),
+            ("X2", 0.017, ("lot_tick_rounding",)),
+            ("X3", 0.019, ("capacity_participation_residual_retry",)),
+            ("X4", 0.016, ("spread_slippage_market_impact",)),
+            ("X5", 0.014, ("commission_taxes_explicit_fees",)),
+        )
     }
 
     effects = compute_execution_ladder_effects(ladder)
@@ -239,18 +271,19 @@ def test_execution_ladder_uses_fixed_x0_x5_targets_and_reports_effect_and_drag()
 
     changed_target = dict(ladder)
     changed_target["X3"] = VariantSnapshot(
-        "X3", ideal_target_return=0.020, executable_return=0.019, identity=dict(identity, strategy_target_hash="target-v2")
+        "X3", ideal_target_return=0.020, executable_return=0.019,
+        identity=dict(identity, strategy_target_hash="target-v2", execution_ladder_stage=ladder_stages["X3"])
     )
     with pytest.raises(AttributionContractError, match="strategy target"):
         compute_execution_ladder_effects(changed_target)
 
     missing_declaration = dict(ladder)
-    missing_declaration["X3"] = VariantSnapshot("X3", 0.020, 0.019, identity, declared_differences=())
+    missing_declaration["X3"] = VariantSnapshot("X3", 0.020, 0.019, dict(identity, execution_ladder_stage=ladder_stages["X3"]), declared_differences=())
     with pytest.raises(AttributionContractError, match="declared differences"):
         compute_execution_ladder_effects(missing_declaration)
 
     unexpected_declaration = dict(ladder)
-    unexpected_declaration["X3"] = VariantSnapshot("X3", 0.020, 0.019, identity, declared_differences=("slippage",))
+    unexpected_declaration["X3"] = VariantSnapshot("X3", 0.020, 0.019, dict(identity, execution_ladder_stage=ladder_stages["X3"]), declared_differences=("slippage",))
     with pytest.raises(AttributionContractError, match="declared differences"):
         compute_execution_ladder_effects(unexpected_declaration)
 

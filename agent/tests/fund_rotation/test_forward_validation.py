@@ -271,6 +271,7 @@ def seeded_store() -> tuple[InMemoryForwardValidationStore, FrozenStrategyVersio
             shadow_executable_nav=1_000.0,
             accounting_contract_version=version.accounting_contract_version,
             completed_rebalance_cycles=0,
+            cash_weight=1.0,
         ),
     )
     return store, version
@@ -431,6 +432,30 @@ def test_decision_service_seals_data_not_ready_without_changing_targets() -> Non
     assert result.decision.reason_codes == ("DATA_NOT_READY",)
     assert result.orders == ()
     assert result.decision.generated_before_execution_price is True
+
+
+def test_shadow_target_contract_can_represent_cash_weight():
+    store, version = seeded_store()
+    store.schedule_signal(
+        strategy_version_id=version.strategy_version_id,
+        signal_date="2026-01-05",
+        data_available_at=at("2026-01-05T09:00:00"),
+        snapshot_fingerprint="snapshot-cash",
+        raw_signal={"momentum": {}},
+        selected_clusters=(),
+        target_weights=(("ETF_A", 0.4),),
+        cash_weight=0.6,
+        target_change_reasons=("RISK_OFF",),
+        expected_execution_date="2026-01-06",
+    )
+
+    result = ShadowDecisionService(store).seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    )
+
+    assert result.decision.status == ShadowDecisionStatus.SEALED
+    assert result.decision.new_cash_weight == pytest.approx(0.6)
 
 
 def test_decision_service_rejects_seal_after_execution_price_is_visible() -> None:
@@ -808,6 +833,7 @@ def test_execution_rejects_starting_account_state_that_no_longer_matches_sealed_
             shadow_executable_nav=900.0,
             accounting_contract_version=ACCOUNTING_CONTRACT_VERSION,
             completed_rebalance_cycles=0,
+            cash_weight=1.0,
         ),
     )
     drifted_account_state = store.account_states[version.strategy_version_id]
