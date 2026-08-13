@@ -66,6 +66,7 @@ def _rule_record(
     *,
     lot_size: int = 100,
     tick_size: float = 0.001,
+    short_allowed: bool = False,
     source_record_id: str | None = None,
 ) -> dict:
     return {
@@ -81,7 +82,7 @@ def _rule_record(
         "lot_size": lot_size,
         "tick_size": tick_size,
         "price_limit_pct": 0.10,
-        "short_allowed": False,
+        "short_allowed": short_allowed,
         "currency": "CNY",
         "source_record_id": source_record_id or f"{code}-src",
         "source_id": "native-test-source",
@@ -94,9 +95,11 @@ def _resolver_and_instruments(
     *,
     lot_size_by_code: dict[str, int] | None = None,
     tick_size_by_code: dict[str, float] | None = None,
+    short_allowed_by_code: dict[str, bool] | None = None,
 ) -> tuple[MarketRuleResolver, dict[str, FundInstrumentVersion]]:
     lot_size_by_code = lot_size_by_code or {}
     tick_size_by_code = tick_size_by_code or {}
+    short_allowed_by_code = short_allowed_by_code or {}
     resolver = MarketRuleResolver(
         InMemoryPITMarketRuleSource(
             [
@@ -104,6 +107,7 @@ def _resolver_and_instruments(
                     code,
                     lot_size=lot_size_by_code.get(code, 100),
                     tick_size=tick_size_by_code.get(code, 0.001),
+                    short_allowed=short_allowed_by_code.get(code, False),
                 )
                 for code in codes
             ]
@@ -324,6 +328,51 @@ def test_native_engine_continues_cash_positions_residual_parent_and_ids_across_c
     assert second.state.cash == second.ending_cash
 
 
+def test_native_engine_empty_targets_continue_existing_holdings_without_active_orders():
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates)
+    first = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.5}},
+            evaluation_dates=dates[:1],
+            market=market,
+            adj=adj,
+            decision_ids={"20240101": "DECISION-HOLD"},
+            order_ids={"DECISION-HOLD": {"A": "ORDER-HOLD-A"}},
+        )
+    )
+    assert first.state.active_orders == ()
+    assert first.ending_positions["A"]["size"] > 0
+
+    second_market = market.copy()
+    second_market.loc[
+        second_market["trade_date"].isin(dates[1:3]),
+        ["open", "close", "high", "low", "pre_close"],
+    ] = [12.0, 12.0, 12.1, 11.9, 10.0]
+    second = FundRotationExecutionEngine().execute(
+        _request(
+            {},
+            evaluation_dates=dates[1:3],
+            market=second_market,
+            adj=adj,
+            initial_state=first.state,
+        )
+    )
+
+    assert second.ledger.parent_orders[0].order_id == "ORDER-HOLD-A"
+    assert second.ledger.trades == first.ledger.trades
+    assert second.ending_positions == first.ending_positions
+    assert second.state.positions == first.state.positions
+    assert list(second.executed_equity.index) == dates[1:3]
+    expected_equity = first.ending_cash + first.ending_positions["A"]["size"] * 12.0
+    assert math.isclose(
+        float(second.executed_equity.iloc[-1]) * 100_000.0,
+        expected_equity,
+        rel_tol=1e-9,
+        abs_tol=1e-7,
+    )
+
+
 def test_native_engine_records_corporate_action_replacement_lineage():
     dates = _dates()
     market, adj = _market(
@@ -440,6 +489,48 @@ def test_native_engine_fails_closed_when_pit_rule_is_missing():
         FundRotationExecutionEngine().execute(
             _request(
                 {"20240101": {"A": 1.0}},
+                evaluation_dates=dates,
+                market=market,
+                adj=adj,
+                rule_resolver=resolver,
+                instrument_versions=instruments,
+            )
+        )
+
+
+def test_native_engine_fails_closed_on_short_target_even_when_rule_allows_short():
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates)
+    resolver, instruments = _resolver_and_instruments(
+        ("A",),
+        short_allowed_by_code={"A": True},
+    )
+
+    with pytest.raises(ValueError, match="short"):
+        FundRotationExecutionEngine().execute(
+            _request(
+                {"20240101": {"A": -0.10}},
+                evaluation_dates=dates,
+                market=market,
+                adj=adj,
+                rule_resolver=resolver,
+                instrument_versions=instruments,
+            )
+        )
+
+
+def test_native_engine_fails_closed_on_short_target_when_rule_disallows_short():
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates)
+    resolver, instruments = _resolver_and_instruments(
+        ("A",),
+        short_allowed_by_code={"A": False},
+    )
+
+    with pytest.raises(ValueError, match="short"):
+        FundRotationExecutionEngine().execute(
+            _request(
+                {"20240101": {"A": -0.10}},
                 evaluation_dates=dates,
                 market=market,
                 adj=adj,

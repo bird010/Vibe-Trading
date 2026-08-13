@@ -233,8 +233,8 @@ class FundRotationExecutionEngine:
         ctx = build_execution_context(request.fund_daily, request.fund_adj, config)
 
         initial_state = request.initial_state
-        has_active_state = bool(initial_state and initial_state.active_orders)
-        if not request.targets and not has_active_state:
+        has_initial_state = initial_state is not None
+        if not request.targets and not has_initial_state:
             return _cash_hold_result(evaluation_dates, request.initial_capital)
 
         snapshots = [
@@ -252,12 +252,12 @@ class FundRotationExecutionEngine:
             )
             for exec_date, snap in sorted(schedule.items())
         }
-        if not exec_date_map and not has_active_state:
+        if not exec_date_map and not has_initial_state:
             return _cash_hold_result(evaluation_dates, request.initial_capital)
 
         initial_rule_code = _first_execution_code(request, initial_state)
         if not initial_rule_code:
-            raise UnknownExecutionRule("UNKNOWN_EXECUTION_RULE: no execution instrument")
+            return _state_hold_result(evaluation_dates, request, initial_state)
         initial_rules, _ = _resolve_execution_rules(
             request,
             initial_rule_code,
@@ -358,6 +358,12 @@ class FundRotationExecutionEngine:
                     if price <= 0:
                         continue
                     target_size = int(target_weight * pre_equity / price)
+                    _validate_short_gate(
+                        code=code,
+                        target_weight=target_weight,
+                        target_size=target_size,
+                        rules=creation_provenance[code],
+                    )
                     delta = target_size - current_size
                     if delta:
                         deltas[code] = delta
@@ -548,6 +554,48 @@ def _cash_hold_result(
     )
 
 
+def _state_hold_result(
+    evaluation_dates: list[str],
+    request: NativeExecutionRequest,
+    initial_state: NativeExecutionState | None,
+) -> NativeExecutionResult:
+    if initial_state is None:
+        return _cash_hold_result(evaluation_dates, request.initial_capital)
+    parent_states = _restore_parent_states(initial_state)
+    ledger = ExecutionLedger(
+        parent_orders=tuple(parent.to_record() for parent in parent_states.values()),
+        attempts=tuple(_restore_attempts(initial_state)),
+        trades=tuple(_restore_trades(initial_state)),
+        corporate_actions=tuple(_restore_corporate_actions(initial_state)),
+    )
+    equity_records = [
+        {"trade_date": trade_date, "equity": float(initial_state.cash)}
+        for trade_date in evaluation_dates
+    ]
+    positions_history = [
+        {
+            "trade_date": trade_date,
+            "positions": dict(initial_state.positions),
+            "holdings": [],
+            "cash": float(initial_state.cash),
+            "signal_cash": float(initial_state.cash),
+            "execution_failure_cash": 0.0,
+            "equity": float(initial_state.cash),
+        }
+        for trade_date in evaluation_dates
+    ]
+    return NativeExecutionResult(
+        ledger=ledger,
+        executed_equity=_equity_series(equity_records, request.initial_capital),
+        trade_events=[],
+        orders=_orders_from_ledger(ledger, parent_states),
+        positions_history=positions_history,
+        ending_cash=float(initial_state.cash),
+        ending_positions={code: dict(pos) for code, pos in initial_state.positions.items()},
+        state=initial_state,
+    )
+
+
 def _first_execution_code(
     request: NativeExecutionRequest,
     initial_state: NativeExecutionState | None,
@@ -580,6 +628,24 @@ def _resolve_execution_rules(
         mode=request.rule_mode,
     )
     return _rules_from_market_rules(provenance, config), provenance
+
+
+def _validate_short_gate(
+    *,
+    code: str,
+    target_weight: float,
+    target_size: int,
+    rules: MarketRules,
+) -> None:
+    if target_weight >= 0 and target_size >= 0:
+        return
+    if rules.short_allowed:
+        raise ValueError(
+            f"short execution unsupported for {code}: native engine is long-only"
+        )
+    raise ValueError(
+        f"short execution disallowed by PIT rule for {code}: target would be negative"
+    )
 
 
 def _rules_from_market_rules(
