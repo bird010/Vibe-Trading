@@ -9,12 +9,15 @@ failure.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
+from backtest.fund_rotation import pipeline as pipeline_module
 from backtest.fund_rotation.evaluation import EvaluationContext
 from backtest.fund_rotation.metrics import compute_performance_metrics
 from backtest.fund_rotation.pipeline import run_signal_pipeline
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.runner import (
     CancellationToken,
     ExecutionConfig,
@@ -40,11 +43,46 @@ from tests.fund_rotation.test_phase0_golden import (
     build_config,
     build_golden_data,
 )
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 def _run_legacy():
     fund_daily, fund_adj, dim_fund = build_golden_data()
-    return run_signal_pipeline(build_config(), fund_daily, fund_adj, dim_fund)
+    with patch.object(
+        pipeline_module,
+        "FundRotationBacktestRunner",
+        _rule_aware_runner_class,
+    ):
+        return run_signal_pipeline(build_config(), fund_daily, fund_adj, dim_fund)
+
+
+class _RuleAwareRunner(FundRotationBacktestRunner):
+    def run(self, *args, snapshot, **kwargs):
+        if int(getattr(snapshot, "dim_version", 0)) < 1:
+            snapshot = PinnedFundDataSnapshot(
+                fund_version=snapshot.fund_version,
+                fund_adj_version=snapshot.fund_adj_version,
+                dim_version=1,
+                universe_codes=tuple(snapshot.universe_codes),
+                trading_dates=tuple(snapshot.trading_dates),
+                fingerprint=snapshot.fingerprint,
+            )
+        return super().run(*args, snapshot=snapshot, **kwargs)
+
+
+def _rule_aware_runner_class(fund_daily, fund_adj, dim_fund, *args, **kwargs):
+    codes = tuple(sorted(fund_daily["ts_code"].astype(str).unique()))
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(codes)
+    return _RuleAwareRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        *args,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+        **kwargs,
+    )
 
 
 def _run_new():
@@ -59,7 +97,7 @@ def _run_new():
     snapshot = PinnedFundDataSnapshot(
         fund_version=0,
         fund_adj_version=0,
-        dim_version=0,
+        dim_version=1,
         universe_codes=universe,
         trading_dates=trading_dates,
         fingerprint="parity-test",
@@ -80,10 +118,14 @@ def _run_new():
         base_slippage_bps=legacy_cfg.base_slippage_bps,
         max_slippage_bps=legacy_cfg.max_slippage_bps,
     )
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(universe)
     runner = FundRotationBacktestRunner(
         fund_daily,
         fund_adj,
         dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
         run_id="parity",
     )
     return runner.run(

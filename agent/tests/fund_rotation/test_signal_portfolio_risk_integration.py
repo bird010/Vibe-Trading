@@ -6,6 +6,7 @@ import pytest
 
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.evaluation import EvaluationContext
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.runner import (
     CancellationToken,
     ExecutionConfig,
@@ -22,6 +23,7 @@ from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
     CorrelationAllMembersStrategy,
 )
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 def _synthetic_data(
@@ -99,13 +101,23 @@ def test_correlation_all_members_strategy_routes_decisions_through_unified_stage
             end_date="20230701",
         )
     )
-    result = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund).run(
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(
+        dim_fund["ts_code"].astype(str)
+    )
+    result = FundRotationBacktestRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+    ).run(
         strategy=CorrelationAllMembersStrategy(),
         config=config,
         snapshot=PinnedFundDataSnapshot(
             fund_version=0,
             fund_adj_version=0,
-            dim_version=0,
+            dim_version=1,
             universe_codes=tuple(sorted(dim_fund["ts_code"].astype(str))),
             trading_dates=all_trade_dates,
             fingerprint="signal-portfolio-risk-integration",

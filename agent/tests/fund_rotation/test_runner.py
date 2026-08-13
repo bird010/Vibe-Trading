@@ -22,6 +22,7 @@ from backtest.fund_rotation.contracts import (
     TargetWeightDecision,
 )
 from backtest.fund_rotation.evaluation import EvaluationContext
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.runner import (
     CancellationToken,
     ExecutionConfig,
@@ -30,6 +31,7 @@ from backtest.fund_rotation.runner import (
     SubRunStatus,
 )
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 # ── synthetic market ──
@@ -165,8 +167,12 @@ class FakeStrategy:
 def _run(session, *, requirements=None, token=None, runner_run_id=None,
          simulation_start_date=None, run_id=None, dim_fund=None):
     fund_daily, fund_adj, default_dim_fund = _market_frames()
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(("A", "B"))
     runner = FundRotationBacktestRunner(
         fund_daily, fund_adj, dim_fund if dim_fund is not None else default_dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
         run_id=runner_run_id,
     )
     strategy = FakeStrategy(session, requirements)
@@ -243,7 +249,15 @@ def test_hold_days_retry_residual_under_original_parent_order():
     # replace, cancel or recompute orders — the residual keeps its parent id.
     fund_daily, fund_adj, dim_fund = _market_frames()
     fund_daily = fund_daily.assign(amount=100.0)  # ADV = 100 * 1000 = 100k
-    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(("A", "B"))
+    runner = FundRotationBacktestRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+    )
     session = FakeSession({
         "20240112": _decision("20240112", DecisionKind.SET_TARGETS,
                               {"A": 1.0}, cash=0.0),
@@ -268,7 +282,7 @@ def test_hold_days_retry_residual_under_original_parent_order():
     # Partial fills spread across several execution days...
     assert len({e["trade_date"] for e in buys}) >= 2
     # ...but every retry belongs to the single original parent order (§7.2).
-    assert len({e["signal_event_id"] for e in buys}) == 1
+    assert len({e["order_id"] for e in buys}) == 1
     assert list(result.weekly_targets) == ["20240112"]  # HOLDs added no target
 
 

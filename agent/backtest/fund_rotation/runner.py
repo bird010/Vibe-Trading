@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -39,9 +40,22 @@ from backtest.fund_rotation.execution import (
     run_execution_loop,
 )
 from backtest.fund_rotation.execution_ledger_v2 import (
+    compute_execution_diagnostics_v2,
     compute_pipeline_execution_diagnostics_v2,
 )
+from backtest.fund_rotation.market_rules import (
+    FundInstrumentVersion,
+    MarketRuleResolver,
+    PITInvalidMarketRule,
+    UnknownExecutionRule,
+)
 from backtest.fund_rotation.metrics import compute_performance_metrics
+from backtest.fund_rotation.native_execution import (
+    FundRotationExecutionEngine,
+    NativeExecutionRequest,
+    NativeExecutionResult,
+)
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.returns import compute_adjusted_close
 
 if TYPE_CHECKING:
@@ -122,12 +136,22 @@ class FundRotationBacktestRunner:
         fund_adj: pd.DataFrame,
         dim_fund: pd.DataFrame,
         *,
+        execution_engine: FundRotationExecutionEngine | None = None,
+        market_rule_resolver: MarketRuleResolver | None = None,
+        market_rule_instruments: Mapping[str, FundInstrumentVersion] | None = None,
+        market_rule_mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
         pit_universe_resolver: object | None = None,
         run_id: str | None = None,
     ) -> None:
         self._fund_daily = fund_daily
         self._fund_adj = fund_adj
         self._dim_fund = dim_fund
+        self._execution_engine = execution_engine or FundRotationExecutionEngine()
+        self._market_rule_resolver = market_rule_resolver
+        self._market_rule_instruments = (
+            dict(market_rule_instruments) if market_rule_instruments is not None else None
+        )
+        self._market_rule_mode = market_rule_mode
         self._pit_universe_resolver = pit_universe_resolver
         self._run_id = run_id or uuid.uuid4().hex[:12]
 
@@ -387,7 +411,7 @@ class FundRotationBacktestRunner:
                 },
             )
 
-        legacy_execution = FundRotationConfig(
+        native_execution_config = FundRotationConfig(
             initial_capital=execution.initial_capital,
             commission_rate=execution.commission_rate,
             commission_min=execution.commission_min,
@@ -401,18 +425,47 @@ class FundRotationBacktestRunner:
             start_date=evaluation_dates[0],
             end_date=evaluation_dates[-1],
         )
-        pipeline_result = PipelineResult(weekly_targets=targets_map)
-        execution_context = build_execution_context(
-            self._fund_daily,
-            self._fund_adj,
-            legacy_execution,
-        )
-        run_execution_loop(
-            pipeline_result,
-            legacy_execution,
-            execution_context,
-            evaluation_dates=evaluation_dates,
-            should_cancel=lambda: cancellation.is_cancelled,
+        rules_error = self._validate_native_rule_inputs()
+        if rules_error is not None:
+            return fail(*rules_error)
+
+        try:
+            native_request = NativeExecutionRequest(
+                targets={
+                    signal_date: dict(weights)
+                    for signal_date, weights in targets_map.items()
+                },
+                evaluation_dates=tuple(evaluation_dates),
+                fund_daily=self._fund_daily,
+                fund_adj=self._fund_adj,
+                execution=native_execution_config,
+                initial_capital=execution.initial_capital,
+                knowledge_cutoff=_native_knowledge_cutoff(targets_map, evaluation_dates),
+                snapshot_version=_native_snapshot_version(snapshot),
+                run_id=run_id or self._run_id,
+                rule_resolver=self._market_rule_resolver,
+                instrument_versions=dict(self._market_rule_instruments or {}),
+                rule_mode=self._market_rule_mode,
+                decision_ids={
+                    str(decision.signal_date): str(decision.decision_id)
+                    for decision in decisions
+                    if decision.action is DecisionKind.SET_TARGETS
+                },
+            )
+            native_result = self._execution_engine.execute(
+                native_request,
+                should_cancel=lambda: cancellation.is_cancelled,
+            )
+        except (UnknownExecutionRule, PITInvalidMarketRule, ValueError, TypeError) as exc:
+            return fail("EXECUTION_RULES_UNAVAILABLE", str(exc))
+
+        execution_diagnostics = _formal_execution_diagnostics(
+            native_result,
+            execution,
+            universe_diagnostics_by_date,
+            snapshot=snapshot,
+            run_id=run_id or self._run_id,
+            rule_mode=self._market_rule_mode,
         )
         if cancellation.is_cancelled:
             return FundRotationRunResult(
@@ -423,34 +476,26 @@ class FundRotationBacktestRunner:
                     date: dict(weights)
                     for date, weights in targets_map.items()
                 },
-                executed_equity=pipeline_result.executed_equity,
-                trade_events=pipeline_result.trade_events,
-                orders=pipeline_result.orders,
-                positions_history=pipeline_result.positions_history,
-                execution_diagnostics=_formal_execution_diagnostics(
-                    pipeline_result,
-                    execution,
-                    universe_diagnostics_by_date,
-                ),
+                executed_equity=native_result.executed_equity,
+                trade_events=native_result.trade_events,
+                orders=native_result.orders,
+                positions_history=native_result.positions_history,
+                execution_diagnostics=execution_diagnostics,
             )
 
         actual_dates = pd.Index(
-            [str(value) for value in pipeline_result.executed_equity.index]
+            [str(value) for value in native_result.executed_equity.index]
         )
         expected_dates = pd.Index(evaluation_dates)
         if not actual_dates.equals(expected_dates):
             return fail(
                 "EVALUATION_CALENDAR_MISMATCH",
                 "executed equity index must exactly equal the evaluation calendar",
-                executed_equity=pipeline_result.executed_equity,
-                trade_events=pipeline_result.trade_events,
-                orders=pipeline_result.orders,
-                positions_history=pipeline_result.positions_history,
-                execution_diagnostics=_formal_execution_diagnostics(
-                    pipeline_result,
-                    execution,
-                    universe_diagnostics_by_date,
-                ),
+                executed_equity=native_result.executed_equity,
+                trade_events=native_result.trade_events,
+                orders=native_result.orders,
+                positions_history=native_result.positions_history,
+                execution_diagnostics=execution_diagnostics,
             )
 
         benchmark_equity = self._public_benchmarks(
@@ -467,20 +512,15 @@ class FundRotationBacktestRunner:
             if not series.empty and not series.isna().all()
         }
         strategy_metrics = compute_performance_metrics(
-            pipeline_result.executed_equity,
+            native_result.executed_equity,
             periods_per_year=244,
             initial_nav=evaluation.initial_nav,
         )
         strategy_metrics.update(
             _relative_metrics(
-                pipeline_result.executed_equity,
+                native_result.executed_equity,
                 benchmark_equity.get("equal_weight_etf"),
             )
-        )
-        execution_diagnostics = _formal_execution_diagnostics(
-            pipeline_result,
-            execution,
-            universe_diagnostics_by_date,
         )
 
         overall_quality = _combine_run_quality_status(
@@ -493,10 +533,10 @@ class FundRotationBacktestRunner:
             return fail(
                 "FINALIZE_FAILED",
                 str(exc),
-                executed_equity=pipeline_result.executed_equity,
-                trade_events=pipeline_result.trade_events,
-                orders=pipeline_result.orders,
-                positions_history=pipeline_result.positions_history,
+                executed_equity=native_result.executed_equity,
+                trade_events=native_result.trade_events,
+                orders=native_result.orders,
+                positions_history=native_result.positions_history,
                 strategy_metrics=strategy_metrics,
                 benchmark_equity=benchmark_equity,
                 benchmark_metrics=benchmark_metrics,
@@ -511,10 +551,10 @@ class FundRotationBacktestRunner:
                 date: dict(weights)
                 for date, weights in targets_map.items()
             },
-            executed_equity=pipeline_result.executed_equity,
-            trade_events=pipeline_result.trade_events,
-            orders=pipeline_result.orders,
-            positions_history=pipeline_result.positions_history,
+            executed_equity=native_result.executed_equity,
+            trade_events=native_result.trade_events,
+            orders=native_result.orders,
+            positions_history=native_result.positions_history,
             strategy_metrics=strategy_metrics,
             benchmark_equity=benchmark_equity,
             benchmark_metrics=benchmark_metrics,
@@ -522,6 +562,19 @@ class FundRotationBacktestRunner:
             diagnostics=diagnostics,
             quality_status=overall_quality,
         )
+
+    def _validate_native_rule_inputs(self) -> tuple[str, str] | None:
+        if self._market_rule_resolver is None:
+            return (
+                "EXECUTION_RULES_UNAVAILABLE",
+                "explicit PIT market rule resolver is required for native execution",
+            )
+        if not self._market_rule_instruments:
+            return (
+                "EXECUTION_RULES_UNAVAILABLE",
+                "explicit PIT market rule instrument mapping is required for native execution",
+            )
+        return None
 
     def _public_benchmarks(
         self,
@@ -782,25 +835,86 @@ def _combine_run_quality_status(strategy_quality: str, pit_quality: str) -> str:
     return pit_quality
 
 
+def _native_knowledge_cutoff(
+    targets_map: dict[str, dict[str, float]],
+    evaluation_dates: list[str],
+) -> str:
+    if targets_map:
+        return max(str(signal_date) for signal_date in targets_map)
+    return evaluation_dates[0]
+
+
+def _native_snapshot_version(snapshot: object) -> int:
+    version = getattr(snapshot, "snapshot_version", None)
+    if version is None:
+        version = getattr(snapshot, "dim_version", None)
+    if version is None:
+        raise ValueError("snapshot identity must expose snapshot_version or dim_version")
+    return int(version)
+
+
 def _formal_execution_diagnostics(
-    result: PipelineResult,
+    result: NativeExecutionResult,
     execution: ExecutionConfig,
     universe_diagnostics_by_date: dict[str, dict[str, Any]],
+    *,
+    snapshot: object,
+    run_id: str,
+    rule_mode: PITQueryMode,
 ) -> dict[str, Any]:
-    diagnostics = compute_pipeline_execution_diagnostics_v2(
-        result,
-        initial_capital=execution.initial_capital,
+    equity = result.executed_equity
+    if equity.empty:
+        average_portfolio_nav = float(execution.initial_capital)
+        evaluation_days = None
+    else:
+        average_portfolio_nav = float(equity.mean()) * float(execution.initial_capital)
+        evaluation_days = int(len(equity))
+    diagnostics = compute_execution_diagnostics_v2(
+        result.ledger,
+        average_portfolio_nav=average_portfolio_nav,
+        evaluation_days=evaluation_days,
     )
-    legacy_result = _execution_diagnostics(result, execution)
-    diagnostics["legacy_result"] = legacy_result
-    diagnostics["diagnostics_difference"] = {
-        "legacy_result_location": "legacy_result",
-        "formal_contract": diagnostics.get("metric_contract_version", ""),
-    }
     diagnostics["universe"] = _summarize_universe_diagnostics(
         universe_diagnostics_by_date,
     )
+    diagnostics["execution_identity"] = _native_execution_identity(
+        result,
+        snapshot=snapshot,
+        run_id=run_id,
+        rule_mode=rule_mode,
+    )
     return diagnostics
+
+
+def _native_execution_identity(
+    result: NativeExecutionResult,
+    *,
+    snapshot: object,
+    run_id: str,
+    rule_mode: PITQueryMode,
+) -> dict[str, Any]:
+    rule_versions = sorted(
+        {
+            str(row.get("rule_version", ""))
+            for row in result.orders
+            if str(row.get("rule_version", ""))
+        }
+    )
+    source_record_ids = sorted(
+        {
+            str(row.get("source_record_id", ""))
+            for row in result.orders
+            if str(row.get("source_record_id", ""))
+        }
+    )
+    return {
+        "run_id": run_id,
+        "snapshot_version": _native_snapshot_version(snapshot),
+        "snapshot_fingerprint": str(getattr(snapshot, "fingerprint", "")),
+        "rule_mode": str(rule_mode.value if hasattr(rule_mode, "value") else rule_mode),
+        "rule_versions": rule_versions,
+        "source_record_ids": source_record_ids,
+    }
 
 
 def _summarize_universe_diagnostics(

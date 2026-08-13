@@ -27,6 +27,7 @@ from backtest.fund_rotation.strategies.registry import (
     default_fund_rotation_strategies,
 )
 from backtest.fund_rotation.evaluation import EvaluationContext
+from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.runner import (
     CancellationToken,
     ExecutionConfig,
@@ -35,6 +36,7 @@ from backtest.fund_rotation.runner import (
 )
 from backtest.fund_rotation.universe import filter_etf_universe
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 # ── synthetic end-to-end ──
@@ -108,13 +110,21 @@ def synthetic_run():
 
     all_dates = tuple(sorted(fund_daily["trade_date"].astype(str).unique()))
     snapshot = PinnedFundDataSnapshot(
-        fund_version=0, fund_adj_version=0, dim_version=0,
+        fund_version=0, fund_adj_version=0, dim_version=1,
         universe_codes=tuple(sorted(codes)), trading_dates=all_dates,
         fingerprint="integration-synthetic",
     )
     evaluation = EvaluationContext.from_range(all_dates, "20220701", "20230601")
     execution = ExecutionConfig(initial_capital=1_000_000)
-    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(codes)
+    runner = FundRotationBacktestRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+    )
     result = runner.run(
         strategy=strategy, config=config, snapshot=snapshot,
         evaluation=evaluation, execution=execution,
@@ -267,13 +277,21 @@ def smoke_runs():
 
     all_dates = tuple(sorted(fund_daily["trade_date"].astype(str).unique()))
     snapshot = PinnedFundDataSnapshot(
-        fund_version=0, fund_adj_version=0, dim_version=0,
+        fund_version=0, fund_adj_version=0, dim_version=1,
         universe_codes=tuple(sorted(pool_codes)), trading_dates=all_dates,
         fingerprint="research-smoke",
     )
     evaluation = EvaluationContext.from_range(all_dates, "20240101", "20240331")
     execution = ExecutionConfig(initial_capital=1_000_000)
-    runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(pool_codes)
+    runner = FundRotationBacktestRunner(
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+    )
 
     catalog = FundRotationStrategyCatalog(list(default_fund_rotation_strategies()))
 

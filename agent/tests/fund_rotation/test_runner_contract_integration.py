@@ -25,6 +25,7 @@ from backtest.fund_rotation.pit_universe import (
     UniversePolicy,
 )
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 
 MARKET_DATES = pd.bdate_range("2024-01-02", "2024-01-31").strftime("%Y%m%d").tolist()
@@ -188,10 +189,14 @@ def _snapshot():
 
 def _run(first_weights, *, pit_universe_resolver=None):
     fund_daily, fund_adj, dim_fund = _market_frames()
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(("A", "B"))
     return FundRotationBacktestRunner(
         fund_daily,
         fund_adj,
         dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
         pit_universe_resolver=pit_universe_resolver,
     ).run(
         strategy=FakeStrategy(first_weights),
@@ -203,7 +208,7 @@ def _run(first_weights, *, pit_universe_resolver=None):
     )
 
 
-def test_runner_adapts_pipeline_result_to_execution_diagnostics_v2_contract():
+def test_runner_reports_native_ledger_execution_diagnostics_v2_contract():
     result = _run({"A": 1.0})
 
     assert result.status is SubRunStatus.SUCCEEDED
@@ -213,8 +218,11 @@ def test_runner_adapts_pipeline_result_to_execution_diagnostics_v2_contract():
     assert result.execution_diagnostics["trades"]["executed_trade_count"] >= 1
     assert "turnover" not in result.execution_diagnostics
     assert "fill_rate" not in result.execution_diagnostics
-    assert result.execution_diagnostics["legacy_result"]["turnover"] > 0
-    assert "diagnostics_difference" in result.execution_diagnostics
+    assert "legacy_result" not in result.execution_diagnostics
+    assert "diagnostics_difference" not in result.execution_diagnostics
+    assert result.execution_diagnostics["execution_identity"]["rule_versions"] == [
+        "A-rules-v1"
+    ]
     assert result.execution_diagnostics["universe"] == {
         "quality_status": "RESEARCH_ONLY_UNVERIFIED_UNIVERSE",
         "reason_code": "PIT_MASTER_MISSING",

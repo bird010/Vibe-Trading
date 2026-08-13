@@ -239,7 +239,9 @@ class TestRejectionDecisionSemantics:
             _market_frames,
             _snapshot,
         )
+        from tests.fund_rotation.conftest import make_test_market_rule_inputs
         from backtest.fund_rotation.contracts import TargetWeightDecision
+        from backtest.fund_rotation.pit_universe import PITQueryMode
         from backtest.fund_rotation.runner import (
             FundRotationBacktestRunner,
             SubRunStatus,
@@ -262,7 +264,15 @@ class TestRejectionDecisionSemantics:
 
         def _run_with(scripts):
             fund_daily, fund_adj, dim_fund = _market_frames()
-            runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+            rule_resolver, rule_instruments = make_test_market_rule_inputs(("A", "B"))
+            runner = FundRotationBacktestRunner(
+                fund_daily,
+                fund_adj,
+                dim_fund,
+                market_rule_resolver=rule_resolver,
+                market_rule_instruments=rule_instruments,
+                market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+            )
             return runner.run(
                 strategy=FakeStrategy(ScriptedSession(scripts)),
                 config=FakeConfig(),
