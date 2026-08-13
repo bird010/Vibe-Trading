@@ -41,6 +41,8 @@ import pytest
 
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.pipeline import run_signal_pipeline
+from backtest.fund_rotation.pit_universe import PITQueryMode
+from tests.fund_rotation.conftest import make_test_market_rule_inputs
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "phase0"
 GOLDEN_PATH = FIXTURE_DIR / "pre_fix_golden.json"
@@ -216,7 +218,19 @@ def normalize(result) -> dict:
 
 def _run_and_normalize():
     fund_daily, fund_adj, dim_fund = build_golden_data()
-    result = run_signal_pipeline(build_config(), fund_daily, fund_adj, dim_fund)
+    rule_resolver, rule_instruments = make_test_market_rule_inputs(
+        dim_fund["ts_code"].astype(str)
+    )
+    result = run_signal_pipeline(
+        build_config(),
+        fund_daily,
+        fund_adj,
+        dim_fund,
+        market_rule_resolver=rule_resolver,
+        market_rule_instruments=rule_instruments,
+        market_rule_mode=PITQueryMode.AS_WAS_KNOWN,
+        market_rule_snapshot_version=1,
+    )
     return normalize(result)
 
 
