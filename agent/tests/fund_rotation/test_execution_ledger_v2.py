@@ -14,11 +14,13 @@ from backtest.fund_rotation.execution_ledger_v2 import (
     ExecutionAttemptRecord,
     ExecutionLedger,
     FundInstrumentVersion,
+    InMemoryPITMarketRuleSource,
     MarketObservation,
     MarketRuleResolver,
     OrderDirection,
     ParentOrderRecord,
     ParentOrderStatus,
+    PITQueryMode,
     UnknownExecutionRule,
     build_execution_ledger_from_pipeline_result,
     compute_attempt_diagnostics,
@@ -938,7 +940,46 @@ def test_ledger_rejects_quantity_breaks_or_untraceable_trade_facts():
 
 
 def test_market_rule_resolver_rejects_unknown_instrument_type_without_defaulting():
-    resolver = MarketRuleResolver()
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "instrument_type": "domestic_equity_etf",
+                    "valid_from": "2024-01-01",
+                    "valid_to": None,
+                    "known_from": "2024-01-01T00:00:00",
+                    "snapshot_version": 7,
+                    "revision_id": "r1",
+                    "source_record_id": "src-510300-r1",
+                    "settlement": "T+1",
+                    "lot_size": 100,
+                    "tick_size": 0.001,
+                    "price_limit_pct": 0.10,
+                    "short_allowed": False,
+                    "currency": "CNY",
+                    "rule_version": "rules-v1",
+                },
+                {
+                    "ts_code": "511990.SH",
+                    "instrument_type": "money_market_etf",
+                    "valid_from": "2024-01-01",
+                    "valid_to": None,
+                    "known_from": "2024-01-01T00:00:00",
+                    "snapshot_version": 7,
+                    "revision_id": "r1",
+                    "source_record_id": "src-511990-r1",
+                    "settlement": "T+0",
+                    "lot_size": 100,
+                    "tick_size": 0.001,
+                    "price_limit_pct": None,
+                    "short_allowed": False,
+                    "currency": "CNY",
+                    "rule_version": "rules-v1",
+                },
+            ]
+        )
+    )
 
     domestic_rules = resolver.resolve(
         FundInstrumentVersion(
@@ -948,6 +989,8 @@ def test_market_rule_resolver_rejects_unknown_instrument_type_without_defaulting
         ),
         trade_date="20240102",
         knowledge_cutoff="20240101T000000",
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
     )
     money_market_rules = resolver.resolve(
         FundInstrumentVersion(
@@ -957,12 +1000,16 @@ def test_market_rule_resolver_rejects_unknown_instrument_type_without_defaulting
         ),
         trade_date="20240102",
         knowledge_cutoff="20240101T000000",
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
     assert domestic_rules.lot_size == 100
     assert domestic_rules.instrument_type == "domestic_equity_etf"
-    assert domestic_rules.trade_date == "20240102"
-    assert domestic_rules.knowledge_cutoff == "20240101T000000"
+    assert domestic_rules.trade_date == "2024-01-02"
+    assert domestic_rules.knowledge_cutoff == "2024-01-01T00:00:00"
+    assert domestic_rules.snapshot_version == 7
+    assert domestic_rules.source_record_id == "src-510300-r1"
     assert domestic_rules.rule_version == "rules-v1"
     assert money_market_rules.instrument_type == "money_market_etf"
     assert money_market_rules.settlement != domestic_rules.settlement
@@ -976,6 +1023,8 @@ def test_market_rule_resolver_rejects_unknown_instrument_type_without_defaulting
             ),
             trade_date="",
             knowledge_cutoff="20240101T000000",
+            snapshot_version=7,
+            mode=PITQueryMode.AS_WAS_KNOWN,
         )
 
     with pytest.raises(UnknownExecutionRule, match="UNKNOWN_EXECUTION_RULE"):
@@ -987,6 +1036,8 @@ def test_market_rule_resolver_rejects_unknown_instrument_type_without_defaulting
             ),
             trade_date="20240102",
             knowledge_cutoff="20240101T000000",
+            snapshot_version=7,
+            mode=PITQueryMode.AS_WAS_KNOWN,
         )
 
 

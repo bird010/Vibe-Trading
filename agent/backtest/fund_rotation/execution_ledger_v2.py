@@ -10,11 +10,21 @@ from __future__ import annotations
 
 import math
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from statistics import median
 from typing import Any
 
+from .market_rules import (
+    FundInstrumentVersion,
+    InMemoryPITMarketRuleSource,
+    MarketRuleResolver,
+    MarketRules,
+    PITInvalidMarketRule,
+    PITMarketRuleSource,
+    PITQueryMode,
+    UnknownExecutionRule,
+)
 
 METRIC_CONTRACT_VERSION = "execution_diagnostics_v2"
 TRADING_DAYS_PER_YEAR = 252
@@ -1068,115 +1078,6 @@ def _corporate_action_from_event(
         new_cost_basis=max(float(event.get("last_close_after", 0.0) or 0.0), 0.0),
         adjustment_factor=adjustment_factor,
     )
-
-
-class UnknownExecutionRule(ValueError):
-    """Raised when an instrument type has no PIT market-rule contract."""
-
-
-@dataclass(frozen=True)
-class FundInstrumentVersion:
-    ts_code: str
-    instrument_type: str
-    version: str
-
-
-@dataclass(frozen=True)
-class MarketRules:
-    instrument_type: str
-    settlement: str
-    lot_size: int
-    tick_size: float
-    price_limit_pct: float | None
-    short_allowed: bool
-    rule_version: str
-    trade_date: str = ""
-    knowledge_cutoff: str = ""
-
-
-class MarketRuleResolver:
-    """Minimal PIT market-rule resolver for the v2 contract.
-
-    This resolver intentionally uses a fixed in-process table. It establishes
-    the contract boundary and rejects unknown instrument types without
-    defaulting to domestic equity ETF rules.
-    """
-
-    _RULES = {
-        "domestic_equity_etf": MarketRules(
-            instrument_type="domestic_equity_etf",
-            settlement="T+1",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=0.10,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-        "bond_etf": MarketRules(
-            instrument_type="bond_etf",
-            settlement="T+0",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=0.10,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-        "commodity_etf": MarketRules(
-            instrument_type="commodity_etf",
-            settlement="T+0",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=0.10,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-        "cross_border_etf": MarketRules(
-            instrument_type="cross_border_etf",
-            settlement="T+0",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=0.10,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-        "money_market_etf": MarketRules(
-            instrument_type="money_market_etf",
-            settlement="T+0",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=None,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-        "other": MarketRules(
-            instrument_type="other",
-            settlement="T+1",
-            lot_size=100,
-            tick_size=0.001,
-            price_limit_pct=0.10,
-            short_allowed=False,
-            rule_version="rules-v1",
-        ),
-    }
-
-    def resolve(
-        self,
-        instrument: FundInstrumentVersion,
-        trade_date: str,
-        knowledge_cutoff: str,
-    ) -> MarketRules:
-        if not trade_date or not knowledge_cutoff:
-            raise ValueError("trade_date and knowledge_cutoff are required for PIT rules")
-        rules = self._RULES.get(instrument.instrument_type)
-        if rules is None:
-            raise UnknownExecutionRule(
-                f"UNKNOWN_EXECUTION_RULE: {instrument.instrument_type}"
-            )
-        return replace(
-            rules,
-            trade_date=trade_date,
-            knowledge_cutoff=knowledge_cutoff,
-        )
 
 
 @dataclass(frozen=True)
