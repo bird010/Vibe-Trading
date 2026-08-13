@@ -152,6 +152,8 @@ class MarketRuleResolver:
     """Thin resolver facade that exposes versioned market-rule context."""
 
     def __init__(self, source: PITMarketRuleSource):
+        if source is None or not callable(getattr(source, "resolve", None)):
+            raise TypeError("an explicit PIT market-rule source is required")
         self._source = source
 
     def resolve(
