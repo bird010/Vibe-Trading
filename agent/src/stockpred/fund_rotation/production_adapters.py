@@ -284,18 +284,29 @@ class ProductionShadowAccountingAdapter:
         execution_as_of_time: datetime,
     ) -> ShadowAccountState:
         prices = dict(market_data.prices)
+        accounting_symbols = {
+            symbol for symbol, _quantity in previous_state.positions
+        }
+        accounting_symbols.update(fill.symbol for fill in fills)
+        missing_symbols = sorted(
+            symbol for symbol in accounting_symbols if symbol not in prices
+        )
+        if missing_symbols:
+            raise ProductionAdapterError(
+                "market data price is required for accounting symbols: "
+                + ", ".join(missing_symbols)
+            )
         quantities = {symbol: float(quantity) for symbol, quantity in previous_state.positions}
         for fill in fills:
             quantities[fill.symbol] = quantities.get(fill.symbol, 0.0) + fill.quantity
         end_positions = tuple(
             Position(symbol, quantity, prices[symbol])
             for symbol, quantity in sorted(quantities.items())
-            if abs(quantity) > 1e-12 and symbol in prices
+            if abs(quantity) > 1e-12
         )
         begin_positions = tuple(
             Position(symbol, quantity, prices[symbol])
             for symbol, quantity in sorted(previous_state.positions)
-            if symbol in prices
         )
         accounting = compute_accounting_day(
             AccountDayInput(

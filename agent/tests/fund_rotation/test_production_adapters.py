@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pandas as pd
@@ -32,6 +33,7 @@ from src.stockpred.fund_rotation.forward_validation import (
     ShadowFill,
 )
 from src.stockpred.fund_rotation.production_adapters import (
+    ProductionAdapterError,
     ProductionFrozenStrategyDecisionProvider,
     ProductionShadowAccountingAdapter,
     ProductionShadowExecutionAdapter,
@@ -256,6 +258,35 @@ def test_production_accounting_adapter_delegates_to_shared_accounting_day(monkey
     assert state.positions == (("ETF_A", 10.0),)
     assert state.completed_rebalance_cycles == 1
     assert state.cash_weight == 0.9
+
+
+@pytest.mark.parametrize(
+    ("previous_state", "fills", "missing_symbol"),
+    [
+        (replace(_state(), positions=(("ETF_MISSING", 10.0),)), (), "ETF_MISSING"),
+        (_state(), (ShadowFill("trade-1", "attempt-1", "ETF_MISSING", 10.0, 10.0, 0.0),), "ETF_MISSING"),
+    ],
+)
+def test_production_accounting_adapter_fails_closed_on_missing_accounting_price(
+    previous_state, fills, missing_symbol
+) -> None:
+    with pytest.raises(
+        ProductionAdapterError,
+        match=f"market data price is required for accounting symbols: {missing_symbol}",
+    ):
+        ProductionShadowAccountingAdapter().apply(
+            decision=_decision(),
+            previous_state=previous_state,
+            fills=fills,
+            market_data=MarketDataForExecution(
+                execution_date="20260106",
+                available_at=datetime(2026, 1, 6, 9, 31),
+                prices=(("ETF_A", 10.0),),
+                ideal_nav=1000.0,
+                executable_nav=1000.0,
+            ),
+            execution_as_of_time=datetime(2026, 1, 6, 9, 31),
+        )
 
 
 def test_production_wiring_missing_formal_components_is_not_configured() -> None:
