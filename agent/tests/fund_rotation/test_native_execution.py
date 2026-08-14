@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -14,10 +15,16 @@ from backtest.fund_rotation.market_rules import (
     MarketRuleResolver,
     UnknownExecutionRule,
 )
+from backtest.fund_rotation.etf_rules import ChinaETFExecutionRules
+from backtest.fund_rotation.executor import PortfolioExecutor
+from backtest.fund_rotation.orders import OrderManager
 from backtest.fund_rotation.native_execution import (
     FundRotationExecutionEngine,
     NativeExecutionRequest,
     NativeExecutionState,
+    _ParentState,
+    _apply_corporate_actions,
+    _rules_from_market_rules,
 )
 from backtest.fund_rotation.pit_universe import PITQueryMode
 
@@ -59,6 +66,20 @@ def _market(
                 {"ts_code": code, "trade_date": trade_date, "adj_factor": factor}
             )
     return pd.DataFrame(rows), pd.DataFrame(adj_rows)
+
+
+def test_native_execution_state_snapshot_round_trips_for_shadow_recovery() -> None:
+    state = NativeExecutionState(
+        cash=123.45,
+        positions={"A": {"size": 100, "entry_date": "20240102"}},
+        active_orders=({"ts_code": "A", "remaining": 10},),
+        corporate_actions=({"corporate_action_id": "CA-1", "ts_code": "A"},),
+        event_counter=7,
+    )
+
+    restored = NativeExecutionState.from_snapshot(state.to_snapshot())
+
+    assert restored == state
 
 
 def _rule_record(
@@ -530,6 +551,52 @@ def test_native_engine_consumes_pit_rules_for_lot_tick_and_provenance():
     assert result.orders[0]["source_record_id"] == "A-src"
 
 
+def test_native_engine_uses_trade_date_specific_rule_knowledge_cutoffs():
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates, amount=2.0)
+    resolver, instruments = _resolver_and_instruments(("A",))
+    calls: list[dict] = []
+
+    class SpyResolver:
+        def resolve(self, **kwargs):
+            calls.append(dict(kwargs))
+            return resolver.resolve(**kwargs)
+
+    request = replace(
+        _request(
+            {"20240101": {"A": 0.03}},
+            evaluation_dates=dates,
+            market=market,
+            adj=adj,
+            config=FundRotationConfig(
+                k=1,
+                top_n=1,
+                initial_capital=100_000.0,
+                commission_rate=0.0,
+                commission_min=0.0,
+                other_fee_rate=0.0,
+                adv_min_observations=1,
+                max_participation_rate=0.5,
+                base_slippage_bps=0.0,
+                max_slippage_bps=0.0,
+            ),
+            rule_resolver=SpyResolver(),
+            instrument_versions=instruments,
+        ),
+        knowledge_cutoffs={
+            date: f"{date}T15:00:00"
+            for date in dates
+        },
+    )
+
+    FundRotationExecutionEngine().execute(request)
+
+    assert calls
+    assert len({call["knowledge_cutoff"] for call in calls}) >= 2
+    assert calls[0]["knowledge_cutoff"] == f"{dates[0]}T15:00:00"
+    assert request.knowledge_cutoffs[dates[0]] == f"{dates[0]}T15:00:00"
+
+
 def test_native_engine_fails_closed_when_pit_rule_is_missing():
     dates = _dates()
     market, adj = _market(codes=("A",), dates=dates)
@@ -547,6 +614,77 @@ def test_native_engine_fails_closed_when_pit_rule_is_missing():
                 instrument_versions=instruments,
             )
         )
+
+
+def test_native_rules_honor_explicit_no_price_limit_and_settlement():
+    from backtest.fund_rotation.market_rules import MarketRules
+
+    rules = _rules_from_market_rules(
+        MarketRules(
+            instrument_type="bond_etf",
+            settlement="T+0",
+            lot_size=100,
+            tick_size=0.001,
+            price_limit_pct=None,
+            price_limit_rule="NONE",
+            short_allowed=False,
+            currency="CNY",
+            rule_version="bond-rules-v1",
+        ),
+        FundRotationConfig(k=1, top_n=1),
+    )
+
+    limit_bar = {
+        "open": 10.0,
+        "close": 11.0,
+        "high": 11.0,
+        "low": 11.0,
+        "pre_close": 10.0,
+        "vol": 1_000_000,
+    }
+    assert rules.can_buy(limit_bar)
+    assert rules.can_sell(limit_bar)
+    assert rules.can_sell_today("20240106", "20240106")
+
+
+def test_native_corporate_action_replaces_pending_buy_without_position():
+    order_mgr = OrderManager()
+    order_mgr.create_orders({"A": 1_000}, event_id="D-1")
+    parent = _ParentState(
+        order_id="P-1",
+        decision_id="D-1",
+        signal_week="20240101",
+        ts_code="A",
+        direction="BUY",
+        created_date="20240102",
+        original_requested_quantity=1_000,
+        quantity_basis=1.0,
+        lot_size=100,
+    )
+    parent_states = {"P-1": parent}
+    active_parent_by_code = {"A": "P-1"}
+    actions = []
+
+    _apply_corporate_actions(
+        trade_date="20240103",
+        executor=PortfolioExecutor(100_000.0, ChinaETFExecutionRules()),
+        order_mgr=order_mgr,
+        bar_lookup={},
+        adj_lookup={("20240103", "A"): 2.0},
+        position_adj_factor={"A": 1.0},
+        parent_states=parent_states,
+        active_parent_by_code=active_parent_by_code,
+        replacement_counts={},
+        corporate_actions=actions,
+        trade_events=[],
+    )
+
+    assert len(actions) == 1
+    assert parent_states["P-1"].status is ParentOrderStatus.CANCELED
+    replacement = next(
+        value for key, value in parent_states.items() if key != "P-1"
+    )
+    assert replacement.original_requested_quantity == 2_000
 
 
 def test_native_engine_fails_closed_on_short_target_even_when_rule_allows_short():

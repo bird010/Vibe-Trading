@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
@@ -61,6 +61,35 @@ class NativeExecutionState:
     corporate_actions: tuple[dict, ...] = field(default_factory=tuple)
     event_counter: int = 0
 
+    def to_snapshot(self) -> dict:
+        """Return a JSON-safe checkpoint for cross-process Shadow recovery."""
+        return json.loads(json.dumps(asdict(self), sort_keys=True, default=str))
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict) -> "NativeExecutionState":
+        if not isinstance(snapshot, dict):
+            raise TypeError("native execution snapshot must be a mapping")
+        values = dict(snapshot)
+        for name in (
+            "active_orders", "parent_orders", "attempts", "trades", "corporate_actions"
+        ):
+            values[name] = tuple(values.get(name) or ())
+        return cls(
+            cash=float(values.get("cash", 0.0)),
+            positions=dict(values.get("positions") or {}),
+            last_close=dict(values.get("last_close") or {}),
+            last_close_date=dict(values.get("last_close_date") or {}),
+            last_close_source=dict(values.get("last_close_source") or {}),
+            position_adj_factor=dict(values.get("position_adj_factor") or {}),
+            active_targets=dict(values.get("active_targets") or {}),
+            active_orders=values["active_orders"],
+            parent_orders=values["parent_orders"],
+            attempts=values["attempts"],
+            trades=values["trades"],
+            corporate_actions=values["corporate_actions"],
+            event_counter=int(values.get("event_counter", 0)),
+        )
+
 
 @dataclass(frozen=True)
 class NativeExecutionRequest:
@@ -76,6 +105,7 @@ class NativeExecutionRequest:
     rule_resolver: MarketRuleResolver
     instrument_versions: dict[str, FundInstrumentVersion]
     rule_mode: PITQueryMode
+    knowledge_cutoffs: dict[str, str] = field(default_factory=dict)
     initial_state: NativeExecutionState | None = None
     decision_ids: dict[str, str] = field(default_factory=dict)
     order_ids: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -114,6 +144,7 @@ class _ParentState:
     cancel_reason: str = ""
     rule_version: str = ""
     source_record_id: str = ""
+    rule_knowledge_cutoff: str = ""
     corporate_action_adjustments: tuple[dict, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -159,6 +190,7 @@ class _ParentState:
             completed_date=self.completed_date,
             cancel_reason=self.cancel_reason,
             lot_size=self.lot_size,
+            knowledge_cutoff=self.rule_knowledge_cutoff,
         )
 
     def to_state_dict(self) -> dict:
@@ -182,6 +214,7 @@ class _ParentState:
             "cancel_reason": self.cancel_reason,
             "rule_version": self.rule_version,
             "source_record_id": self.source_record_id,
+            "rule_knowledge_cutoff": self.rule_knowledge_cutoff,
             "corporate_action_adjustments": list(self.corporate_action_adjustments),
         }
 
@@ -205,6 +238,7 @@ class _ParentState:
             cancel_reason=str(data.get("cancel_reason", "")),
             rule_version=str(data.get("rule_version", "")),
             source_record_id=str(data.get("source_record_id", "")),
+            rule_knowledge_cutoff=str(data.get("rule_knowledge_cutoff", "")),
             corporate_action_adjustments=tuple(
                 dict(item) for item in data.get("corporate_action_adjustments", ())
             ),
@@ -398,8 +432,13 @@ class FundRotationExecutionEngine:
                         lot_size=creation_rules[code].lot_size,
                         rule_version=provenance.rule_version,
                         source_record_id=provenance.source_record_id,
+                        rule_knowledge_cutoff=provenance.knowledge_cutoff,
                     )
                     active_parent_by_code[code] = order_id
+                    position_adj_factor.setdefault(
+                        code,
+                        ctx.adj_lookup.get((trade_date, code), 1.0),
+                    )
 
             pending = order_mgr.get_pending_orders()
             all_codes = (
@@ -627,7 +666,10 @@ def _resolve_execution_rules(
     provenance = request.rule_resolver.resolve(
         instrument=instrument,
         trade_date=trade_date,
-        knowledge_cutoff=request.knowledge_cutoff,
+        knowledge_cutoff=request.knowledge_cutoffs.get(
+            trade_date,
+            request.knowledge_cutoff,
+        ),
         snapshot_version=request.snapshot_version,
         mode=request.rule_mode,
     )
@@ -656,9 +698,14 @@ def _rules_from_market_rules(
     market_rules: MarketRules,
     config: FundRotationConfig,
 ) -> ChinaETFExecutionRules:
-    if market_rules.price_limit_pct is None:
+    price_limit_rule = str(market_rules.price_limit_rule or "").strip().upper()
+    if market_rules.price_limit_pct is None and price_limit_rule not in {
+        "NONE",
+        "NO_LIMIT",
+        "UNLIMITED",
+    }:
         raise UnknownExecutionRule(
-            f"UNKNOWN_EXECUTION_RULE: missing price_limit_pct for {market_rules.rule_version}"
+            f"UNKNOWN_EXECUTION_RULE: missing explicit price-limit rule for {market_rules.rule_version}"
         )
     return ChinaETFExecutionRules(
         lot_size=market_rules.lot_size,
@@ -668,6 +715,7 @@ def _rules_from_market_rules(
         other_fee_rate=config.other_fee_rate,
         allow_short=market_rules.short_allowed,
         price_limit_pct=market_rules.price_limit_pct,
+        settlement=market_rules.settlement,
     )
 
 
@@ -831,6 +879,7 @@ def _attempt_to_state(attempt: ExecutionAttemptRecord) -> dict:
         "participation_rate": attempt.participation_rate,
         "status": attempt.status.value,
         "reason_code": attempt.reason_code,
+        "knowledge_cutoff": attempt.knowledge_cutoff,
     }
 
 
@@ -849,6 +898,7 @@ def _trade_to_state(trade: ExecutedTradeRecord) -> dict:
         "explicit_fee": trade.explicit_fee,
         "slippage_cost": trade.slippage_cost,
         "trade_date": trade.trade_date,
+        "knowledge_cutoff": trade.knowledge_cutoff,
     }
 
 
@@ -863,6 +913,9 @@ def _corporate_action_to_state(action: CorporateActionRecord) -> dict:
         "old_cost_basis": action.old_cost_basis,
         "new_cost_basis": action.new_cost_basis,
         "adjustment_factor": action.adjustment_factor,
+        "economic_new_quantity": action.economic_new_quantity,
+        "fractional_quantity": action.fractional_quantity,
+        "cash_in_lieu": action.cash_in_lieu,
     }
 
 
@@ -897,7 +950,10 @@ def _apply_corporate_actions(
     corporate_actions: list[CorporateActionRecord],
     trade_events: list[dict],
 ) -> None:
-    for code, pos in list(executor._positions.items()):
+    pending_codes = {order.ts_code for order in order_mgr.get_pending_orders()}
+    codes = set(executor._positions) | set(active_parent_by_code) | pending_codes
+    for code in sorted(codes):
+        pos = executor._positions.get(code, {})
         new_factor = adj_lookup.get((trade_date, code))
         old_factor = position_adj_factor.get(code)
         if new_factor is None:
@@ -918,9 +974,16 @@ def _apply_corporate_actions(
                 old_factor,
                 new_factor,
             )
-            executor._positions[code] = {**pos, "size": new_size}
+            if old_size > 0:
+                executor._positions[code] = {**pos, "size": new_size}
             scale = new_factor / old_factor
             corporate_action_id = f"CA-{trade_date}-{code}"
+            adjustment_price = float(
+                bar_lookup.get((trade_date, code), {}).get("open", 0.0)
+                or bar_lookup.get((trade_date, code), {}).get("close", 0.0)
+                or last_close_after
+            )
+            cash_in_lieu = fractional * adjustment_price
 
             corporate_actions.append(
                 CorporateActionRecord(
@@ -933,6 +996,9 @@ def _apply_corporate_actions(
                     old_cost_basis=max(last_close_before, 0.0),
                     new_cost_basis=max(last_close_after, 0.0),
                     adjustment_factor=scale,
+                    economic_new_quantity=old_size * scale,
+                    fractional_quantity=fractional,
+                    cash_in_lieu=cash_in_lieu,
                 )
             )
 
@@ -1009,12 +1075,6 @@ def _apply_corporate_actions(
                 corporate_action_id=corporate_action_id,
             )
 
-            adjustment_price = float(
-                bar_lookup.get((trade_date, code), {}).get("open", 0.0)
-                or bar_lookup.get((trade_date, code), {}).get("close", 0.0)
-                or last_close_after
-            )
-            cash_in_lieu = fractional * adjustment_price
             executor.cash += cash_in_lieu
             trade_events.append(
                 {
@@ -1110,6 +1170,11 @@ def _record_execution_event(
             participation_rate=float(event.get("participation_rate", 0.0) or 0.0),
             status=status,
             reason_code=str(event.get("reason", "") or ""),
+            knowledge_cutoff=(
+                provenance.knowledge_cutoff
+                if provenance is not None
+                else parent.rule_knowledge_cutoff
+            ),
         )
     )
 
@@ -1129,6 +1194,11 @@ def _record_execution_event(
                 explicit_fee=explicit_fee,
                 slippage_cost=notional * max(slippage_bps, 0.0) / 10_000.0,
                 trade_date=trade_date,
+                knowledge_cutoff=(
+                    provenance.knowledge_cutoff
+                    if provenance is not None
+                    else parent.rule_knowledge_cutoff
+                ),
             )
         )
 

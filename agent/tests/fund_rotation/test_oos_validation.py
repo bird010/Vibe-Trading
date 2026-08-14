@@ -279,6 +279,33 @@ def test_oos_qualification_policy_spec_is_canonical_name_with_legacy_alias() -> 
     assert oos_validation.QualificationPolicy().__class__.__name__ == "OOSQualificationPolicySpec"
 
 
+def test_oos_policy_exposes_the_formal_gate_contract_used_by_forward_validation() -> None:
+    policy = QualificationPolicy(require_non_cluster_baseline=True)
+
+    formal = policy.to_formal_policy()
+
+    assert {gate.gate_id for gate in formal.hard_gates} == {
+        "OOS_MINIMUM_WEEKS",
+        "OOS_MINIMUM_FRACTION",
+        "FORMAL_ALPHA_BASELINE_REQUIRED",
+    }
+    assert formal.target_transition == "QUALIFIED_OOS_EVIDENCE"
+
+
+def test_oos_gate_does_not_skip_missing_formal_baseline_metric() -> None:
+    weeks = _weeks(312)
+    split = TemporalSplitPolicy(
+        train_weeks=weeks[:156],
+        validation_weeks=weeks[156:208],
+        oos_weeks=weeks[208:312],
+    )
+    assert split.has_qualified_oos(QualificationPolicy(require_non_cluster_baseline=True)) is False
+    assert split.has_qualified_oos(
+        QualificationPolicy(require_non_cluster_baseline=True),
+        formal_metrics={"formal_non_cluster_baseline": 1},
+    ) is True
+
+
 def test_qualified_oos_evidence_accepts_canonical_baseline_contract_field_aliases() -> None:
     experiment = create_research_experiment(**_qualified_experiment_kwargs())
 

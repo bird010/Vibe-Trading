@@ -23,7 +23,8 @@ class ChinaETFExecutionRules:
     other_fee_rate: float = 0.0
     leverage: float = 1.0
     allow_short: bool = False
-    price_limit_pct: float = 0.10  # 10% for ETFs
+    price_limit_pct: float | None = 0.10  # None means an explicit no-limit rule
+    settlement: str = "T+1"
 
     def round_buy_size(self, raw_size: float) -> int:
         """Round down to lot_size integer units for buying."""
@@ -77,7 +78,12 @@ class ChinaETFExecutionRules:
         return True
 
     def can_sell_today(self, entry_date: str, current_date: str) -> bool:
-        """T+1: cannot sell on the same day as purchase."""
+        """Apply the PIT settlement rule for same-day selling."""
+        settlement = self.settlement.strip().upper().replace(" ", "")
+        if settlement in {"T+0", "T0"}:
+            return True
+        if settlement not in {"T+1", "T1"}:
+            raise ValueError(f"unsupported settlement rule: {self.settlement}")
         return current_date > entry_date
 
     # ── Private helpers ──
@@ -100,6 +106,8 @@ class ChinaETFExecutionRules:
 
     def _is_limit_up(self, bar: dict) -> bool:
         """Single-price limit-up: high==low and at +limit from pre_close."""
+        if self.price_limit_pct is None:
+            return False
         pre_close = bar.get("pre_close")
         if pre_close is None:
             return False
@@ -120,6 +128,8 @@ class ChinaETFExecutionRules:
 
     def _is_limit_down(self, bar: dict) -> bool:
         """Single-price limit-down: high==low and at -limit from pre_close."""
+        if self.price_limit_pct is None:
+            return False
         pre_close = bar.get("pre_close")
         if pre_close is None:
             return False

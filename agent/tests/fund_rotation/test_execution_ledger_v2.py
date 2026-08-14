@@ -809,6 +809,27 @@ def test_share_corporate_action_requires_quantity_and_cost_conservation():
         )
 
 
+def test_share_corporate_action_accepts_whole_shares_plus_cash_in_lieu():
+    action = CorporateActionRecord(
+        corporate_action_id="CA-FRACTIONAL-CASH",
+        ts_code="510300.SH",
+        action_type=CorporateActionType.SHARE_CONVERSION,
+        effective_date="20240110",
+        old_quantity=101,
+        new_quantity=50,
+        old_cost_basis=10.0,
+        new_cost_basis=20.0,
+        adjustment_factor=0.5,
+        economic_new_quantity=50.5,
+        fractional_quantity=0.5,
+        cash_in_lieu=10.0,
+    )
+
+    assert action.economic_new_quantity == pytest.approx(50.5)
+    assert action.fractional_quantity == pytest.approx(0.5)
+    assert action.cash_in_lieu == pytest.approx(10.0)
+
+
 def test_ledger_requires_parent_attempt_and_trade_quantity_closure():
     parent = _parent(filled=500, status=ParentOrderStatus.PARTIALLY_FILLED)
 

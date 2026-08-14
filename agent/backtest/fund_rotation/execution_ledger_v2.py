@@ -117,6 +117,7 @@ class ParentOrderRecord:
     cancel_reason: str = ""
     reject_reason: str = ""
     lot_size: int = _DEFAULT_BUY_LOT_SIZE
+    knowledge_cutoff: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -171,6 +172,7 @@ class ExecutionAttemptRecord:
     participation_rate: float
     status: AttemptStatus | str
     reason_code: str = ""
+    knowledge_cutoff: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -225,6 +227,7 @@ class ExecutedTradeRecord:
     explicit_fee: float
     slippage_cost: float
     trade_date: str
+    knowledge_cutoff: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -262,6 +265,9 @@ class CorporateActionRecord:
     old_cost_basis: float
     new_cost_basis: float
     adjustment_factor: float
+    economic_new_quantity: float | None = None
+    fractional_quantity: float | None = None
+    cash_in_lieu: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -279,8 +285,13 @@ class CorporateActionRecord:
             "old_cost_basis",
             "new_cost_basis",
             "adjustment_factor",
+            "cash_in_lieu",
         ):
             _require_non_negative(getattr(self, field_name), field_name)
+        if self.economic_new_quantity is not None:
+            _require_non_negative(self.economic_new_quantity, "economic_new_quantity")
+        if self.fractional_quantity is not None:
+            _require_non_negative(self.fractional_quantity, "fractional_quantity")
         if self.adjustment_factor <= 0:
             raise ValueError("adjustment_factor must be positive")
         if self.action_type in _SHARE_ADJUSTMENT_TYPES:
@@ -288,7 +299,32 @@ class CorporateActionRecord:
                 if not isinstance(quantity, int) or isinstance(quantity, bool):
                     raise ValueError("corporate action quantity must be an integer")
             expected_new_quantity = self.old_quantity * self.adjustment_factor
-            if not math.isclose(self.new_quantity, expected_new_quantity, rel_tol=0.0, abs_tol=1e-9):
+            economic_new_quantity = self.economic_new_quantity
+            if economic_new_quantity is None:
+                if not math.isclose(
+                    expected_new_quantity,
+                    round(expected_new_quantity),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    raise ValueError(
+                        "share adjustment quantity conservation requires explicit fractional quantity"
+                    )
+                economic_new_quantity = expected_new_quantity
+            if not math.isclose(
+                economic_new_quantity,
+                expected_new_quantity,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise ValueError("share adjustment economic quantity conservation violated")
+            fractional_quantity = self.fractional_quantity or 0.0
+            if not math.isclose(
+                self.new_quantity + fractional_quantity,
+                economic_new_quantity,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
                 raise ValueError("share adjustment quantity conservation violated")
             if self.old_quantity > 0 and self.old_cost_basis > 0:
                 if self.new_cost_basis <= 0:
@@ -1090,6 +1126,13 @@ def _corporate_action_from_event(
         old_cost_basis=max(float(event.get("last_close_before", 0.0) or 0.0), 0.0),
         new_cost_basis=max(float(event.get("last_close_after", 0.0) or 0.0), 0.0),
         adjustment_factor=adjustment_factor,
+        economic_new_quantity=(
+            old_quantity * adjustment_factor
+            if old_quantity > 0
+            else float(new_quantity)
+        ),
+        fractional_quantity=float(event.get("fractional_remainder", 0.0) or 0.0),
+        cash_in_lieu=float(event.get("cash_in_lieu", 0.0) or 0.0),
     )
 
 

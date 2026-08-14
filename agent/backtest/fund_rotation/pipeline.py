@@ -94,6 +94,10 @@ def run_signal_pipeline(
     market_rule_instruments: Mapping[str, FundInstrumentVersion] | None = None,
     market_rule_mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
     market_rule_snapshot_version: int | None = None,
+    pit_universe_resolver: object | None = None,
+    require_verified_pit: bool = False,
+    formal_benchmarks: bool = False,
+    data_snapshot: PinnedFundDataSnapshot | None = None,
 ) -> PipelineResult:
     """Run the legacy-shape fund-rotation backtest via the common Runner.
 
@@ -112,10 +116,30 @@ def run_signal_pipeline(
         market_rule_instruments: Explicit PIT instrument mapping for Runner execution.
         market_rule_mode: PIT market-rule query mode.
         market_rule_snapshot_version: Explicit market-rule snapshot version.
+        pit_universe_resolver: Explicit PIT universe adapter for formal runs.
+        require_verified_pit: Fail closed when the PIT universe is not verified.
+        formal_benchmarks: Use Runner PIT-aware benchmark outputs in the result.
+        data_snapshot: Pinned data snapshot required by formal runs.
 
     Returns:
         PipelineResult with targets, benchmarks, and metrics.
     """
+    formal_requested = require_verified_pit or formal_benchmarks
+    if formal_requested and pit_universe_resolver is None:
+        raise ValueError(
+            "formal pipeline requires an explicit PIT universe resolver; "
+            "static dim_fund/list_date fallback is research-only"
+        )
+    if formal_requested and (
+        market_rule_resolver is None or not market_rule_instruments or market_rule_snapshot_version is None
+    ):
+        raise ValueError(
+            "formal pipeline requires an explicit versioned PIT market-rule source"
+        )
+    if formal_requested and data_snapshot is None:
+        raise ValueError(
+            "formal pipeline requires an explicit pinned fund data snapshot"
+        )
     def _notify(stage: str) -> None:
         if stage_callback:
             stage_callback(stage)
@@ -199,11 +223,20 @@ def run_signal_pipeline(
         if (not config.start_date or d >= config.start_date)
         and (not config.end_date or d <= config.end_date)
     ]
+    if formal_requested:
+        if data_snapshot is None:
+            raise ValueError("formal pipeline requires an explicit pinned fund data snapshot")
+        if not data_snapshot.fingerprint or data_snapshot.fingerprint == "legacy-compat":
+            raise ValueError("formal pipeline requires an auditable pinned snapshot fingerprint")
+        if not set(etf_codes).issubset(set(data_snapshot.universe_codes)):
+            raise ValueError("pinned snapshot universe does not cover the loaded ETF universe")
+        if not set(evaluation_dates).issubset(set(data_snapshot.trading_dates)):
+            raise ValueError("pinned snapshot calendar does not cover evaluation dates")
 
     # ── Drive the baseline strategy through the strategy-neutral Runner ──
     _notify("GENERATING_SIGNALS")
     strategy_config = CorrelationAllMembersConfig.from_legacy(config)
-    snapshot = PinnedFundDataSnapshot(
+    snapshot = data_snapshot or PinnedFundDataSnapshot(
         fund_version=0,
         fund_adj_version=0,
         dim_version=int(market_rule_snapshot_version or 0),
@@ -234,6 +267,8 @@ def run_signal_pipeline(
         market_rule_resolver=market_rule_resolver,
         market_rule_instruments=market_rule_instruments,
         market_rule_mode=market_rule_mode,
+        pit_universe_resolver=pit_universe_resolver,
+        strict_pit_benchmarks=formal_requested,
     )
     run_result = runner.run(
         strategy=CorrelationAllMembersStrategy(),
@@ -243,6 +278,14 @@ def run_signal_pipeline(
         execution=execution_config,
         cancellation=CancellationToken(),
     )
+
+    result.quality_status = run_result.quality_status
+    result.execution_diagnostics = dict(run_result.execution_diagnostics)
+    if formal_requested and result.quality_status not in {"VALID", "VERIFIED"}:
+        raise ValueError(
+            "formal pipeline requires a verified PIT universe; "
+            f"got quality_status={result.quality_status}"
+        )
 
     diagnostics = run_result.diagnostics
     artifacts = {a.role: a.payload for a in (diagnostics.artifacts if diagnostics else ())}
@@ -319,10 +362,10 @@ def run_signal_pipeline(
     local_codes = set(fund_daily["ts_code"].astype(str))
     has_510300 = "510300.SH" in local_codes
 
-    if benchmark_weeks and not has_510300:
+    if not formal_requested and benchmark_weeks and not has_510300:
         raise ValueError("510300.SH benchmark data is missing from the local ETF dataset.")
 
-    if benchmark_weeks and has_510300:
+    if not formal_requested and benchmark_weeks and has_510300:
         exec_ctx = build_execution_context(fund_daily, fund_adj, config, profiler=profiler)
         first_week = benchmark_weeks[0]
         buy_hold_run = PipelineResult(
@@ -408,5 +451,32 @@ def run_signal_pipeline(
                 "observations": len(strat_returns),
                 "minimum_observations": 24,
             }
+
+    if formal_requested:
+        result.equal_weight_benchmark = run_result.benchmark_equity.get(
+            "equal_weight_etf",
+            pd.Series(dtype=float, name="equal_weight_etf"),
+        )
+        result.buy_hold_benchmark = run_result.benchmark_equity.get(
+            "510300.SH",
+            pd.Series(dtype=float, name="510300.SH"),
+        )
+        result.cash_benchmark = run_result.benchmark_equity.get(
+            "cash",
+            pd.Series(dtype=float, name="cash"),
+        )
+        result.benchmark_metrics = {
+            name: compute_performance_metrics(
+                series,
+                periods_per_year=244,
+                initial_nav=1.0,
+            )
+            for name, series in {
+                "equal_weight": result.equal_weight_benchmark,
+                "buy_hold_510300": result.buy_hold_benchmark,
+                "cash": result.cash_benchmark,
+            }.items()
+            if not series.empty and not series.isna().all()
+        }
 
     return result

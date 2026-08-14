@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from backtest.fund_rotation.accounting_contract import (
     ACCOUNTING_CONTRACT_VERSION,
@@ -308,6 +308,9 @@ class ShadowAccountState:
     completed_rebalance_cycles: int
     cash_weight: float = 0.0
     daily_accounting_event_order: tuple[str, ...] = DAILY_ACCOUNTING_EVENT_ORDER
+    valuation_prices: tuple[tuple[str, float], ...] = ()
+    execution_state: object | None = None
+    execution_state_snapshot: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -379,6 +382,9 @@ class MarketDataForExecution:
     ideal_nav: float
     executable_nav: float
     data_delay_seconds: int = 0
+    prior_close_prices: tuple[tuple[str, float], ...] = ()
+    open_prices: tuple[tuple[str, float], ...] = ()
+    corporate_actions: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -398,6 +404,15 @@ class ShadowFill:
     quantity: float
     price: float
     explicit_cost: float
+
+
+@dataclass(frozen=True)
+class ShadowExecutionFacts:
+    """Formal execution facts plus the native state for the next cycle."""
+
+    attempts: tuple[ShadowExecutionAttempt, ...]
+    fills: tuple[ShadowFill, ...]
+    execution_state: object | None = None
 
 
 @dataclass(frozen=True)
@@ -446,6 +461,7 @@ class InMemoryForwardValidationStore:
     fills: list[ShadowFill] = field(default_factory=list)
     execution_results: dict[str, ShadowExecutionResult] = field(default_factory=dict)
     assessments: list[QualificationAssessment] = field(default_factory=list)
+    strategy_session_snapshots: dict[str, Mapping[str, object]] = field(default_factory=dict)
 
     def add_strategy_version(self, version: FrozenStrategyVersion) -> None:
         self.strategy_versions[version.strategy_version_id] = version
@@ -779,19 +795,44 @@ class ShadowExecutionService:
                 reason_codes=start_violations,
             )
 
-        attempts, fills = self.execution_adapter.execute(
-            decision=decision,
-            orders=orders,
-            market_data=market_data,
-            execution_as_of_time=execution_as_of_time,
-        )
-        account_state = self.accounting_adapter.apply(
-            decision=decision,
-            previous_state=previous_state,
-            fills=fills,
-            market_data=market_data,
-            execution_as_of_time=execution_as_of_time,
-        )
+        formal_execute = getattr(self.execution_adapter, "execute_formal", None)
+        if callable(formal_execute):
+            execution_facts = formal_execute(
+                decision=decision,
+                orders=orders,
+                previous_state=previous_state,
+                market_data=market_data,
+                execution_as_of_time=execution_as_of_time,
+            )
+            attempts = tuple(execution_facts.attempts)
+            fills = tuple(execution_facts.fills)
+            execution_state = execution_facts.execution_state
+        else:
+            attempts, fills = self.execution_adapter.execute(
+                decision=decision,
+                orders=orders,
+                market_data=market_data,
+                execution_as_of_time=execution_as_of_time,
+            )
+            execution_state = None
+        formal_apply = getattr(self.accounting_adapter, "apply_formal", None)
+        if callable(formal_apply):
+            account_state = formal_apply(
+                decision=decision,
+                previous_state=previous_state,
+                fills=fills,
+                execution_state=execution_state,
+                market_data=market_data,
+                execution_as_of_time=execution_as_of_time,
+            )
+        else:
+            account_state = self.accounting_adapter.apply(
+                decision=decision,
+                previous_state=previous_state,
+                fills=fills,
+                market_data=market_data,
+                execution_as_of_time=execution_as_of_time,
+            )
         output_violations = self._validate_adapter_output(
             decision=decision,
             orders=orders,

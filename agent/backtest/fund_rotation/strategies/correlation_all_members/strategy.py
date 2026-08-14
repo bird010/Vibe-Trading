@@ -35,6 +35,7 @@ from backtest.fund_rotation.signal_portfolio_risk import (
     RiskPolicy,
     SelectionPolicy,
     SelectionState,
+    HeldCluster,
     compute_cluster_coverage,
     run_decision_pipeline,
     serialize_stage_records,
@@ -89,6 +90,50 @@ class CorrelationAllMembersSession:
             date
             for date in endings
             if simulation_start_date <= date <= evaluation_end_date
+        )
+
+    def to_snapshot(self) -> dict[str, object]:
+        holdings = {}
+        if self._selection_state is not None:
+            holdings = {
+                str(key): {
+                    "weeks_held": value.weeks_held,
+                    "entry_score": value.entry_score,
+                }
+                for key, value in self._selection_state.holdings.items()
+            }
+        return {
+            "week_index": self._week_index,
+            "clusters": dict(self._clusters),
+            "last_recluster_week": self._last_recluster_week,
+            "selection_state": {
+                "cycle_id": self._selection_state.cycle_id if self._selection_state else None,
+                "holdings": holdings,
+            },
+        }
+
+    def restore_snapshot(self, snapshot: dict[str, object]) -> None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("strategy session snapshot must be a mapping")
+        self._week_index = int(snapshot.get("week_index", 0))
+        self._clusters = {
+            str(key): int(value)
+            for key, value in dict(snapshot.get("clusters", {})).items()
+        }
+        self._last_recluster_week = int(
+            snapshot.get("last_recluster_week", -self._config.recluster_interval_weeks)
+        )
+        raw_selection = dict(snapshot.get("selection_state", {}))
+        raw_holdings = dict(raw_selection.get("holdings", {}))
+        self._selection_state = SelectionState(
+            cycle_id=raw_selection.get("cycle_id"),
+            holdings={
+                str(key): HeldCluster(
+                    weeks_held=int(value["weeks_held"]),
+                    entry_score=float(value["entry_score"]),
+                )
+                for key, value in raw_holdings.items()
+            },
         )
 
     def _pool_at_signal(self, view) -> pd.DataFrame:

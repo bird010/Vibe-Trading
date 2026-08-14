@@ -119,6 +119,7 @@ class FundRotationRunResult:
     execution_diagnostics: dict[str, Any] = field(default_factory=dict)
     diagnostics: StrategyDiagnostics | None = None
     quality_status: str = "VALID"
+    benchmark_quality_status: str = "VALID"
 
 
 class FundRotationBacktestRunner:
@@ -133,6 +134,7 @@ class FundRotationBacktestRunner:
         market_rule_instruments: Mapping[str, FundInstrumentVersion] | None = None,
         market_rule_mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
         pit_universe_resolver: object | None = None,
+        strict_pit_benchmarks: bool = False,
         run_id: str | None = None,
     ) -> None:
         self._fund_daily = fund_daily
@@ -145,7 +147,9 @@ class FundRotationBacktestRunner:
         )
         self._market_rule_mode = market_rule_mode
         self._pit_universe_resolver = pit_universe_resolver
+        self._strict_pit_benchmarks = strict_pit_benchmarks
         self._run_id = run_id or uuid.uuid4().hex[:12]
+        self._benchmark_quality_status = "VALID"
 
     def run(
         self,
@@ -267,6 +271,7 @@ class FundRotationBacktestRunner:
 
         fallback_universe = frozenset(str(code) for code in snapshot.universe_codes)
         universe_diagnostics_by_date: dict[str, dict[str, Any]] = {}
+        universe_codes_by_date: dict[str, frozenset[str]] = {}
         pit_quality_status = "VERIFIED"
         decisions: list[TargetWeightDecision] = []
         targets_map: dict[str, dict[str, float]] = {}
@@ -329,6 +334,7 @@ class FundRotationBacktestRunner:
                 fallback_universe=fallback_universe,
             )
             universe = pit_evidence.universe
+            universe_codes_by_date[signal_date] = universe
             universe_diagnostics_by_date[signal_date] = dict(pit_evidence.diagnostics)
             pit_quality_status = _combine_pit_quality_status(
                 pit_quality_status,
@@ -433,6 +439,10 @@ class FundRotationBacktestRunner:
                 execution=native_execution_config,
                 initial_capital=execution.initial_capital,
                 knowledge_cutoff=_native_knowledge_cutoff(targets_map, evaluation_dates),
+                knowledge_cutoffs={
+                    trade_date: trade_date
+                    for trade_date in evaluation_dates
+                },
                 snapshot_version=_native_snapshot_version(snapshot),
                 run_id=run_id or self._run_id,
                 rule_resolver=self._market_rule_resolver,
@@ -496,9 +506,26 @@ class FundRotationBacktestRunner:
                 execution_diagnostics=execution_diagnostics,
             )
 
+        benchmark_universes = dict(universe_codes_by_date)
+        for benchmark_date in evaluation_dates:
+            if benchmark_date in benchmark_universes:
+                continue
+            benchmark_evidence = _resolve_pit_universe_for_signal(
+                self._pit_universe_resolver,
+                snapshot=snapshot,
+                signal_date=benchmark_date,
+                fallback_universe=fallback_universe,
+            )
+            benchmark_universes[benchmark_date] = benchmark_evidence.universe
+            pit_quality_status = _combine_pit_quality_status(
+                pit_quality_status,
+                benchmark_evidence.quality_status,
+            )
+
         benchmark_equity = self._public_benchmarks(
             evaluation_dates,
             execution,
+            benchmark_universes,
         )
         benchmark_metrics = {
             name: compute_performance_metrics(
@@ -525,6 +552,11 @@ class FundRotationBacktestRunner:
             _worst_quality_status(decisions),
             pit_quality_status,
         )
+        overall_quality = _combine_run_quality_status(
+            overall_quality,
+            self._benchmark_quality_status,
+        )
+        execution_diagnostics["benchmark_quality_status"] = self._benchmark_quality_status
         try:
             diagnostics = session.finalize()
         except Exception as exc:
@@ -578,8 +610,10 @@ class FundRotationBacktestRunner:
         self,
         evaluation_dates: list[str],
         execution: ExecutionConfig,
+        universe_codes_by_signal_date: Mapping[str, frozenset[str]] | None = None,
     ) -> dict[str, pd.Series]:
         """Build common daily benchmarks from the same pinned market frames."""
+        self._benchmark_quality_status = "VALID"
         index = pd.Index(evaluation_dates)
         cash = pd.Series(1.0, index=index, name="cash")
         adjusted = compute_adjusted_close(
@@ -612,12 +646,34 @@ class FundRotationBacktestRunner:
             date = evaluation_dates[position]
             prior_date = evaluation_dates[position - 1]
             if date not in returns.index:
+                if self._strict_pit_benchmarks and universe_codes_by_signal_date is not None:
+                    self._benchmark_quality_status = _combine_pit_quality_status(
+                        self._benchmark_quality_status,
+                        "PIT_INVALID",
+                    )
+                    equal_values.append(float("nan"))
+                    continue
                 equal_values.append(nav)
+                continue
+            pit_codes = _latest_pit_universe(
+                universe_codes_by_signal_date or {},
+                prior_date,
+            )
+            if self._strict_pit_benchmarks and universe_codes_by_signal_date is not None and pit_codes is None:
+                self._benchmark_quality_status = _combine_pit_quality_status(
+                    self._benchmark_quality_status,
+                    "PIT_INVALID",
+                )
+                equal_values.append(float("nan"))
                 continue
             eligible = [
                 code
                 for code in returns.columns
-                if list_dates.get(str(code), "99999999") <= prior_date
+                if (
+                    str(code) in pit_codes
+                    if pit_codes is not None
+                    else list_dates.get(str(code), "99999999") <= prior_date
+                )
             ]
             period = (
                 returns.loc[date, eligible]
@@ -627,7 +683,17 @@ class FundRotationBacktestRunner:
             if isinstance(period, pd.DataFrame):
                 period = period.iloc[0]
             values = pd.to_numeric(period, errors="coerce").dropna()
-            period_return = float(values.mean()) if not values.empty else 0.0
+            if values.empty:
+                if self._strict_pit_benchmarks and universe_codes_by_signal_date is not None:
+                    self._benchmark_quality_status = _combine_pit_quality_status(
+                        self._benchmark_quality_status,
+                        "PIT_INVALID",
+                    )
+                    equal_values.append(float("nan"))
+                    continue
+                period_return = 0.0
+            else:
+                period_return = float(values.mean())
             nav *= 1.0 + period_return
             equal_values.append(nav)
         equal_weight = pd.Series(
@@ -802,6 +868,20 @@ def _extract_resolution_value(
     if isinstance(resolution, dict):
         return resolution.get(key, default)
     return getattr(resolution, key, default)
+
+
+def _latest_pit_universe(
+    universes_by_signal_date: Mapping[str, frozenset[str]],
+    as_of_date: str,
+) -> frozenset[str] | None:
+    eligible_dates = [
+        signal_date
+        for signal_date in universes_by_signal_date
+        if str(signal_date) <= str(as_of_date)
+    ]
+    if not eligible_dates:
+        return None
+    return universes_by_signal_date[max(eligible_dates)]
 
 
 def _quality_status_value(value: object) -> str:

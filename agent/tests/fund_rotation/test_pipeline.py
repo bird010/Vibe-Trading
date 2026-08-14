@@ -8,6 +8,7 @@ from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.pipeline import run_signal_pipeline
 from backtest.fund_rotation.pit_universe import PITQueryMode
 from tests.fund_rotation.conftest import make_test_market_rule_inputs
+from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 
 
 def _synthetic_data(
@@ -82,6 +83,98 @@ def _run_signal_pipeline(config, fund_daily, fund_adj, dim_fund, **kwargs):
 
 class TestPipelineE2E:
     """§19.5 — synthetic data gold-standard test."""
+
+    def test_public_pipeline_wires_pit_universe_and_exposes_quality(self):
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=6, n_weeks=40)
+        config = FundRotationConfig(
+            k=2,
+            top_n=1,
+            min_training_weeks=10,
+            correlation_lookback_weeks=10,
+            min_valid_weeks=5,
+            min_pairwise_weeks=5,
+            recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101",
+            end_date="20220930",
+        )
+        calls = []
+
+        class PITResolver:
+            def resolve_universe(self, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "universe_codes": tuple(sorted(kwargs["fallback_universe"])),
+                    "quality_status": "VERIFIED",
+                    "diagnostics": {"source": "pit-test"},
+                }
+
+        result = _run_signal_pipeline(
+            config,
+            fund_daily,
+            fund_adj,
+            dim_fund,
+            pit_universe_resolver=PITResolver(),
+        )
+
+        assert calls
+        assert result.quality_status == "VALID"
+        assert result.execution_diagnostics["universe"]
+        assert "pit-test" in str(result.execution_diagnostics["universe"])
+
+    def test_formal_pipeline_fails_closed_without_pit_universe_source(self):
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=6, n_weeks=40)
+        config = FundRotationConfig(
+            k=2,
+            top_n=1,
+            min_training_weeks=10,
+            correlation_lookback_weeks=10,
+            min_valid_weeks=5,
+            min_pairwise_weeks=5,
+            recluster_interval_weeks=10,
+            momentum_window_weeks=4,
+            start_date="20220101",
+            end_date="20220930",
+        )
+        with pytest.raises(ValueError, match="PIT universe resolver"):
+            _run_signal_pipeline(
+                config, fund_daily, fund_adj, dim_fund, formal_benchmarks=True
+            )
+
+    def test_formal_pipeline_uses_runner_benchmarks_without_legacy_execution_loop(self, monkeypatch):
+        fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=6, n_weeks=40)
+        config = FundRotationConfig(
+            k=2, top_n=1, min_training_weeks=10,
+            correlation_lookback_weeks=10, min_valid_weeks=5,
+            min_pairwise_weeks=5, recluster_interval_weeks=10,
+            momentum_window_weeks=4, start_date="20220101", end_date="20220930",
+        )
+
+        class PITResolver:
+            def resolve_universe(self, **kwargs):
+                return {
+                    "universe_codes": tuple(sorted(kwargs["fallback_universe"])),
+                    "quality_status": "VERIFIED",
+                }
+
+        def fail_legacy(*args, **kwargs):
+            raise AssertionError("formal benchmark path must not call legacy execution loop")
+
+        monkeypatch.setattr("backtest.fund_rotation.pipeline.run_execution_loop", fail_legacy)
+        result = _run_signal_pipeline(
+            config, fund_daily, fund_adj, dim_fund,
+            pit_universe_resolver=PITResolver(), formal_benchmarks=True,
+            data_snapshot=PinnedFundDataSnapshot(
+                fund_version=1,
+                fund_adj_version=2,
+                dim_version=1,
+                universe_codes=tuple(sorted(dim_fund["ts_code"].astype(str))),
+                trading_dates=tuple(sorted(fund_daily["trade_date"].astype(str).unique())),
+                fingerprint="pinned-test-snapshot",
+            ),
+        )
+        assert result.quality_status == "VALID"
+        assert not result.buy_hold_benchmark.empty
 
     def test_produces_targets(self):
         fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)

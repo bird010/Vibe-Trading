@@ -18,6 +18,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from backtest.fund_rotation.attribution import (
     AccountDayInput,
+    CorporateAction,
     Fill,
     Position,
     PricePoint,
@@ -29,6 +30,7 @@ from backtest.fund_rotation.contracts import (
     StrategyInitializationContext,
 )
 from backtest.fund_rotation.execution_ledger_v2 import ExecutionLedger, OrderDirection
+from backtest.fund_rotation.native_execution import NativeExecutionState
 from src.stockpred.fund_rotation.forward_validation import (
     ACCOUNTING_CONTRACT_VERSION,
     DAILY_ACCOUNTING_EVENT_ORDER,
@@ -40,6 +42,7 @@ from src.stockpred.fund_rotation.forward_validation import (
     ShadowDecision,
     ShadowExecutionAdapter,
     ShadowExecutionAttempt,
+    ShadowExecutionFacts,
     ShadowExecutionService,
     ShadowFill,
 )
@@ -56,12 +59,12 @@ class _StrategyProviderContract(Protocol):
 
 @runtime_checkable
 class _ExecutionAdapterContract(Protocol):
-    def execute(self, *, decision: ShadowDecision, orders: tuple, market_data: MarketDataForExecution, execution_as_of_time: datetime) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]: ...
+    def execute_formal(self, *, decision: ShadowDecision, orders: tuple, previous_state: ShadowAccountState, market_data: MarketDataForExecution, execution_as_of_time: datetime) -> ShadowExecutionFacts: ...
 
 
 @runtime_checkable
 class _AccountingAdapterContract(Protocol):
-    def apply(self, *, decision: ShadowDecision, previous_state: ShadowAccountState, fills: tuple[ShadowFill, ...], market_data: MarketDataForExecution, execution_as_of_time: datetime) -> ShadowAccountState: ...
+    def apply_formal(self, *, decision: ShadowDecision, previous_state: ShadowAccountState, fills: tuple[ShadowFill, ...], execution_state: object | None, market_data: MarketDataForExecution, execution_as_of_time: datetime) -> ShadowAccountState: ...
 
 
 def _implements_contract(value: object, contract: type[Protocol]) -> bool:
@@ -77,8 +80,8 @@ def _implements_contract(value: object, contract: type[Protocol]) -> bool:
         return False
     expected_names = {
         _StrategyProviderContract: {"store", "strategy_version_id", "as_of_time"},
-        _ExecutionAdapterContract: {"decision", "orders", "market_data", "execution_as_of_time"},
-        _AccountingAdapterContract: {"decision", "previous_state", "fills", "market_data", "execution_as_of_time"},
+        _ExecutionAdapterContract: {"decision", "orders", "previous_state", "market_data", "execution_as_of_time"},
+        _AccountingAdapterContract: {"decision", "previous_state", "fills", "execution_state", "market_data", "execution_as_of_time"},
     }[contract]
     return {
         p.name for p in params if p.kind is Parameter.KEYWORD_ONLY
@@ -123,6 +126,78 @@ def _snapshot_fingerprint(binding: object, view: object, signal_date: str) -> st
     ).hexdigest()
 
 
+def _state_value(state: object | None, name: str, default: object = None) -> object:
+    if state is None:
+        return default
+    if isinstance(state, Mapping):
+        return state.get(name, default)
+    return getattr(state, name, default)
+
+
+def _state_snapshot(state: object | None) -> Mapping[str, object] | None:
+    if state is None:
+        return None
+    serializer = getattr(state, "to_snapshot", None)
+    if callable(serializer):
+        value = serializer()
+        if isinstance(value, Mapping):
+            return dict(value)
+    if isinstance(state, Mapping):
+        return dict(state)
+    return None
+
+
+def _restore_native_state(state: object | None) -> object | None:
+    if isinstance(state, Mapping) and "cash" in state and "positions" in state:
+        return NativeExecutionState.from_snapshot(dict(state))
+    return state
+
+
+def _corporate_actions_for_accounting(
+    *,
+    previous_state: ShadowAccountState,
+    execution_state: object | None,
+    market_data: MarketDataForExecution,
+) -> tuple[CorporateAction, ...]:
+    """Return only today's native CA facts in the shared accounting shape."""
+    previous_execution_state = (
+        previous_state.execution_state
+        if previous_state.execution_state is not None
+        else previous_state.execution_state_snapshot
+    )
+    previous_ids = {
+        str(row.get("corporate_action_id", ""))
+        for row in (_state_value(previous_execution_state, "corporate_actions", ()) or ())
+        if isinstance(row, Mapping)
+    }
+    rows = _state_value(execution_state, "corporate_actions", ()) or market_data.corporate_actions
+    actions: list[CorporateAction] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        action_id = str(row.get("corporate_action_id", ""))
+        if action_id and action_id in previous_ids:
+            continue
+        old_quantity = float(row.get("old_quantity", 0.0))
+        new_quantity = float(row.get("new_quantity", 0.0))
+        old_price = float(row.get("old_cost_basis", 0.0))
+        new_price = float(row.get("new_cost_basis", 0.0))
+        cash_in_lieu = float(row.get("cash_in_lieu", 0.0))
+        if old_quantity == 0.0 and new_quantity == 0.0 and cash_in_lieu == 0.0:
+            continue
+        actions.append(
+            CorporateAction(
+                symbol=str(row.get("ts_code", "")),
+                pre_quantity=old_quantity,
+                pre_price=old_price,
+                post_quantity=new_quantity,
+                post_price=new_price,
+                cash_in_lieu=cash_in_lieu,
+            )
+        )
+    return tuple(actions)
+
+
 class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
     """Evaluate a catalog-bound strategy session at the scheduler cutoff."""
 
@@ -147,6 +222,9 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
             "strategy",
         )
         self.rule_identity = _require_identity(rule_identity, "rule") if rule_identity is not None else None
+        self._sessions: dict[str, object] = {}
+        self._evaluated_signal_dates: dict[str, set[str]] = {}
+        self._signals: dict[tuple[str, str], ScheduledSignal] = {}
 
     def next_signal(
         self,
@@ -166,13 +244,24 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
         eligible_dates = tuple(date for date in calendar if str(date) <= cutoff_date)
         if not eligible_dates:
             return None
-        session = self.strategy_binding.strategy.create_session(
-            StrategyInitializationContext(
-                run_id=self.run_id,
-                evaluation_calendar=calendar,
-            ),
-            _config_for_binding(self.strategy_binding),
-        )
+        session = self._sessions.get(strategy_version_id)
+        if session is None:
+            session = self.strategy_binding.strategy.create_session(
+                StrategyInitializationContext(
+                    run_id=self.run_id,
+                    evaluation_calendar=calendar,
+                ),
+                _config_for_binding(self.strategy_binding),
+            )
+            snapshot = store.strategy_session_snapshots.get(strategy_version_id)
+            restore = getattr(session, "restore_snapshot", None)
+            if snapshot is not None and not callable(restore):
+                raise ProductionAdapterError(
+                    "formal strategy session cannot restore its persisted snapshot"
+                )
+            if snapshot is not None:
+                restore(snapshot)
+            self._sessions[strategy_version_id] = session
         signal_dates = tuple(
             str(date)
             for date in session.scheduled_dates(
@@ -184,54 +273,71 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
         )
         if not signal_dates:
             return None
-        signal_date = signal_dates[-1]
-        data_view = self.data_view_factory(signal_date, as_of_time)
-        decision = session.evaluate(
-            StrategyDecisionContext(
-                signal_date=signal_date,
-                data_view=data_view,
-                previous_target_weights=dict(previous_state.target_weights),
-            )
-        )
-        if decision.action is DecisionKind.INVALID:
-            raise ProductionAdapterError(
-                f"formal strategy decision invalid: {decision.reason_code}"
-            )
-        if decision.action is DecisionKind.HOLD_TARGETS:
-            targets = tuple(previous_state.target_weights)
-            cash_weight = previous_state.cash_weight
-        else:
-            targets = tuple(sorted((str(code), float(weight)) for code, weight in decision.target_weights.items()))
-            cash_weight = float(decision.cash_weight)
-        if not math.isfinite(cash_weight) or cash_weight < 0:
-            raise ProductionAdapterError("formal strategy returned invalid cash weight")
-        expected_execution_date = next(
-            (str(date) for date in calendar if str(date) > signal_date),
-            signal_date,
-        )
-        diagnostics = dict(decision.diagnostics)
-        raw_signal = {
-            "decision_id": decision.decision_id,
-            "action": decision.action.value,
-            "reason_code": decision.reason_code,
-            "diagnostics": diagnostics,
-            "strategy_identity": self.strategy_identity,
-            "rule_identity": self.rule_identity,
-        }
-        return ScheduledSignal(
-            strategy_version_id=strategy_version_id,
-            signal_date=signal_date,
-            data_available_at=getattr(data_view, "available_at", as_of_time),
-            snapshot_fingerprint=_snapshot_fingerprint(
-                self.strategy_binding, data_view, signal_date
-            ),
-            raw_signal=raw_signal,
-            selected_clusters=tuple(diagnostics.get("selected_clusters", ())),
-            target_weights=targets,
-            target_change_reasons=(decision.reason_code,) if decision.reason_code else (),
-            expected_execution_date=expected_execution_date,
-            cash_weight=cash_weight,
-        )
+        evaluated = self._evaluated_signal_dates.setdefault(strategy_version_id, set())
+        pending_signal_dates = [date for date in signal_dates if date not in evaluated]
+        if pending_signal_dates:
+            previous_targets = dict(previous_state.target_weights)
+            previous_cash_weight = previous_state.cash_weight
+            for signal_date in pending_signal_dates:
+                data_view = self.data_view_factory(signal_date, as_of_time)
+                decision = session.evaluate(
+                    StrategyDecisionContext(
+                        signal_date=signal_date,
+                        data_view=data_view,
+                        previous_target_weights=previous_targets,
+                    )
+                )
+                if decision.action is DecisionKind.INVALID:
+                    raise ProductionAdapterError(
+                        f"formal strategy decision invalid: {decision.reason_code}"
+                    )
+                if decision.action is DecisionKind.HOLD_TARGETS:
+                    targets = tuple(sorted(previous_targets.items()))
+                    cash_weight = previous_cash_weight
+                else:
+                    targets = tuple(sorted((str(code), float(weight)) for code, weight in decision.target_weights.items()))
+                    cash_weight = float(decision.cash_weight)
+                if not math.isfinite(cash_weight) or cash_weight < 0:
+                    raise ProductionAdapterError("formal strategy returned invalid cash weight")
+                expected_execution_date = next(
+                    (str(date) for date in calendar if str(date) > signal_date),
+                    signal_date,
+                )
+                diagnostics = dict(decision.diagnostics)
+                raw_signal = {
+                    "decision_id": decision.decision_id,
+                    "action": decision.action.value,
+                    "reason_code": decision.reason_code,
+                    "diagnostics": diagnostics,
+                    "strategy_identity": self.strategy_identity,
+                    "rule_identity": self.rule_identity,
+                }
+                self._signals[(strategy_version_id, signal_date)] = ScheduledSignal(
+                    strategy_version_id=strategy_version_id,
+                    signal_date=signal_date,
+                    data_available_at=getattr(data_view, "available_at", as_of_time),
+                    snapshot_fingerprint=_snapshot_fingerprint(
+                        self.strategy_binding, data_view, signal_date
+                    ),
+                    raw_signal=raw_signal,
+                    selected_clusters=tuple(diagnostics.get("selected_clusters", ())),
+                    target_weights=targets,
+                    target_change_reasons=(decision.reason_code,) if decision.reason_code else (),
+                    expected_execution_date=expected_execution_date,
+                    cash_weight=cash_weight,
+                )
+                evaluated.add(signal_date)
+                previous_targets = dict(targets)
+                previous_cash_weight = cash_weight
+            snapshotter = getattr(session, "to_snapshot", None)
+            if callable(snapshotter):
+                snapshot = snapshotter()
+                if not isinstance(snapshot, Mapping):
+                    raise ProductionAdapterError(
+                        "formal strategy session snapshot must be a mapping"
+                    )
+                store.strategy_session_snapshots[strategy_version_id] = dict(snapshot)
+        return self._signals.get((strategy_version_id, signal_dates[-1]))
 
 
 class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
@@ -258,9 +364,46 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
         market_data: MarketDataForExecution,
         execution_as_of_time: datetime,
     ) -> tuple[tuple[ShadowExecutionAttempt, ...], tuple[ShadowFill, ...]]:
+        facts = self.execute_formal(
+            decision=decision,
+            orders=orders,
+            previous_state=ShadowAccountState(
+                strategy_version_id=decision.strategy_version_id,
+                as_of_time=decision.as_of_time,
+                cash=decision.previous_cash,
+                positions=(),
+                target_weights=decision.previous_targets,
+                residual_orders=(),
+                shadow_ideal_nav=decision.previous_nav,
+                shadow_executable_nav=decision.previous_nav,
+                accounting_contract_version=decision.accounting_contract_version,
+                completed_rebalance_cycles=0,
+            ),
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+        )
+        return facts.attempts, facts.fills
+
+    def execute_formal(
+        self,
+        *,
+        decision: ShadowDecision,
+        orders: tuple[object, ...],
+        previous_state: ShadowAccountState,
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowExecutionFacts:
         request = self.request_factory(
             decision=decision,
             orders=orders,
+            previous_state=previous_state,
+            initial_state=(
+                _restore_native_state(
+                    previous_state.execution_state
+                    if previous_state.execution_state is not None
+                    else previous_state.execution_state_snapshot
+                )
+            ),
             market_data=market_data,
             execution_as_of_time=execution_as_of_time,
             strategy_identity=self.strategy_identity,
@@ -308,7 +451,11 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
                     explicit_cost=float(trade.commission + trade.explicit_fee),
                 )
             )
-        return tuple(attempts), tuple(fills)
+        return ShadowExecutionFacts(
+            attempts=tuple(attempts),
+            fills=tuple(fills),
+            execution_state=getattr(native_result, "state", None),
+        )
 
 
 class ProductionShadowAccountingAdapter:
@@ -323,11 +470,58 @@ class ProductionShadowAccountingAdapter:
         market_data: MarketDataForExecution,
         execution_as_of_time: datetime,
     ) -> ShadowAccountState:
+        return self._apply_with_native_state(
+            decision=decision,
+            previous_state=previous_state,
+            fills=fills,
+            execution_state=None,
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+            require_open_prices=False,
+        )
+
+    def apply_formal(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        execution_state: object | None,
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+    ) -> ShadowAccountState:
+        return self._apply_with_native_state(
+            decision=decision,
+            previous_state=previous_state,
+            fills=fills,
+            execution_state=execution_state,
+            market_data=market_data,
+            execution_as_of_time=execution_as_of_time,
+            require_open_prices=True,
+        )
+
+    def _apply_with_native_state(
+        self,
+        *,
+        decision: ShadowDecision,
+        previous_state: ShadowAccountState,
+        fills: tuple[ShadowFill, ...],
+        execution_state: object | None,
+        market_data: MarketDataForExecution,
+        execution_as_of_time: datetime,
+        require_open_prices: bool,
+    ) -> ShadowAccountState:
         prices = dict(market_data.prices)
         accounting_symbols = {
             symbol for symbol, _quantity in previous_state.positions
         }
         accounting_symbols.update(fill.symbol for fill in fills)
+        corporate_actions = _corporate_actions_for_accounting(
+            previous_state=previous_state,
+            execution_state=execution_state,
+            market_data=market_data,
+        )
+        accounting_symbols.update(action.symbol for action in corporate_actions)
         missing_symbols = sorted(
             symbol for symbol in accounting_symbols if symbol not in prices
         )
@@ -336,16 +530,43 @@ class ProductionShadowAccountingAdapter:
                 "market data price is required for accounting symbols: "
                 + ", ".join(missing_symbols)
             )
-        quantities = {symbol: float(quantity) for symbol, quantity in previous_state.positions}
-        for fill in fills:
-            quantities[fill.symbol] = quantities.get(fill.symbol, 0.0) + fill.quantity
+        prior_prices = dict(previous_state.valuation_prices)
+        prior_prices.update(dict(market_data.prior_close_prices))
+        missing_begin_prices = sorted(
+            symbol for symbol, _quantity in previous_state.positions
+            if symbol not in prior_prices
+        )
+        if missing_begin_prices:
+            raise ProductionAdapterError(
+                "previous valuation price is required for accounting symbols: "
+                + ", ".join(missing_begin_prices)
+            )
+        open_prices = dict(market_data.open_prices)
+        missing_open_prices = sorted(
+            symbol for symbol in accounting_symbols if symbol not in open_prices
+        )
+        if require_open_prices and missing_open_prices:
+            raise ProductionAdapterError(
+                "open price is required for accounting symbols: "
+                + ", ".join(missing_open_prices)
+            )
+        native_positions = _state_value(execution_state, "positions")
+        if native_positions is not None:
+            quantities = {
+                str(symbol): float(position.get("size", 0.0))
+                for symbol, position in native_positions.items()
+            }
+        else:
+            quantities = {symbol: float(quantity) for symbol, quantity in previous_state.positions}
+            for fill in fills:
+                quantities[fill.symbol] = quantities.get(fill.symbol, 0.0) + fill.quantity
         end_positions = tuple(
             Position(symbol, quantity, prices[symbol])
             for symbol, quantity in sorted(quantities.items())
             if abs(quantity) > 1e-12
         )
         begin_positions = tuple(
-            Position(symbol, quantity, prices[symbol])
+            Position(symbol, quantity, prior_prices[symbol])
             for symbol, quantity in sorted(previous_state.positions)
         )
         accounting = compute_accounting_day(
@@ -354,8 +575,13 @@ class ProductionShadowAccountingAdapter:
                 begin_positions=begin_positions,
                 end_positions=end_positions,
                 prices={
-                    symbol: PricePoint(prior_close=None, open_price=None, close_price=price)
+                    symbol: PricePoint(
+                        prior_close=prior_prices.get(symbol),
+                        open_price=open_prices.get(symbol),
+                        close_price=price,
+                    )
                     for symbol, price in prices.items()
+                    if symbol in accounting_symbols
                 },
                 fills=tuple(
                     Fill(
@@ -366,6 +592,7 @@ class ProductionShadowAccountingAdapter:
                     )
                     for fill in fills
                 ),
+                corporate_actions=corporate_actions,
             )
         )
         if (
@@ -374,20 +601,42 @@ class ProductionShadowAccountingAdapter:
             or accounting.ending_nav <= 0
         ):
             raise ProductionAdapterError("shared accounting result is not publishable")
+        native_cash = _state_value(execution_state, "cash")
+        if native_cash is not None and not math.isclose(
+            accounting.ending_cash,
+            float(native_cash),
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ):
+            raise ProductionAdapterError("shared accounting cash does not match native execution state")
         cash_weight = accounting.ending_cash / accounting.ending_nav
+        residual_orders = previous_state.residual_orders
+        if execution_state is not None:
+            residual_orders = tuple(
+                (str(order["ts_code"]), float(order.get("remaining", 0.0)))
+                for order in (_state_value(execution_state, "active_orders", ()) or ())
+                if float(order.get("remaining", 0.0)) > 0
+            )
         return ShadowAccountState(
             strategy_version_id=decision.strategy_version_id,
             as_of_time=execution_as_of_time,
             cash=accounting.ending_cash,
             positions=tuple((position.symbol, position.quantity) for position in end_positions),
             target_weights=decision.new_targets,
-            residual_orders=previous_state.residual_orders,
+            residual_orders=residual_orders,
             shadow_ideal_nav=market_data.ideal_nav,
             shadow_executable_nav=accounting.ending_nav,
             accounting_contract_version=accounting.accounting_contract_version,
             completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
             cash_weight=cash_weight,
             daily_accounting_event_order=accounting.daily_accounting_event_order,
+            valuation_prices=tuple(
+                (position.symbol, prices[position.symbol])
+                for position in end_positions
+                if position.symbol in prices and abs(position.quantity) > 1e-12
+            ),
+            execution_state=execution_state,
+            execution_state_snapshot=_state_snapshot(execution_state),
         )
 
 

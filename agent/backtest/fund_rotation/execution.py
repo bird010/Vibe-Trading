@@ -57,6 +57,8 @@ class PipelineResult:
     strategy_metrics: dict[str, float] = field(default_factory=dict)
     benchmark_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
     robustness: dict[str, object] = field(default_factory=dict)
+    quality_status: str = "VALID"
+    execution_diagnostics: dict[str, object] = field(default_factory=dict)
 
     # Metadata
     num_weeks: int = 0

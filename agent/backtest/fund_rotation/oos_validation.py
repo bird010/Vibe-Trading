@@ -177,8 +177,76 @@ class OOSQualificationPolicySpec:
             "require_non_cluster_baseline": self.require_non_cluster_baseline,
         }
 
+    def to_formal_policy(self):
+        """Expose OOS gates through the shared Forward qualification contract."""
+        from src.stockpred.fund_rotation.forward_validation import (
+            GateSpec,
+            QualificationPolicy as ForwardQualificationPolicy,
+        )
+
+        hard_gates = [
+            GateSpec(
+                gate_id="OOS_MINIMUM_WEEKS",
+                metric_name="oos_weeks",
+                formula="count(split_policy.oos_weeks)",
+                evaluation_scope="sealed_oos",
+                threshold=self.min_oos_weeks,
+                comparison_operator=">=",
+                missing_data_policy="FAIL_CLOSED",
+                evidence_artifact="split_manifest.json",
+            ),
+            GateSpec(
+                gate_id="OOS_MINIMUM_FRACTION",
+                metric_name="oos_fraction",
+                formula="len(oos_weeks) / total_weeks",
+                evaluation_scope="sealed_oos",
+                threshold=self.min_oos_fraction,
+                comparison_operator=">=",
+                missing_data_policy="FAIL_CLOSED",
+                evidence_artifact="split_manifest.json",
+            ),
+        ]
+        if self.require_non_cluster_baseline:
+            hard_gates.append(
+                GateSpec(
+                    gate_id="FORMAL_ALPHA_BASELINE_REQUIRED",
+                    metric_name="formal_non_cluster_baseline",
+                    formula="count(completed_formal_non_cluster_baselines)",
+                    evaluation_scope="sealed_oos",
+                    threshold=1,
+                    comparison_operator=">=",
+                    missing_data_policy="FAIL_CLOSED",
+                    evidence_artifact="oos_evidence_table.csv",
+                )
+            )
+        return ForwardQualificationPolicy(
+            policy_id="fund-rotation-oos-qualification-v1",
+            policy_hash="",
+            target_transition="QUALIFIED_OOS_EVIDENCE",
+            hard_gates=tuple(hard_gates),
+            warning_gates=(),
+            frozen_at=datetime.min,
+        )
+
 
 QualificationPolicy = OOSQualificationPolicySpec
+
+
+def _formal_gate_passes(gate: Any, metrics: Mapping[str, Any]) -> bool:
+    value = metrics.get(gate.metric_name)
+    if gate.comparison_operator == ">=":
+        return value >= gate.threshold
+    if gate.comparison_operator == ">":
+        return value > gate.threshold
+    if gate.comparison_operator == "<=":
+        return value <= gate.threshold
+    if gate.comparison_operator == "<":
+        return value < gate.threshold
+    if gate.comparison_operator == "==":
+        return value == gate.threshold
+    if gate.comparison_operator == "!=":
+        return value != gate.threshold
+    raise ValueError(f"unsupported qualification gate operator: {gate.comparison_operator}")
 
 
 @dataclass(frozen=True)
@@ -329,11 +397,24 @@ class TemporalSplitPolicy:
     def total_weeks(self) -> int:
         return len(self.train_weeks) + len(self.validation_weeks) + len(self.oos_weeks)
 
-    def has_qualified_oos(self, qualification_policy: OOSQualificationPolicySpec | None = None) -> bool:
+    def has_qualified_oos(
+        self,
+        qualification_policy: OOSQualificationPolicySpec | None = None,
+        *,
+        formal_metrics: Mapping[str, Any] | None = None,
+    ) -> bool:
         policy = qualification_policy or OOSQualificationPolicySpec()
-        return (
-            len(self.oos_weeks) >= policy.min_oos_weeks
-            and len(self.oos_weeks) / self.total_weeks >= policy.min_oos_fraction
+        metrics = {
+            "oos_weeks": len(self.oos_weeks),
+            "oos_fraction": len(self.oos_weeks) / self.total_weeks,
+        }
+        metrics.update(dict(formal_metrics or {}))
+        formal = policy.to_formal_policy()
+        if any(gate.metric_name not in metrics for gate in formal.hard_gates):
+            return False
+        return all(
+            _formal_gate_passes(gate, metrics)
+            for gate in formal.hard_gates
         )
 
     def oos_qualification_label(self, qualification_policy: OOSQualificationPolicySpec | None = None) -> str:
@@ -745,23 +826,31 @@ def require_qualified_oos_evidence(
     for variant in experiment.candidate_variants:
         variant.require_formal_identity()
     policy = qualification_policy or OOSQualificationPolicySpec()
-    label = experiment.split_policy.require_qualified_oos_evidence(policy)
-    if not policy.require_non_cluster_baseline:
-        return label
-
     baseline_results = tuple(non_cluster_baseline_results or ())
-    if not baseline_results:
+    baseline_count = 0
+    if policy.require_non_cluster_baseline and not baseline_results:
         raise ValueError("QUALIFIED_OOS_EVIDENCE requires at least one completed non-cluster baseline")
 
-    for result in baseline_results:
-        normalized_result = _normalize_formal_baseline_contract_fields(result)
-        if not _is_formal_non_cluster_baseline_result(normalized_result):
-            continue
-        if not _same_oos_contract_identity(normalized_result, experiment):
-            continue
-        return label
+    if policy.require_non_cluster_baseline:
+        for result in baseline_results:
+            normalized_result = _normalize_formal_baseline_contract_fields(result)
+            if not _is_formal_non_cluster_baseline_result(normalized_result):
+                continue
+            if not _same_oos_contract_identity(normalized_result, experiment):
+                continue
+            baseline_count += 1
+        if not baseline_count:
+            raise ValueError("QUALIFIED_OOS_EVIDENCE requires a formal non-cluster baseline completed under the same OOS contract")
 
-    raise ValueError("QUALIFIED_OOS_EVIDENCE requires a formal non-cluster baseline completed under the same OOS contract")
+    formal_metrics = {
+        "formal_non_cluster_baseline": baseline_count,
+    }
+    if not experiment.split_policy.has_qualified_oos(
+        policy,
+        formal_metrics=formal_metrics,
+    ):
+        raise ValueError("OOS split cannot be marked QUALIFIED_OOS_EVIDENCE")
+    return QUALIFIED_OOS_EVIDENCE
 
 
 def _is_formal_non_cluster_baseline_result(result: Mapping[str, Any]) -> bool:
