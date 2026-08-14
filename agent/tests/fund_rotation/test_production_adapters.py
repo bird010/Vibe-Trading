@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -106,8 +108,22 @@ class _Session:
 
 
 class _StatefulSession(_Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.evaluation_calls = 0
+
     def scheduled_dates(self, calendar, decision_start_date, evaluation_end_date):
         return tuple(date for date in calendar if date <= evaluation_end_date)
+
+    def evaluate(self, context):
+        self.evaluation_calls += 1
+        return super().evaluate(context)
+
+    def to_snapshot(self):
+        return {"evaluated": tuple(self.evaluated)}
+
+    def restore_snapshot(self, snapshot):
+        self.evaluated = list(snapshot.get("evaluated", ()))
 
 
 class _Strategy:
@@ -231,6 +247,49 @@ def test_production_provider_reuses_strategy_session_across_shadow_cycles() -> N
     assert strategy.session.evaluated == ["20260105", "20260106"]
 
 
+def test_production_provider_restores_evaluated_dates_after_process_restart() -> None:
+    store = InMemoryForwardValidationStore(account_states={"sv-1": _state()})
+    first_strategy = _StatefulStrategy()
+    first_provider = ProductionFrozenStrategyDecisionProvider(
+        strategy_binding=_binding(first_strategy),
+        data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
+            signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
+        ),
+        calendar_factory=lambda as_of_time: ("20260105", "20260106"),
+        run_id="shadow-run-1",
+    )
+    first_provider.next_signal(
+        store=store, strategy_version_id="sv-1", as_of_time=datetime(2026, 1, 6, 10, 0)
+    )
+
+    persisted_runtime_state = json.loads(
+        json.dumps(store.export_strategy_runtime_state("sv-1"))
+    )
+    restarted_store = InMemoryForwardValidationStore(
+        account_states=deepcopy(store.account_states),
+    )
+    restarted_store.import_strategy_runtime_state("sv-1", persisted_runtime_state)
+
+    restarted_strategy = _StatefulStrategy()
+    restarted_provider = ProductionFrozenStrategyDecisionProvider(
+        strategy_binding=_binding(restarted_strategy),
+        data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
+            signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
+        ),
+        calendar_factory=lambda as_of_time: ("20260105", "20260106"),
+        run_id="shadow-run-1",
+    )
+    restarted_signal = restarted_provider.next_signal(
+        store=restarted_store,
+        strategy_version_id="sv-1",
+        as_of_time=datetime(2026, 1, 6, 10, 0),
+    )
+
+    assert restarted_signal is not None
+    assert restarted_strategy.session.evaluated == ["20260105", "20260106"]
+    assert restarted_strategy.session.evaluation_calls == 0
+
+
 def test_production_execution_adapter_preserves_native_ledger_ids() -> None:
     parent = ParentOrderRecord(
         order_id="parent-1", decision_id="formal-decision-1", ts_code="ETF_A",
@@ -277,6 +336,101 @@ def test_production_execution_adapter_preserves_native_ledger_ids() -> None:
     assert len(calls) == 1
     assert attempts == (ShadowExecutionAttempt("attempt-1", "sd-1", "ETF_A", 0.1, datetime(2026, 1, 6, 9, 31)),)
     assert fills == (ShadowFill("trade-1", "attempt-1", "ETF_A", 10.0, 10.0, 0.0),)
+
+
+def test_production_execution_adapter_emits_only_native_ledger_delta() -> None:
+    old_parent = ParentOrderRecord(
+        order_id="parent-old", decision_id="formal-decision-0", ts_code="ETF_A",
+        direction=OrderDirection.BUY, created_date="20260105",
+        original_requested_quantity=20, cumulative_filled_quantity=20,
+        remaining_quantity=0, quantity_basis_id="ETF_A:shares:1",
+        status=ParentOrderStatus.FILLED,
+    )
+    new_parent = ParentOrderRecord(
+        order_id="parent-new", decision_id="formal-decision-1", ts_code="ETF_B",
+        direction=OrderDirection.BUY, created_date="20260106",
+        original_requested_quantity=20, cumulative_filled_quantity=20,
+        remaining_quantity=0, quantity_basis_id="ETF_B:shares:1",
+        status=ParentOrderStatus.FILLED,
+    )
+    old_attempt = ExecutionAttemptRecord(
+        attempt_id="attempt-old", order_id="parent-old", attempt_number=1,
+        trade_date="20260105", requested_quantity=10, filled_quantity=10,
+        unfilled_quantity=0, quantity_basis_id="ETF_A:shares:1", raw_price=10,
+        executed_price=10, commission=0, explicit_fee=0, slippage_cost=0,
+        participation_rate=1, status=AttemptStatus.FILLED,
+    )
+    new_attempt = ExecutionAttemptRecord(
+        attempt_id="attempt-new", order_id="parent-new", attempt_number=1,
+        trade_date="20260106", requested_quantity=20, filled_quantity=20,
+        unfilled_quantity=0, quantity_basis_id="ETF_B:shares:1", raw_price=10,
+        executed_price=10, commission=0, explicit_fee=0, slippage_cost=0,
+        participation_rate=1, status=AttemptStatus.FILLED,
+    )
+    retry_attempt = ExecutionAttemptRecord(
+        attempt_id="attempt-retry", order_id="parent-old", attempt_number=2,
+        trade_date="20260106", requested_quantity=10, filled_quantity=10,
+        unfilled_quantity=0, quantity_basis_id="ETF_A:shares:1", raw_price=10,
+        executed_price=10, commission=0, explicit_fee=0, slippage_cost=0,
+        participation_rate=1, status=AttemptStatus.FILLED,
+    )
+    old_trade = ExecutedTradeRecord(
+        trade_id="trade-old", attempt_id="attempt-old", order_id="parent-old",
+        ts_code="ETF_A", direction=OrderDirection.BUY, quantity=10,
+        quantity_basis_id="ETF_A:shares:1", price=10, notional=100,
+        commission=0, explicit_fee=0, slippage_cost=0, trade_date="20260105",
+    )
+    new_trade = ExecutedTradeRecord(
+        trade_id="trade-new", attempt_id="attempt-new", order_id="parent-new",
+        ts_code="ETF_B", direction=OrderDirection.BUY, quantity=20,
+        quantity_basis_id="ETF_B:shares:1", price=10, notional=200,
+        commission=0, explicit_fee=0, slippage_cost=0, trade_date="20260106",
+    )
+    retry_trade = ExecutedTradeRecord(
+        trade_id="trade-retry", attempt_id="attempt-retry", order_id="parent-old",
+        ts_code="ETF_A", direction=OrderDirection.BUY, quantity=10,
+        quantity_basis_id="ETF_A:shares:1", price=10, notional=100,
+        commission=0, explicit_fee=0, slippage_cost=0, trade_date="20260106",
+    )
+    native_result = SimpleNamespace(
+        ledger=ExecutionLedger(
+            (old_parent, new_parent), (old_attempt, retry_attempt, new_attempt),
+            (old_trade, retry_trade, new_trade), (),
+        ),
+        state=SimpleNamespace(),
+    )
+    adapter = ProductionShadowExecutionAdapter(
+        engine=SimpleNamespace(execute=lambda request: native_result),
+        request_factory=lambda **kwargs: kwargs,
+        strategy_identity="strategy-1",
+        rule_identity="rule-1",
+    )
+    previous = replace(
+        _state(),
+        target_weights=(("ETF_B", 0.2),),
+        residual_orders=(("ETF_A", 10.0),),
+        execution_state=SimpleNamespace(
+            parent_orders=({"ts_code": "ETF_A", "target_weight": 0.1},),
+            attempts=({"attempt_id": "attempt-old"},),
+            trades=({"trade_id": "trade-old"},),
+        ),
+    )
+
+    facts = adapter.execute_formal(
+        decision=_decision(),
+        orders=(SimpleNamespace(symbol="ETF_B", target_weight=0.2),),
+        previous_state=previous,
+        market_data=MarketDataForExecution(
+            execution_date="20260106", available_at=datetime(2026, 1, 6, 9, 31),
+            prices=(("ETF_B", 10.0),), ideal_nav=1000.0, executable_nav=1000.0,
+        ),
+        execution_as_of_time=datetime(2026, 1, 6, 9, 31),
+    )
+
+    assert tuple(attempt.attempt_id for attempt in facts.attempts) == (
+        "attempt-retry", "attempt-new"
+    )
+    assert tuple(fill.fill_id for fill in facts.fills) == ("trade-retry", "trade-new")
 
 
 def test_production_adapters_carry_native_state_into_next_accounting_cycle() -> None:

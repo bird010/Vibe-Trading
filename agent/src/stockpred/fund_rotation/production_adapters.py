@@ -153,6 +153,25 @@ def _restore_native_state(state: object | None) -> object | None:
     return state
 
 
+def _native_record_ids(state: object | None, field_name: str, id_name: str) -> set[str]:
+    return {
+        str(_state_value(record, id_name, ""))
+        for record in (_state_value(state, field_name, ()) or ())
+        if str(_state_value(record, id_name, ""))
+    }
+
+
+def _native_parent_target_weights(state: object | None) -> dict[str, float]:
+    return {
+        str(_state_value(parent, "ts_code", "")): float(
+            _state_value(parent, "target_weight", 0.0)
+        )
+        for parent in (_state_value(state, "parent_orders", ()) or ())
+        if str(_state_value(parent, "ts_code", ""))
+        and _state_value(parent, "target_weight", None) is not None
+    }
+
+
 def _corporate_actions_for_accounting(
     *,
     previous_state: ShadowAccountState,
@@ -240,6 +259,9 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
         calendar = tuple(self.calendar_factory(as_of_time))
         if not calendar:
             return None
+        for persisted_signal in store.scheduled_signals:
+            if persisted_signal.strategy_version_id == strategy_version_id:
+                self._signals[(strategy_version_id, persisted_signal.signal_date)] = persisted_signal
         cutoff_date = as_of_time.date().strftime("%Y%m%d")
         eligible_dates = tuple(date for date in calendar if str(date) <= cutoff_date)
         if not eligible_dates:
@@ -253,7 +275,12 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
                 ),
                 _config_for_binding(self.strategy_binding),
             )
-            snapshot = store.strategy_session_snapshots.get(strategy_version_id)
+            persisted_snapshot = store.strategy_session_snapshots.get(strategy_version_id)
+            snapshot = persisted_snapshot
+            if isinstance(persisted_snapshot, Mapping):
+                snapshot = persisted_snapshot.get(
+                    "__session_snapshot__", persisted_snapshot
+                )
             restore = getattr(session, "restore_snapshot", None)
             if snapshot is not None and not callable(restore):
                 raise ProductionAdapterError(
@@ -274,6 +301,12 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
         if not signal_dates:
             return None
         evaluated = self._evaluated_signal_dates.setdefault(strategy_version_id, set())
+        persisted_snapshot = store.strategy_session_snapshots.get(strategy_version_id)
+        if isinstance(persisted_snapshot, Mapping):
+            evaluated.update(
+                str(date)
+                for date in persisted_snapshot.get("__evaluated_signal_dates__", ())
+            )
         pending_signal_dates = [date for date in signal_dates if date not in evaluated]
         if pending_signal_dates:
             previous_targets = dict(previous_state.target_weights)
@@ -326,6 +359,9 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
                     expected_execution_date=expected_execution_date,
                     cash_weight=cash_weight,
                 )
+                store.save_scheduled_signal(
+                    self._signals[(strategy_version_id, signal_date)]
+                )
                 evaluated.add(signal_date)
                 previous_targets = dict(targets)
                 previous_cash_weight = cash_weight
@@ -336,7 +372,13 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
                     raise ProductionAdapterError(
                         "formal strategy session snapshot must be a mapping"
                     )
-                store.strategy_session_snapshots[strategy_version_id] = dict(snapshot)
+                store.save_strategy_session_snapshot(
+                    strategy_version_id,
+                    {
+                        "__session_snapshot__": dict(snapshot),
+                        "__evaluated_signal_dates__": tuple(sorted(evaluated)),
+                    },
+                )
         return self._signals.get((strategy_version_id, signal_dates[-1]))
 
 
@@ -414,10 +456,36 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
         if not isinstance(ledger, ExecutionLedger):
             raise ProductionAdapterError("native execution must return an ExecutionLedger")
 
-        target_by_symbol = {order.symbol: order.target_weight for order in orders}
         parent_by_id = {parent.order_id: parent for parent in ledger.parent_orders}
+        previous_execution_state = (
+            previous_state.execution_state
+            if previous_state.execution_state is not None
+            else previous_state.execution_state_snapshot
+        )
+        target_by_symbol = dict(previous_state.target_weights)
+        target_by_symbol.update(
+            {order.symbol: order.target_weight for order in orders}
+        )
+        historical_targets = _native_parent_target_weights(previous_execution_state)
+        for symbol, _quantity in previous_state.residual_orders:
+            if symbol not in target_by_symbol and symbol in historical_targets:
+                target_by_symbol[symbol] = historical_targets[symbol]
+        previous_attempt_ids = _native_record_ids(
+            previous_execution_state, "attempts", "attempt_id"
+        )
+        previous_trade_ids = _native_record_ids(
+            previous_execution_state, "trades", "trade_id"
+        )
+        delta_attempt_records = tuple(
+            attempt for attempt in ledger.attempts
+            if attempt.attempt_id not in previous_attempt_ids
+        )
+        delta_trade_records = tuple(
+            trade for trade in ledger.trades
+            if trade.trade_id not in previous_trade_ids
+        )
         attempts: list[ShadowExecutionAttempt] = []
-        for attempt in ledger.attempts:
+        for attempt in delta_attempt_records:
             parent = parent_by_id.get(attempt.order_id)
             if parent is None or parent.ts_code not in target_by_symbol:
                 raise ProductionAdapterError("native attempt is not tied to a Shadow order")
@@ -433,7 +501,7 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
 
         attempt_ids = {attempt.attempt_id for attempt in attempts}
         fills: list[ShadowFill] = []
-        for trade in ledger.trades:
+        for trade in delta_trade_records:
             if trade.attempt_id not in attempt_ids:
                 raise ProductionAdapterError("native trade references an unmapped attempt")
             signed_quantity = (

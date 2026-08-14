@@ -168,7 +168,7 @@ class OOSQualificationPolicySpec:
 
     @property
     def policy_hash(self) -> str:
-        return _identity_hash(self)
+        return self.to_formal_policy().policy_hash
 
     def to_identity_dict(self) -> dict[str, Any]:
         return {
@@ -681,6 +681,7 @@ class ResearchExperiment:
     split_policy: TemporalSplitPolicy
     benchmark_policy: BenchmarkPolicy
     qualification_policy_hash: str
+    qualification_policy: Any
     candidate_variants: tuple[VariantSpec, ...]
     sealed_candidate_identity_hashes: tuple[str, ...]
     walk_forward_policy: RollingWalkForwardPolicy | None = None
@@ -690,6 +691,17 @@ class ResearchExperiment:
         object.__setattr__(self, "secondary_metrics", tuple(self.secondary_metrics))
         object.__setattr__(self, "candidate_variants", tuple(self.candidate_variants))
         object.__setattr__(self, "sealed_candidate_identity_hashes", tuple(self.sealed_candidate_identity_hashes))
+        from src.stockpred.fund_rotation.forward_validation import QualificationPolicy
+
+        if not isinstance(self.qualification_policy, QualificationPolicy):
+            raise ValueError(
+                "ResearchExperiment requires the formal QualificationPolicy"
+            )
+        policy_hash = getattr(self.qualification_policy, "policy_hash", None)
+        if not policy_hash or policy_hash != self.qualification_policy_hash:
+            raise ValueError(
+                "ResearchExperiment qualification policy identity does not match"
+            )
         expected_experiment_id = _identity_hash(self.to_identity_dict())
         if self.experiment_id != expected_experiment_id:
             raise ValueError(
@@ -724,10 +736,13 @@ def create_research_experiment(
     candidate_variants: Sequence[VariantSpec],
     walk_forward_policy: RollingWalkForwardPolicy | None = None,
 ) -> ResearchExperiment:
+    if not isinstance(qualification_policy, OOSQualificationPolicySpec):
+        raise TypeError("a formal OOSQualificationPolicySpec is required")
     variants = tuple(candidate_variants)
     if not variants:
         raise ValueError("ResearchExperiment requires at least one candidate variant")
     sealed_hashes = tuple(variant.sealed_identity_hash for variant in variants)
+    formal_qualification_policy = qualification_policy.to_formal_policy()
     identity_payload = {
         "hypothesis": hypothesis,
         "primary_metric": primary_metric,
@@ -736,7 +751,7 @@ def create_research_experiment(
         "selection_policy": selection_policy,
         "split_policy": split_policy,
         "benchmark_policy": benchmark_policy,
-        "qualification_policy_hash": qualification_policy.policy_hash,
+        "qualification_policy_hash": formal_qualification_policy.policy_hash,
         "sealed_candidate_identity_hashes": sealed_hashes,
         "walk_forward_policy": walk_forward_policy,
     }
@@ -750,7 +765,8 @@ def create_research_experiment(
         selection_policy=selection_policy,
         split_policy=split_policy,
         benchmark_policy=benchmark_policy,
-        qualification_policy_hash=qualification_policy.policy_hash,
+        qualification_policy_hash=formal_qualification_policy.policy_hash,
+        qualification_policy=formal_qualification_policy,
         candidate_variants=variants,
         sealed_candidate_identity_hashes=sealed_hashes,
         walk_forward_policy=walk_forward_policy,

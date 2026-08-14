@@ -106,6 +106,12 @@ class CorrelationAllMembersSession:
             "week_index": self._week_index,
             "clusters": dict(self._clusters),
             "last_recluster_week": self._last_recluster_week,
+            "cluster_history": list(self._cluster_history),
+            "clustering_cycle_id": (
+                str(self._cluster_history[-1]["week"])
+                if self._cluster_history
+                else "initial"
+            ),
             "selection_state": {
                 "cycle_id": self._selection_state.cycle_id if self._selection_state else None,
                 "holdings": holdings,
@@ -123,6 +129,9 @@ class CorrelationAllMembersSession:
         self._last_recluster_week = int(
             snapshot.get("last_recluster_week", -self._config.recluster_interval_weeks)
         )
+        self._cluster_history = [
+            dict(record) for record in snapshot.get("cluster_history", ())
+        ]
         raw_selection = dict(snapshot.get("selection_state", {}))
         raw_holdings = dict(raw_selection.get("holdings", {}))
         self._selection_state = SelectionState(

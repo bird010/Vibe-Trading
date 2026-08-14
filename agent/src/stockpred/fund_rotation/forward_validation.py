@@ -141,10 +141,19 @@ def build_frozen_strategy_version(
     data_contract_version: str,
     execution_contract_version: str,
     accounting_contract_version: str,
-    qualification_policy_hash: str,
+    qualification_policy: QualificationPolicy,
+    qualification_policy_hash: str | None = None,
     frozen_at: datetime,
     effective_from: datetime,
 ) -> FrozenStrategyVersion:
+    if not isinstance(qualification_policy, QualificationPolicy):
+        raise TypeError("a formal QualificationPolicy is required")
+    if (
+        qualification_policy_hash is not None
+        and qualification_policy_hash != qualification_policy.policy_hash
+    ):
+        raise ValueError("qualification policy hash does not match formal policy")
+    effective_qualification_policy_hash = qualification_policy.policy_hash
     implementation_hash = _sha256(implementation_payload)
     framework_hash = _sha256(framework_payload)
     config_hash = _sha256(config_payload)
@@ -158,7 +167,7 @@ def build_frozen_strategy_version(
         data_contract_version,
         execution_contract_version,
         accounting_contract_version,
-        qualification_policy_hash,
+        effective_qualification_policy_hash,
         effective_from.isoformat(),
     )
     return FrozenStrategyVersion(
@@ -171,7 +180,7 @@ def build_frozen_strategy_version(
         data_contract_version=data_contract_version,
         execution_contract_version=execution_contract_version,
         accounting_contract_version=accounting_contract_version,
-        qualification_policy_hash=qualification_policy_hash,
+        qualification_policy_hash=effective_qualification_policy_hash,
         frozen_at=frozen_at,
         effective_from=effective_from,
     )
@@ -334,6 +343,43 @@ class ScheduledSignal:
     expected_execution_date: str
     cash_weight: float = 0.0
 
+    def to_snapshot(self) -> dict[str, Any]:
+        """Return a JSON-safe scheduled signal for process restart."""
+        return json.loads(json.dumps({
+            "strategy_version_id": self.strategy_version_id,
+            "signal_date": self.signal_date,
+            "data_available_at": self.data_available_at.isoformat(),
+            "snapshot_fingerprint": self.snapshot_fingerprint,
+            "raw_signal": self.raw_signal,
+            "selected_clusters": self.selected_clusters,
+            "target_weights": self.target_weights,
+            "target_change_reasons": self.target_change_reasons,
+            "expected_execution_date": self.expected_execution_date,
+            "cash_weight": self.cash_weight,
+        }, sort_keys=True, default=str))
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any]) -> "ScheduledSignal":
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("scheduled signal snapshot must be a mapping")
+        return cls(
+            strategy_version_id=str(snapshot["strategy_version_id"]),
+            signal_date=str(snapshot["signal_date"]),
+            data_available_at=datetime.fromisoformat(str(snapshot["data_available_at"])),
+            snapshot_fingerprint=str(snapshot["snapshot_fingerprint"]),
+            raw_signal=dict(snapshot.get("raw_signal", {})),
+            selected_clusters=tuple(str(value) for value in snapshot.get("selected_clusters", ())),
+            target_weights=tuple(
+                (str(symbol), float(weight))
+                for symbol, weight in snapshot.get("target_weights", ())
+            ),
+            target_change_reasons=tuple(
+                str(value) for value in snapshot.get("target_change_reasons", ())
+            ),
+            expected_execution_date=str(snapshot["expected_execution_date"]),
+            cash_weight=float(snapshot.get("cash_weight", 0.0)),
+        )
+
 
 @dataclass(frozen=True)
 class ShadowOrder:
@@ -476,6 +522,53 @@ class InMemoryForwardValidationStore:
 
     def set_account_state(self, strategy_version_id: str, state: ShadowAccountState) -> None:
         self.account_states[strategy_version_id] = state
+
+    def save_scheduled_signal(self, signal: ScheduledSignal) -> None:
+        if not any(
+            existing.strategy_version_id == signal.strategy_version_id
+            and existing.signal_date == signal.signal_date
+            for existing in self.scheduled_signals
+        ):
+            self.scheduled_signals.append(signal)
+
+    def save_strategy_session_snapshot(
+        self,
+        strategy_version_id: str,
+        snapshot: Mapping[str, object],
+    ) -> None:
+        self.strategy_session_snapshots[strategy_version_id] = dict(snapshot)
+
+    def export_strategy_runtime_state(self, strategy_version_id: str) -> dict[str, Any]:
+        """Export the restart boundary in a process-independent JSON shape."""
+        snapshot = self.strategy_session_snapshots.get(strategy_version_id)
+        return {
+            "strategy_session_snapshot": (
+                json.loads(json.dumps(snapshot, sort_keys=True, default=str))
+                if snapshot is not None
+                else None
+            ),
+            "scheduled_signals": [
+                signal.to_snapshot()
+                for signal in self.scheduled_signals
+                if signal.strategy_version_id == strategy_version_id
+            ],
+        }
+
+    def import_strategy_runtime_state(
+        self,
+        strategy_version_id: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(payload, Mapping):
+            raise TypeError("strategy runtime state must be a mapping")
+        snapshot = payload.get("strategy_session_snapshot")
+        if snapshot is not None:
+            self.save_strategy_session_snapshot(strategy_version_id, dict(snapshot))
+        for raw_signal in payload.get("scheduled_signals", ()):
+            signal = ScheduledSignal.from_snapshot(raw_signal)
+            if signal.strategy_version_id != strategy_version_id:
+                raise ValueError("scheduled signal strategy version does not match runtime state")
+            self.save_scheduled_signal(signal)
 
     def schedule_signal(
         self,

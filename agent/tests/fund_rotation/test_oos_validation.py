@@ -292,6 +292,20 @@ def test_oos_policy_exposes_the_formal_gate_contract_used_by_forward_validation(
     assert formal.target_transition == "QUALIFIED_OOS_EVIDENCE"
 
 
+def test_oos_policy_identity_is_the_formal_policy_identity() -> None:
+    policy = QualificationPolicy(require_non_cluster_baseline=True)
+
+    assert policy.policy_hash == policy.to_formal_policy().policy_hash
+
+
+def test_research_experiment_requires_formal_oos_policy_spec() -> None:
+    kwargs = _qualified_experiment_kwargs()
+    kwargs["qualification_policy"] = object()
+
+    with pytest.raises(TypeError, match="formal OOSQualificationPolicySpec"):
+        create_research_experiment(**kwargs)
+
+
 def test_oos_gate_does_not_skip_missing_formal_baseline_metric() -> None:
     weeks = _weeks(312)
     split = TemporalSplitPolicy(
@@ -821,6 +835,7 @@ def test_identity_inputs_are_deep_frozen_and_identity_verification_catches_drift
             split_policy=experiment.split_policy,
             benchmark_policy=experiment.benchmark_policy,
             qualification_policy_hash=experiment.qualification_policy_hash,
+            qualification_policy=experiment.qualification_policy,
             candidate_variants=experiment.candidate_variants,
             sealed_candidate_identity_hashes=experiment.sealed_candidate_identity_hashes,
             walk_forward_policy=experiment.walk_forward_policy,

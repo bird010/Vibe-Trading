@@ -134,6 +134,7 @@ class _ParentState:
     original_requested_quantity: int
     quantity_basis: float
     lot_size: int
+    target_weight: float = 0.0
     cumulative_filled_quantity: int = 0
     remaining_quantity: int = 0
     replacement_of_order_id: str = ""
@@ -205,6 +206,7 @@ class _ParentState:
             "cumulative_filled_quantity": self.cumulative_filled_quantity,
             "remaining_quantity": self.remaining_quantity,
             "quantity_basis": self.quantity_basis,
+            "target_weight": self.target_weight,
             "lot_size": self.lot_size,
             "replacement_of_order_id": self.replacement_of_order_id,
             "replacement_chain_id": self.replacement_chain_id,
@@ -230,6 +232,7 @@ class _ParentState:
             original_requested_quantity=int(data["original_requested_quantity"]),
             quantity_basis=float(data.get("quantity_basis", 1.0) or 1.0),
             lot_size=int(data.get("lot_size", 100) or 100),
+            target_weight=float(data.get("target_weight", 0.0) or 0.0),
             replacement_of_order_id=str(data.get("replacement_of_order_id", "")),
             replacement_chain_id=str(data.get("replacement_chain_id", "")),
             corporate_action_id=str(data.get("corporate_action_id", "")),
@@ -430,6 +433,7 @@ class FundRotationExecutionEngine:
                         original_requested_quantity=abs(int(delta)),
                         quantity_basis=1.0,
                         lot_size=creation_rules[code].lot_size,
+                        target_weight=float(targets.get(code, 0.0)),
                         rule_version=provenance.rule_version,
                         source_record_id=provenance.source_record_id,
                         rule_knowledge_cutoff=provenance.knowledge_cutoff,
@@ -1059,6 +1063,7 @@ def _apply_corporate_actions(
                         original_requested_quantity=replacement_requested,
                         quantity_basis=old_parent.quantity_basis * scale,
                         lot_size=old_parent.lot_size,
+                        target_weight=old_parent.target_weight,
                         replacement_of_order_id=old_parent_id,
                         replacement_chain_id=(
                             old_parent.replacement_chain_id or old_parent_id

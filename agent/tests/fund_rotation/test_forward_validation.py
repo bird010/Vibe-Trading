@@ -54,7 +54,7 @@ def frozen_version(**overrides) -> FrozenStrategyVersion:
         data_contract_version="pit-data/v1",
         execution_contract_version="shadow-execution/v1",
         accounting_contract_version=ACCOUNTING_CONTRACT_VERSION,
-        qualification_policy_hash="policy-sha",
+        qualification_policy=valid_policy(),
         frozen_at=at("2026-01-01T00:00:00"),
         effective_from=at("2026-01-05T00:00:00"),
     )
@@ -93,6 +93,11 @@ def valid_policy() -> QualificationPolicy:
         ),
         frozen_at=at("2025-12-31T00:00:00"),
     )
+
+
+def test_frozen_strategy_rejects_a_qualification_hash_not_bound_to_policy() -> None:
+    with pytest.raises(ValueError, match="qualification policy hash"):
+        frozen_version(qualification_policy_hash="not-the-policy-hash")
 
 
 def valid_evidence() -> QualificationEvidence:

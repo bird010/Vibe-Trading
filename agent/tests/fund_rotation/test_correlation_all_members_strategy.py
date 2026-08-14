@@ -17,10 +17,25 @@ from backtest.fund_rotation.strategies.correlation_all_members.config import (
 )
 from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
     CorrelationAllMembersStrategy,
+    CorrelationAllMembersSession,
 )
 
 
 class TestConfigContract:
+    def test_strategy_session_snapshot_preserves_cluster_history(self):
+        config = CorrelationAllMembersConfig()
+        session = CorrelationAllMembersSession(config)
+        session._cluster_history.append(
+            {"week": "20260102", "clusters": {"ETF_A": 0}, "num_etfs": 1}
+        )
+
+        snapshot = session.to_snapshot()
+        restored = CorrelationAllMembersSession(config)
+        restored.restore_snapshot(snapshot)
+
+        assert restored._cluster_history == session._cluster_history
+        assert snapshot["cluster_history"] == session._cluster_history
+
     def test_strategy_defaults_mirror_legacy_algorithm_fields(self):
         cfg = CorrelationAllMembersConfig()
         legacy = FundRotationConfig()
