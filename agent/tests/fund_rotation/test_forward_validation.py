@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timezone
 
 import pytest
@@ -26,6 +26,7 @@ from src.stockpred.fund_rotation.forward_validation import (
     ShadowDeploymentStatus,
     ShadowExecutionService,
     ShadowExecutionAttempt,
+    ShadowExecutionFacts,
     ShadowFill,
     ShadowOrder,
     StrategyVersionLifecycle,
@@ -137,11 +138,16 @@ class DeterministicExecutionAdapter:
                 fill_id=f"test-fill:{attempt.attempt_id}",
                 attempt_id=attempt.attempt_id,
                 symbol=attempt.symbol,
-                quantity=round((market_data.executable_nav * attempt.target_weight) / prices[attempt.symbol], 6),
-                price=prices[attempt.symbol],
+                quantity=round(
+                    (market_data.executable_nav * attempt.target_weight)
+                    / prices.get(attempt.symbol, 1.0),
+                    6,
+                ),
+                price=prices.get(attempt.symbol, 1.0),
                 explicit_cost=0.25,
             )
             for attempt in attempts
+            if abs(attempt.target_weight) > 1e-12
         )
         return attempts, fills
 
@@ -166,7 +172,13 @@ class DeterministicAccountingAdapter:
             shadow_ideal_nav=market_data.ideal_nav,
             shadow_executable_nav=market_data.executable_nav,
             accounting_contract_version=decision.accounting_contract_version,
-            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + (
+                0
+                if previous_state.residual_orders
+                and previous_state.as_of_time.strftime("%Y%m%d")
+                >= decision.expected_execution_date.replace("-", "")
+                else 1
+            ),
         )
 
 
@@ -463,6 +475,31 @@ def test_shadow_target_contract_can_represent_cash_weight():
     assert result.decision.new_cash_weight == pytest.approx(0.6)
 
 
+def test_shadow_order_sealing_emits_zero_weight_order_for_removed_asset() -> None:
+    store, version = seeded_store()
+    store.schedule_signal(
+        strategy_version_id=version.strategy_version_id,
+        signal_date="2026-01-05",
+        data_available_at=at("2026-01-05T09:00:00"),
+        snapshot_fingerprint="snapshot-transition",
+        raw_signal={"momentum": {"NEW": 1.0}},
+        selected_clusters=("defensive",),
+        target_weights=(("NEW", 1.0),),
+        target_change_reasons=("rotation",),
+        expected_execution_date="2026-01-06",
+    )
+
+    result = ShadowDecisionService(store).seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    )
+
+    assert tuple((order.symbol, order.target_weight) for order in result.orders) == (
+        ("OLD", 0.0),
+        ("NEW", 1.0),
+    )
+
+
 def test_decision_service_rejects_seal_after_execution_price_is_visible() -> None:
     store, version = seeded_store()
     schedule_ready_signal(store, version)
@@ -559,7 +596,7 @@ def test_decision_idempotency_key_ignores_scheduler_invocation_time_and_late_cut
     assert sealed.decision.status == ShadowDecisionStatus.SEALED
     assert sealed.decision.decision_idempotency_key == f"decision:{version.strategy_version_id}:2026-01-05"
     assert len(store.decisions) == 1
-    assert len(store.orders) == 2
+    assert len(store.orders) == 3
     assert len(store.corrections) == 1
     assert store.corrections[0].shadow_decision_id == sealed.decision.shadow_decision_id
     assert store.corrections[0].correction_type == "CUTOFF_REVISION"
@@ -607,7 +644,7 @@ def test_execution_waits_for_market_data_then_uses_separate_idempotency_and_dual
     assert executed.status == "EXECUTED"
     assert executed.execution_idempotency_key.startswith("execution:")
     assert executed.execution_idempotency_key != decision.decision_idempotency_key
-    assert len(executed.attempts) == 2
+    assert len(executed.attempts) == 3
     assert all(fill.explicit_cost > 0 for fill in executed.fills)
     assert executed.account_state.shadow_ideal_nav == 1_020.0
     assert executed.account_state.shadow_executable_nav == 1_015.0
@@ -733,6 +770,113 @@ def test_shadow_account_state_is_continuous_across_decision_cycles() -> None:
     assert second_decision.previous_targets == (("ETF_A", 0.6), ("ETF_B", 0.4))
     assert second_decision.previous_cash == 0.0
     assert second_decision.accounting_contract_version == ACCOUNTING_CONTRACT_VERSION
+
+
+class ResidualRetryExecutionAdapter:
+    def __init__(self) -> None:
+        self.execution_dates: list[str] = []
+
+    def execute_formal(self, *, decision, orders, previous_state, market_data, execution_as_of_time):
+        self.execution_dates.append(market_data.execution_date)
+        attempt_number = len(self.execution_dates)
+        attempt = ShadowExecutionAttempt(
+            attempt_id=f"retry-attempt-{attempt_number}",
+            shadow_decision_id=decision.shadow_decision_id,
+            symbol="ETF_A",
+            target_weight=0.6,
+            execution_as_of_time=execution_as_of_time,
+        )
+        fill = ShadowFill(
+            fill_id=f"retry-fill-{attempt_number}",
+            attempt_id=attempt.attempt_id,
+            symbol="ETF_A",
+            quantity=3.0 if attempt_number == 1 else 7.0,
+            price=10.0,
+            explicit_cost=0.0,
+        )
+        return ShadowExecutionFacts(attempts=(attempt,), fills=(fill,))
+
+
+class ResidualRetryAccountingAdapter:
+    def apply_formal(self, *, decision, previous_state, fills, execution_state, market_data, execution_as_of_time):
+        return ShadowAccountState(
+            strategy_version_id=decision.strategy_version_id,
+            as_of_time=execution_as_of_time,
+            cash=0.0,
+            positions=(("ETF_A", sum(fill.quantity for fill in fills)),),
+            target_weights=decision.new_targets,
+            residual_orders=() if market_data.execution_date == "2026-01-07" else (("ETF_A", 7.0),),
+            shadow_ideal_nav=1000.0,
+            shadow_executable_nav=1000.0,
+            accounting_contract_version=decision.accounting_contract_version,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + (
+                0
+                if previous_state.residual_orders
+                and previous_state.as_of_time.strftime("%Y%m%d")
+                >= decision.expected_execution_date.replace("-", "")
+                else 1
+            ),
+            cash_weight=0.0,
+        )
+
+
+def test_shadow_execution_retries_residual_parent_on_next_market_date() -> None:
+    store, version = seeded_store()
+    schedule_ready_signal(store, version)
+    decision = ShadowDecisionService(store).seal_scheduled_decision(
+        version.strategy_version_id,
+        as_of_time=at("2026-01-05T09:30:00"),
+    ).decision
+    store.set_account_state(
+        version.strategy_version_id,
+        replace(store.account_states[version.strategy_version_id], residual_orders=()),
+    )
+    store.add_market_data(
+        MarketDataForExecution(
+            execution_date="2026-01-06",
+            available_at=at("2026-01-06T09:31:00"),
+            prices=(("ETF_A", 10.0), ("ETF_B", 20.0)),
+            ideal_nav=1000.0,
+            executable_nav=1000.0,
+        )
+    )
+    store.add_market_data(
+        MarketDataForExecution(
+            execution_date="2026-01-07",
+            available_at=at("2026-01-07T09:31:00"),
+            prices=(("ETF_A", 10.0), ("ETF_B", 20.0)),
+            ideal_nav=1000.0,
+            executable_nav=1000.0,
+        )
+    )
+    execution_adapter = ResidualRetryExecutionAdapter()
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=execution_adapter,
+        accounting_adapter=ResidualRetryAccountingAdapter(),
+    )
+
+    first = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+    retry = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-07T09:31:00"),
+    )
+    again = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-08T09:31:00"),
+    )
+
+    assert first.status == "EXECUTED"
+    assert retry.status == "EXECUTED"
+    assert execution_adapter.execution_dates == ["2026-01-06", "2026-01-07"]
+    assert retry.execution_idempotency_key == f"execution:{decision.shadow_decision_id}:2026-01-07"
+    assert retry.account_state.residual_orders == ()
+    assert retry.account_state.completed_rebalance_cycles == first.account_state.completed_rebalance_cycles
+    assert again.execution_idempotency_key == retry.execution_idempotency_key
+    assert again.account_state == retry.account_state
 
 
 def execution_ready_store() -> tuple[InMemoryForwardValidationStore, FrozenStrategyVersion, ShadowDecision]:

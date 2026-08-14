@@ -48,6 +48,10 @@ from backtest.fund_rotation.native_execution import (
     NativeExecutionResult,
 )
 from backtest.fund_rotation.pit_universe import PITQueryMode
+from backtest.fund_rotation.oos_validation import (
+    DEFAULT_BENCHMARK_POLICY,
+    BenchmarkPolicy,
+)
 from backtest.fund_rotation.returns import compute_adjusted_close
 
 if TYPE_CHECKING:
@@ -135,6 +139,7 @@ class FundRotationBacktestRunner:
         market_rule_mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
         pit_universe_resolver: object | None = None,
         strict_pit_benchmarks: bool = False,
+        benchmark_policy: BenchmarkPolicy | None = None,
         run_id: str | None = None,
     ) -> None:
         self._fund_daily = fund_daily
@@ -148,8 +153,14 @@ class FundRotationBacktestRunner:
         self._market_rule_mode = market_rule_mode
         self._pit_universe_resolver = pit_universe_resolver
         self._strict_pit_benchmarks = strict_pit_benchmarks
+        if strict_pit_benchmarks and benchmark_policy is None:
+            raise ValueError("formal benchmarks require an explicit BenchmarkPolicy")
+        if strict_pit_benchmarks and pit_universe_resolver is None:
+            raise ValueError("formal benchmarks require an explicit PIT universe resolver")
+        self._benchmark_policy = benchmark_policy or DEFAULT_BENCHMARK_POLICY
         self._run_id = run_id or uuid.uuid4().hex[:12]
         self._benchmark_quality_status = "VALID"
+        self._benchmark_snapshot_version = 0
 
     def run(
         self,
@@ -269,7 +280,13 @@ class FundRotationBacktestRunner:
                 error_message=str(exc),
             )
 
-        fallback_universe = frozenset(str(code) for code in snapshot.universe_codes)
+        fallback_universe = frozenset(
+            str(code)
+            for code in (
+                getattr(snapshot, "historical_candidate_codes", ())
+                or snapshot.universe_codes
+            )
+        )
         universe_diagnostics_by_date: dict[str, dict[str, Any]] = {}
         universe_codes_by_date: dict[str, frozenset[str]] = {}
         pit_quality_status = "VERIFIED"
@@ -348,6 +365,17 @@ class FundRotationBacktestRunner:
                 requirements,
                 pd.Timestamp(signal_date),
                 universe,
+                pit_universe_lookup=(
+                    lambda historical_date: _resolve_pit_universe_for_signal(
+                        self._pit_universe_resolver,
+                        snapshot=snapshot,
+                        signal_date=str(historical_date),
+                        fallback_universe=fallback_universe,
+                    ).universe
+                    if self._pit_universe_resolver is not None
+                    else universe
+                ),
+                historical_candidate_codes=frozenset(fallback_universe),
             )
             context = StrategyDecisionContext(
                 signal_date=signal_date,
@@ -522,6 +550,7 @@ class FundRotationBacktestRunner:
                 benchmark_evidence.quality_status,
             )
 
+        self._benchmark_snapshot_version = _native_snapshot_version(snapshot)
         benchmark_equity = self._public_benchmarks(
             evaluation_dates,
             execution,
@@ -541,10 +570,17 @@ class FundRotationBacktestRunner:
             periods_per_year=244,
             initial_nav=evaluation.initial_nav,
         )
+        equal_weight_name = str(
+            getattr(
+                self._benchmark_policy,
+                "universe_equal_weight_benchmark",
+                "equal_weight_etf",
+            )
+        )
         strategy_metrics.update(
             _relative_metrics(
                 native_result.executed_equity,
-                benchmark_equity.get("equal_weight_etf"),
+                benchmark_equity.get(equal_weight_name),
             )
         )
 
@@ -557,6 +593,10 @@ class FundRotationBacktestRunner:
             self._benchmark_quality_status,
         )
         execution_diagnostics["benchmark_quality_status"] = self._benchmark_quality_status
+        if self._benchmark_policy is not None:
+            execution_diagnostics["benchmark_policy"] = (
+                self._benchmark_policy.to_identity_dict()
+            )
         try:
             diagnostics = session.finalize()
         except Exception as exc:
@@ -614,8 +654,13 @@ class FundRotationBacktestRunner:
     ) -> dict[str, pd.Series]:
         """Build common daily benchmarks from the same pinned market frames."""
         self._benchmark_quality_status = "VALID"
+        benchmark_code = str(self._benchmark_policy.primary_benchmark)
+        cash_name = str(self._benchmark_policy.cash_benchmark)
+        equal_weight_name = str(
+            self._benchmark_policy.universe_equal_weight_benchmark
+        )
         index = pd.Index(evaluation_dates)
-        cash = pd.Series(1.0, index=index, name="cash")
+        cash = pd.Series(1.0, index=index, name=cash_name)
         adjusted = compute_adjusted_close(
             self._fund_daily,
             self._fund_adj,
@@ -623,9 +668,9 @@ class FundRotationBacktestRunner:
         )
         if adjusted.empty:
             return {
-                "cash": cash,
-                "equal_weight_etf": cash.rename("equal_weight_etf"),
-                "510300.SH": pd.Series(float("nan"), index=index, name="510300.SH"),
+                cash_name: cash,
+                equal_weight_name: cash.rename(equal_weight_name),
+                benchmark_code: pd.Series(float("nan"), index=index, name=benchmark_code),
             }
         adjusted = adjusted.copy()
         adjusted.index = pd.Index([str(value) for value in adjusted.index])
@@ -699,10 +744,9 @@ class FundRotationBacktestRunner:
         equal_weight = pd.Series(
             equal_values,
             index=index,
-            name="equal_weight_etf",
+            name=equal_weight_name,
         )
 
-        benchmark_code = "510300.SH"
         buy_hold = pd.Series(
             float("nan"),
             index=index,
@@ -719,11 +763,69 @@ class FundRotationBacktestRunner:
                     prices / float(first_price) * (1.0 - execution.commission_rate)
                 )
                 buy_hold.name = benchmark_code
+        policy_secondary: dict[str, pd.Series] = {}
+        if self._strict_pit_benchmarks and self._market_rule_resolver is not None:
+            for code in dict.fromkeys(
+                (
+                    benchmark_code,
+                    *self._benchmark_policy.secondary_benchmarks,
+                )
+            ):
+                series = self._execute_native_benchmark(
+                    str(code), evaluation_dates, execution
+                )
+                if str(code) == benchmark_code:
+                    buy_hold = series.rename(benchmark_code)
+                else:
+                    policy_secondary[str(code)] = series.rename(str(code))
         return {
-            "cash": cash,
-            "equal_weight_etf": equal_weight,
+            cash_name: cash,
+            equal_weight_name: equal_weight,
             benchmark_code: buy_hold,
+            **policy_secondary,
         }
+
+    def _execute_native_benchmark(
+        self,
+        code: str,
+        evaluation_dates: list[str],
+        execution: ExecutionConfig,
+    ) -> pd.Series:
+        if self._market_rule_instruments is None or code not in self._market_rule_instruments:
+            raise UnknownExecutionRule(
+                f"UNKNOWN_EXECUTION_RULE: benchmark instrument {code} is missing"
+            )
+        native_config = FundRotationConfig(
+            initial_capital=execution.initial_capital,
+            commission_rate=execution.commission_rate,
+            commission_min=execution.commission_min,
+            other_fee_rate=execution.other_fee_rate,
+            max_participation_rate=execution.max_participation_rate,
+            adv_lookback=execution.adv_lookback,
+            adv_min_observations=execution.adv_min_observations,
+            base_slippage_bps=execution.base_slippage_bps,
+            max_slippage_bps=execution.max_slippage_bps,
+            lot_size=execution.lot_size,
+            start_date=evaluation_dates[0],
+            end_date=evaluation_dates[-1],
+        )
+        request = NativeExecutionRequest(
+            targets={evaluation_dates[0]: {code: 1.0}},
+            evaluation_dates=tuple(evaluation_dates),
+            fund_daily=self._fund_daily,
+            fund_adj=self._fund_adj,
+            execution=native_config,
+            initial_capital=execution.initial_capital,
+            knowledge_cutoff=f"{evaluation_dates[0]}T15:00:00",
+            knowledge_cutoffs={date: f"{date}T15:00:00" for date in evaluation_dates},
+            snapshot_version=self._benchmark_snapshot_version,
+            run_id=f"{self._run_id}:benchmark:{code}",
+            rule_resolver=self._market_rule_resolver,
+            instrument_versions=dict(self._market_rule_instruments),
+            rule_mode=self._market_rule_mode,
+            decision_ids={evaluation_dates[0]: f"benchmark:{code}:decision"},
+        )
+        return self._execution_engine.execute(request).executed_equity
 
     @staticmethod
     def _check_schedule(

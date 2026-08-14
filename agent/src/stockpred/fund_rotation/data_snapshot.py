@@ -28,7 +28,13 @@ _ADJ_COLS = ("ts_code", "trade_date", "adj_factor")
 
 @dataclass(frozen=True)
 class PinnedFundDataSnapshot:
-    """Fixed Lance versions + ETF pool + trading calendar for one run."""
+    """Fixed Lance versions and date/code identities for one run.
+
+    ``universe_codes`` is the current static ETF pool kept for compatibility;
+    ``historical_candidate_codes`` is the broader raw fund/adjustment source
+    candidate set used by formal PIT resolution.  Historical eligibility is
+    still decided by the PIT universe/rule source, not by this candidate set.
+    """
 
     fund_version: int
     fund_adj_version: int
@@ -36,6 +42,7 @@ class PinnedFundDataSnapshot:
     universe_codes: tuple[str, ...]
     trading_dates: tuple[str, ...]
     fingerprint: str
+    historical_candidate_codes: tuple[str, ...] = ()
 
 
 def compute_fingerprint(
@@ -44,11 +51,13 @@ def compute_fingerprint(
     dim_version: int,
     universe_codes,
     trading_dates,
+    historical_candidate_codes=(),
 ) -> str:
     """Stable SHA-256 over the canonical (sorted) snapshot identity.
 
-    The ordering of ``universe_codes`` / ``trading_dates`` does not affect the
-    fingerprint; any change to a version, the ETF pool, or the calendar does.
+    The ordering of code/date collections does not affect the fingerprint; any
+    change to a version, the ETF pool, the historical source candidates, or the
+    calendar does.
     """
     canonical = json.dumps(
         {
@@ -56,6 +65,9 @@ def compute_fingerprint(
             "fund_adj_version": int(fund_adj_version),
             "dim_version": int(dim_version),
             "universe_codes": sorted(str(c) for c in universe_codes),
+            "historical_candidate_codes": sorted(
+                str(c) for c in historical_candidate_codes
+            ),
             "trading_dates": sorted(str(d) for d in trading_dates),
         },
         sort_keys=True,
@@ -93,6 +105,17 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
     # 2. Re-open at the pinned versions for all identity reads.
     ds_fund = lance.dataset(str(fund_path), version=fund_version)
     ds_dim = lance.dataset(str(dim_path), version=dim_version)
+    ds_adj = lance.dataset(str(adj_path), version=fund_adj_version)
+
+    fund_codes = set(
+        str(code)
+        for code in ds_fund.to_table(columns=["ts_code"]).column("ts_code").to_pylist()
+    )
+    adj_codes = set(
+        str(code)
+        for code in ds_adj.to_table(columns=["ts_code"]).column("ts_code").to_pylist()
+    )
+    historical_candidate_codes = tuple(sorted(fund_codes & adj_codes))
 
     # 3. Trading calendar = sorted unique trade dates at the pinned fund version.
     fund_dates = ds_fund.to_table(columns=["trade_date"]).column("trade_date").to_pandas()
@@ -105,7 +128,12 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
     universe_codes = tuple(sorted({str(c) for c in universe["ts_code"]}))
 
     fingerprint = compute_fingerprint(
-        fund_version, fund_adj_version, dim_version, universe_codes, trading_dates,
+        fund_version,
+        fund_adj_version,
+        dim_version,
+        universe_codes,
+        trading_dates,
+        historical_candidate_codes,
     )
     return PinnedFundDataSnapshot(
         fund_version=fund_version,
@@ -114,6 +142,7 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
         universe_codes=universe_codes,
         trading_dates=trading_dates,
         fingerprint=fingerprint,
+        historical_candidate_codes=historical_candidate_codes,
     )
 
 

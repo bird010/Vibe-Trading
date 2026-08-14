@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 from pydantic import BaseModel
+from types import SimpleNamespace
 
 from backtest.fund_rotation.contracts import (
     DecisionKind,
@@ -124,16 +125,22 @@ class FormalResolverSpy:
 
 def test_formal_pit_adapter_forwards_universe_resolver_context():
     resolver = FormalResolverSpy()
+    causal_universes = []
     adapter = FundRotationPITUniverseAdapter(
         resolver,
         strategy_policy=UniversePolicy(asset_classes=frozenset({"ETF"})),
-        causal_view_factory=lambda **kwargs: kwargs["signal_date"],
+        causal_view_factory=lambda **kwargs: causal_universes.append(
+            kwargs["universe"]
+        ) or kwargs["signal_date"],
         snapshot_version=7,
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
     result = adapter.resolve_universe(
-        snapshot=object(),
+        snapshot=SimpleNamespace(
+            snapshot_version=7,
+            historical_candidate_codes=("EXITED",),
+        ),
         signal_date="20240112",
         knowledge_cutoff="20240112",
         fallback_universe=frozenset({"A", "B"}),
@@ -142,6 +149,7 @@ def test_formal_pit_adapter_forwards_universe_resolver_context():
     assert result["universe_codes"] == ("A",)
     assert resolver.calls[0]["strategy_policy"].asset_classes == frozenset({"ETF"})
     assert resolver.calls[0]["causal_view"] == "20240112"
+    assert causal_universes == [frozenset({"EXITED"})]
     assert resolver.calls[0]["snapshot_version"] == 7
     assert resolver.calls[0]["mode"] is PITQueryMode.AS_WAS_KNOWN
 

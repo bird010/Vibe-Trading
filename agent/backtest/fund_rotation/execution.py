@@ -52,9 +52,11 @@ class PipelineResult:
     equal_weight_benchmark: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     buy_hold_benchmark: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     cash_benchmark: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    secondary_benchmarks: dict[str, pd.Series] = field(default_factory=dict)
 
     # Metrics
     strategy_metrics: dict[str, float] = field(default_factory=dict)
+    ideal_strategy_metrics: dict[str, float] = field(default_factory=dict)
     benchmark_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
     robustness: dict[str, object] = field(default_factory=dict)
     quality_status: str = "VALID"

@@ -41,6 +41,10 @@ from backtest.fund_rotation.market_rules import (
     MarketRuleResolver,
 )
 from backtest.fund_rotation.pit_universe import PITQueryMode
+from backtest.fund_rotation.oos_validation import (
+    DEFAULT_BENCHMARK_POLICY,
+    BenchmarkPolicy,
+)
 
 from backtest.fund_rotation.runner import (
     CancellationToken,
@@ -97,6 +101,7 @@ def run_signal_pipeline(
     pit_universe_resolver: object | None = None,
     require_verified_pit: bool = False,
     formal_benchmarks: bool = False,
+    benchmark_policy: BenchmarkPolicy | None = None,
     data_snapshot: PinnedFundDataSnapshot | None = None,
 ) -> PipelineResult:
     """Run the legacy-shape fund-rotation backtest via the common Runner.
@@ -130,6 +135,9 @@ def run_signal_pipeline(
             "formal pipeline requires an explicit PIT universe resolver; "
             "static dim_fund/list_date fallback is research-only"
         )
+    if formal_requested and benchmark_policy is None:
+        raise ValueError("formal pipeline requires an explicit BenchmarkPolicy")
+    effective_benchmark_policy = benchmark_policy or DEFAULT_BENCHMARK_POLICY
     if formal_requested and (
         market_rule_resolver is None or not market_rule_instruments or market_rule_snapshot_version is None
     ):
@@ -171,7 +179,20 @@ def run_signal_pipeline(
 
     # Filter fund_daily and fund_adj to ETF pool codes BEFORE computing returns
     # (avoids processing 10,000+ non-ETF funds)
-    etf_codes = pool_codes
+    # Formal PIT runs retain the complete pinned ETF snapshot, including
+    # instruments that are absent from today's static dim_fund pool but may be
+    # needed by historical coverage denominators.
+    etf_codes = (
+        set(
+            str(code)
+            for code in (
+                data_snapshot.historical_candidate_codes
+                or data_snapshot.universe_codes
+            )
+        )
+        if formal_requested and data_snapshot is not None
+        else pool_codes
+    )
     fund_daily = fund_daily[fund_daily["ts_code"].astype(str).isin(etf_codes)].copy()
     fund_adj = fund_adj[fund_adj["ts_code"].astype(str).isin(etf_codes)].copy()
 
@@ -228,7 +249,11 @@ def run_signal_pipeline(
             raise ValueError("formal pipeline requires an explicit pinned fund data snapshot")
         if not data_snapshot.fingerprint or data_snapshot.fingerprint == "legacy-compat":
             raise ValueError("formal pipeline requires an auditable pinned snapshot fingerprint")
-        if not set(etf_codes).issubset(set(data_snapshot.universe_codes)):
+        snapshot_candidate_codes = set(
+            data_snapshot.historical_candidate_codes
+            or data_snapshot.universe_codes
+        )
+        if not set(etf_codes).issubset(snapshot_candidate_codes):
             raise ValueError("pinned snapshot universe does not cover the loaded ETF universe")
         if not set(evaluation_dates).issubset(set(data_snapshot.trading_dates)):
             raise ValueError("pinned snapshot calendar does not cover evaluation dates")
@@ -269,6 +294,7 @@ def run_signal_pipeline(
         market_rule_mode=market_rule_mode,
         pit_universe_resolver=pit_universe_resolver,
         strict_pit_benchmarks=formal_requested,
+        benchmark_policy=effective_benchmark_policy,
     )
     run_result = runner.run(
         strategy=CorrelationAllMembersStrategy(),
@@ -360,16 +386,19 @@ def run_signal_pipeline(
     _notify("COMPUTING_BENCHMARKS")
     benchmark_weeks = sorted(result.weekly_targets)
     local_codes = set(fund_daily["ts_code"].astype(str))
-    has_510300 = "510300.SH" in local_codes
+    benchmark_code = str(effective_benchmark_policy.primary_benchmark)
+    has_primary_benchmark = benchmark_code in local_codes
 
-    if not formal_requested and benchmark_weeks and not has_510300:
-        raise ValueError("510300.SH benchmark data is missing from the local ETF dataset.")
+    if not formal_requested and benchmark_weeks and not has_primary_benchmark:
+        raise ValueError(
+            f"{benchmark_code} benchmark data is missing from the local ETF dataset."
+        )
 
-    if not formal_requested and benchmark_weeks and has_510300:
+    if not formal_requested and benchmark_weeks and has_primary_benchmark:
         exec_ctx = build_execution_context(fund_daily, fund_adj, config, profiler=profiler)
         first_week = benchmark_weeks[0]
         buy_hold_run = PipelineResult(
-            weekly_targets={first_week: {"510300.SH": 1.0}},
+            weekly_targets={first_week: {benchmark_code: 1.0}},
         )
         run_execution_loop(buy_hold_run, config, exec_ctx, profiler=profiler,
                            evaluation_dates=evaluation_dates)
@@ -379,7 +408,7 @@ def run_signal_pipeline(
         # Portfolio formed at signal week t earns returns at t+1.
         common_start = max(
             first_actual_fill_date(result, "Strategy"),
-            first_actual_fill_date(buy_hold_run, "510300.SH benchmark"),
+            first_actual_fill_date(buy_hold_run, f"{benchmark_code} benchmark"),
         )
         ew_weekly = compute_equal_weight_theoretical_index(
             weekly_returns, eligible_per_week, benchmark_weeks, common_start,
@@ -421,15 +450,16 @@ def run_signal_pipeline(
         initial_nav = 1.0
 
     if not result.strategy_cumulative.empty:
-        result.strategy_metrics = compute_performance_metrics(
+        result.ideal_strategy_metrics = compute_performance_metrics(
             result.strategy_cumulative, periods_per_year=244, initial_nav=initial_nav,
         )
+        result.strategy_metrics = dict(result.ideal_strategy_metrics)
     if not result.equal_weight_benchmark.empty:
         result.benchmark_metrics["equal_weight"] = compute_performance_metrics(
             result.equal_weight_benchmark.dropna(), periods_per_year=244, initial_nav=initial_nav,
         )
     if not result.buy_hold_benchmark.empty:
-        result.benchmark_metrics["buy_hold_510300"] = compute_performance_metrics(
+        result.benchmark_metrics[f"buy_hold_{benchmark_code}"] = compute_performance_metrics(
             result.buy_hold_benchmark.dropna(), periods_per_year=244, initial_nav=initial_nav,
         )
     if not result.cash_benchmark.empty:
@@ -453,18 +483,40 @@ def run_signal_pipeline(
             }
 
     if formal_requested:
+        result.strategy_metrics = compute_performance_metrics(
+            result.executed_equity,
+            periods_per_year=244,
+            initial_nav=initial_nav,
+        )
+        result.execution_diagnostics["ideal_strategy_metrics"] = dict(
+            result.ideal_strategy_metrics
+        )
+        primary_benchmark = str(effective_benchmark_policy.primary_benchmark)
+        cash_benchmark = str(effective_benchmark_policy.cash_benchmark)
+        equal_weight_benchmark = str(
+            effective_benchmark_policy.universe_equal_weight_benchmark
+        )
         result.equal_weight_benchmark = run_result.benchmark_equity.get(
-            "equal_weight_etf",
-            pd.Series(dtype=float, name="equal_weight_etf"),
+            equal_weight_benchmark,
+            pd.Series(dtype=float, name=equal_weight_benchmark),
         )
         result.buy_hold_benchmark = run_result.benchmark_equity.get(
-            "510300.SH",
-            pd.Series(dtype=float, name="510300.SH"),
+            primary_benchmark,
+            pd.Series(dtype=float, name=primary_benchmark),
         )
         result.cash_benchmark = run_result.benchmark_equity.get(
-            "cash",
-            pd.Series(dtype=float, name="cash"),
+            cash_benchmark,
+            pd.Series(dtype=float, name=cash_benchmark),
         )
+        secondary_names = tuple(
+            str(name)
+            for name in effective_benchmark_policy.secondary_benchmarks
+        )
+        result.secondary_benchmarks = {
+            name: run_result.benchmark_equity[name]
+            for name in secondary_names
+            if name in run_result.benchmark_equity
+        }
         result.benchmark_metrics = {
             name: compute_performance_metrics(
                 series,
@@ -473,10 +525,19 @@ def run_signal_pipeline(
             )
             for name, series in {
                 "equal_weight": result.equal_weight_benchmark,
-                "buy_hold_510300": result.buy_hold_benchmark,
+                f"buy_hold_{primary_benchmark}": result.buy_hold_benchmark,
                 "cash": result.cash_benchmark,
             }.items()
             if not series.empty and not series.isna().all()
         }
+        result.benchmark_metrics.update({
+            f"buy_hold_{name}": compute_performance_metrics(
+                series,
+                periods_per_year=244,
+                initial_nav=1.0,
+            )
+            for name, series in result.secondary_benchmarks.items()
+            if not series.empty and not series.isna().all()
+        })
 
     return result

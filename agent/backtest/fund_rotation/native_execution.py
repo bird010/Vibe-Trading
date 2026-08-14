@@ -37,6 +37,7 @@ from backtest.fund_rotation.market_rules import (
     FundInstrumentVersion,
     MarketRuleResolver,
     MarketRules,
+    PITInvalidMarketRule,
     UnknownExecutionRule,
 )
 from backtest.fund_rotation.executor import PortfolioExecutor
@@ -667,6 +668,11 @@ def _resolve_execution_rules(
     instrument = request.instrument_versions.get(code)
     if instrument is None:
         raise UnknownExecutionRule(f"UNKNOWN_EXECUTION_RULE: missing instrument {code}")
+    if request.rule_mode is PITQueryMode.AS_WAS_KNOWN and trade_date not in request.knowledge_cutoffs:
+        raise PITInvalidMarketRule(
+            "PIT_INVALID_EXECUTION_RULE: missing knowledge cutoff for trade date "
+            f"{trade_date}"
+        )
     provenance = request.rule_resolver.resolve(
         instrument=instrument,
         trade_date=trade_date,
@@ -838,6 +844,7 @@ def _state_from_execution(
                 "event_id": order.event_id,
                 "status": order.status.value,
                 "filled": order.filled,
+                "remaining": order.remaining,
                 "attempts": [dict(item) for item in order.attempts],
                 "quantity_basis": order.quantity_basis,
                 "corporate_action_adjustments": [

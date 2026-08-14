@@ -188,19 +188,19 @@ class CorrelationAllMembersSession:
             or not self._clusters
         )
         if reclustering:
-            eligible_recluster, historical_excluded = (
-                check_historical_eligibility(dim_pool, signal_date)
+            historical_codes = set(
+                getattr(view, "historical_candidate_codes", ())
+                or dim_pool["ts_code"].astype(str)
             )
-            self._exclusions.extend(historical_excluded)
-            kept_recluster, market_excluded = signal_date_eligible(
-                view,
-                eligible_recluster,
-                signal_date,
-            )
-            self._exclusions.extend(market_excluded)
-
+            if getattr(view, "pit_universe_lookup", None) is not None:
+                historical_pit_codes = set()
+                for week in window.index:
+                    historical_pit_codes.update(
+                        view.pit_universe_codes(_week_key_to_yyyymmdd(week))
+                    )
+                historical_codes &= historical_pit_codes
             valid_codes = [
-                code for code in kept_recluster if code in window.columns
+                code for code in sorted(historical_codes) if code in window.columns
             ]
             if cfg.min_valid_weeks > 0 and valid_codes:
                 counts = window[valid_codes].notna().sum()
@@ -304,6 +304,11 @@ class CorrelationAllMembersSession:
                 max_low_coverage_weeks=self._config.max_low_coverage_weeks,
                 minimum_valid_members=self._config.minimum_valid_members,
             ),
+            denominator_mode=(
+                "pit_universe"
+                if getattr(view, "pit_universe_lookup", None) is not None
+                else "cluster_members"
+            ),
         )
         cycle_id = (
             str(self._cluster_history[-1]["week"])
@@ -398,19 +403,39 @@ def _coverage_eligible_by_week(
         str(row["ts_code"]): _week_key_to_yyyymmdd(row.get("list_date", ""))
         for _, row in dim_pool.iterrows()
     }
+    has_pit_lookup = hasattr(view, "pit_universe_codes") and getattr(
+        view, "pit_universe_lookup", None
+    ) is not None
     eligible_by_week: dict[object, set[str]] = {}
     for week in weeks:
         week_date = _week_key_to_yyyymmdd(week)
-        historically_eligible = [
-            code
-            for code in sorted(codes)
-            if list_dates.get(code, "") <= week_date
-        ]
-        kept, _excluded = signal_date_eligible(
-            view,
-            historically_eligible,
-            week_date,
+        pit_codes = frozenset(
+            view.pit_universe_codes(week_date)
+            if hasattr(view, "pit_universe_codes")
+            else codes
         )
+        historically_eligible = (
+            sorted(pit_codes)
+            if has_pit_lookup
+            else [
+                code
+                for code in sorted(codes)
+                if list_dates.get(code, "") <= week_date
+            ]
+        )
+        if has_pit_lookup and hasattr(view, "historical_signal_date_eligible"):
+            kept = list(
+                view.historical_signal_date_eligible(
+                    historically_eligible,
+                    week_date,
+                )
+            )
+        else:
+            kept, _excluded = signal_date_eligible(
+                view,
+                historically_eligible,
+                week_date,
+            )
         eligible_by_week[week] = set(kept)
         eligible_by_week[pd.Timestamp(week_date)] = set(kept)
     return eligible_by_week

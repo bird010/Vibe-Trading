@@ -302,6 +302,7 @@ class TestStrategyProtocol:
 
         def fake_cluster(_distance, k):
             assert k == 2
+            assert "HISTORICAL.SH" in _distance.index
             return {"OLD.SH": 1, "NEW.SH": 1, "WIN.SH": 2}
 
         def fake_momentum(_returns, _clusters, _window):
@@ -310,9 +311,13 @@ class TestStrategyProtocol:
         def fake_iterative_exclude(distance, k):
             return list(distance.index), []
 
-        def fake_coverage(*, weekly_returns, cluster_members, eligible_by_week, policy):
+        def fake_coverage(
+            *, weekly_returns, cluster_members, eligible_by_week, policy,
+            denominator_mode,
+        ):
             nonlocal captured_eligible_by_week
             captured_eligible_by_week = dict(eligible_by_week)
+            assert denominator_mode == "pit_universe"
             return {
                 cluster_id: ClusterCoverageReport(
                     valid_member_counts=(1,),
@@ -349,7 +354,7 @@ class TestStrategyProtocol:
         rows = []
         adjustments = []
         for date in dates:
-            for code in codes:
+            for code in (*codes, "HISTORICAL.SH"):
                 rows.append(
                     {
                         "ts_code": code,
@@ -386,6 +391,14 @@ class TestStrategyProtocol:
             requirements,
             pd.Timestamp(signal_date),
             frozenset(codes),
+            historical_candidate_codes=frozenset((*codes, "HISTORICAL.SH")),
+        )
+        pit_calls = []
+        view.pit_universe_lookup = lambda date: (
+            pit_calls.append(date)
+            or frozenset(codes)
+            if date == signal_date
+            else frozenset({"OLD.SH", "WIN.SH", "HISTORICAL.SH"})
         )
         session = strategy.create_session(
             StrategyInitializationContext(run_id="r1", evaluation_calendar=()),
@@ -402,7 +415,12 @@ class TestStrategyProtocol:
             "NEW.SH" not in eligible
             for eligible in captured_eligible_by_week.values()
         )
+        assert any(
+            "HISTORICAL.SH" in eligible
+            for eligible in captured_eligible_by_week.values()
+        )
         assert set(captured_eligible_by_week[pd.Timestamp(signal_date)]) == set(codes)
+        assert pit_calls
 
 
 class TestLegacyAdapter:

@@ -7,6 +7,7 @@ import pytest
 from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.pipeline import run_signal_pipeline
 from backtest.fund_rotation.pit_universe import PITQueryMode
+from backtest.fund_rotation.oos_validation import BenchmarkPolicy
 from tests.fund_rotation.conftest import make_test_market_rule_inputs
 from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 
@@ -150,8 +151,11 @@ class TestPipelineE2E:
             momentum_window_weeks=4, start_date="20220101", end_date="20220930",
         )
 
+        calls = []
+
         class PITResolver:
             def resolve_universe(self, **kwargs):
+                calls.append(kwargs)
                 return {
                     "universe_codes": tuple(sorted(kwargs["fallback_universe"])),
                     "quality_status": "VERIFIED",
@@ -164,6 +168,13 @@ class TestPipelineE2E:
         result = _run_signal_pipeline(
             config, fund_daily, fund_adj, dim_fund,
             pit_universe_resolver=PITResolver(), formal_benchmarks=True,
+            benchmark_policy=BenchmarkPolicy(
+                primary_benchmark="510300.SH",
+                secondary_benchmarks=("510010.SH",),
+                cash_benchmark="cash",
+                universe_equal_weight_benchmark="equal_weight_etf",
+                benchmark_data_version="test-v1",
+            ),
             data_snapshot=PinnedFundDataSnapshot(
                 fund_version=1,
                 fund_adj_version=2,
@@ -171,10 +182,16 @@ class TestPipelineE2E:
                 universe_codes=tuple(sorted(dim_fund["ts_code"].astype(str))),
                 trading_dates=tuple(sorted(fund_daily["trade_date"].astype(str).unique())),
                 fingerprint="pinned-test-snapshot",
+                historical_candidate_codes=tuple(sorted(
+                    set(dim_fund["ts_code"].astype(str)) | {"EXITED.SH"}
+                )),
             ),
         )
         assert result.quality_status == "VALID"
         assert not result.buy_hold_benchmark.empty
+        assert "510010.SH" in result.secondary_benchmarks
+        assert "buy_hold_510010.SH" in result.benchmark_metrics
+        assert "EXITED.SH" in calls[0]["fallback_universe"]
 
     def test_produces_targets(self):
         fund_daily, fund_adj, dim_fund = _synthetic_data(n_etfs=10, n_weeks=80)

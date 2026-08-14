@@ -13,6 +13,7 @@ from backtest.fund_rotation.market_rules import (
     FundInstrumentVersion,
     InMemoryPITMarketRuleSource,
     MarketRuleResolver,
+    PITInvalidMarketRule,
     UnknownExecutionRule,
 )
 from backtest.fund_rotation.etf_rules import ChinaETFExecutionRules
@@ -154,6 +155,7 @@ def _request(
     initial_state: NativeExecutionState | None = None,
     decision_ids: dict[str, str] | None = None,
     order_ids: dict[str, dict[str, str]] | None = None,
+    knowledge_cutoffs: dict[str, str] | None = None,
 ) -> NativeExecutionRequest:
     dates = evaluation_dates or _dates()
     if market is None or adj is None:
@@ -186,6 +188,11 @@ def _request(
         rule_resolver=rule_resolver,
         instrument_versions=instrument_versions,
         rule_mode=PITQueryMode.AS_WAS_KNOWN,
+        knowledge_cutoffs=(
+            {date: "20240101T150000" for date in dates}
+            if knowledge_cutoffs is None
+            else knowledge_cutoffs
+        ),
         initial_state=initial_state,
         decision_ids=decision_ids or {},
         order_ids=order_ids or {},
@@ -597,6 +604,25 @@ def test_native_engine_uses_trade_date_specific_rule_knowledge_cutoffs():
     assert request.knowledge_cutoffs[dates[0]] == f"{dates[0]}T15:00:00"
 
 
+def test_native_engine_fails_fast_when_pit_trade_date_cutoff_is_missing():
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates)
+    resolver, instruments = _resolver_and_instruments(("A",))
+
+    with pytest.raises(PITInvalidMarketRule, match="knowledge cutoff"):
+        FundRotationExecutionEngine().execute(
+            _request(
+                {"20240101": {"A": 0.5}},
+                evaluation_dates=dates,
+                market=market,
+                adj=adj,
+                rule_resolver=resolver,
+                instrument_versions=instruments,
+                knowledge_cutoffs={},
+            )
+        )
+
+
 def test_native_engine_fails_closed_when_pit_rule_is_missing():
     dates = _dates()
     market, adj = _market(codes=("A",), dates=dates)
@@ -770,6 +796,11 @@ def test_native_engine_reports_execution_failure_cash_for_partial_fills():
     )
 
     assert result.positions_history[0]["execution_failure_cash"] > 0.0
+    assert result.state.active_orders
+    assert result.state.active_orders[0]["remaining"] == (
+        result.state.active_orders[0]["requested"]
+        - result.state.active_orders[0]["filled"]
+    )
 
 
 def test_native_engine_fails_closed_on_initial_capital_mismatch():

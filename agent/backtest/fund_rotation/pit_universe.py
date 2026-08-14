@@ -965,10 +965,17 @@ class FundRotationPITUniverseAdapter:
         fallback_universe: frozenset[str],
     ) -> UniverseResolution:
         snapshot_version = getattr(snapshot, "snapshot_version", self._snapshot_version)
+        candidate_universe = frozenset(
+            str(code)
+            for code in (
+                getattr(snapshot, "historical_candidate_codes", ())
+                or fallback_universe
+            )
+        )
         causal_view = self._causal_view_factory(
             snapshot=snapshot,
             signal_date=signal_date,
-            universe=fallback_universe,
+            universe=candidate_universe,
         )
         return self._resolver.resolve(
             signal_date=signal_date,

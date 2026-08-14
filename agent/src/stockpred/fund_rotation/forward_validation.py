@@ -760,15 +760,18 @@ class ShadowDecisionService:
             new_cash_weight=new_cash_weight,
         )
         self.store.decisions.append(decision)
+        previous_target_symbols = [symbol for symbol, _weight in previous_state.target_weights]
+        new_target_weights = dict(new_targets)
+        transition_symbols = tuple(dict.fromkeys((*previous_target_symbols, *new_target_weights)))
         orders = tuple(
             ShadowOrder(
                 shadow_order_id=_stable_id("so", decision_id, symbol),
                 shadow_decision_id=decision_id,
                 symbol=symbol,
-                target_weight=weight,
+                target_weight=float(new_target_weights.get(symbol, 0.0)),
                 expected_execution_date=signal.expected_execution_date,
             )
-            for symbol, weight in new_targets
+            for symbol in transition_symbols
             if can_seal
         )
         self.store.orders.extend(orders)
@@ -833,7 +836,28 @@ class ShadowExecutionService:
         execution_as_of_time: datetime,
     ) -> ShadowExecutionResult:
         decision = self._decision(shadow_decision_id)
-        key = f"execution:{shadow_decision_id}:{decision.expected_execution_date}"
+        previous_state = self.store.account_states[decision.strategy_version_id]
+        retrying_residual = _is_residual_retry(decision, previous_state)
+        if not retrying_residual:
+            latest_result = self._latest_execution_result(shadow_decision_id)
+            if latest_result is not None:
+                return latest_result
+        execution_dates = [decision.expected_execution_date]
+        if retrying_residual:
+            execution_dates.extend(
+                date
+                for date in sorted(self.store.market_data)
+                if date > decision.expected_execution_date
+            )
+        execution_date = next(
+            (
+                date
+                for date in execution_dates
+                if f"execution:{shadow_decision_id}:{date}" not in self.store.execution_results
+            ),
+            decision.expected_execution_date,
+        )
+        key = f"execution:{shadow_decision_id}:{execution_date}"
         if decision.status != ShadowDecisionStatus.SEALED:
             return ShadowExecutionResult(
                 shadow_decision_id=shadow_decision_id,
@@ -846,7 +870,7 @@ class ShadowExecutionService:
         if key in self.store.execution_results:
             return self.store.execution_results[key]
 
-        market_data = self.store.market_data.get(decision.expected_execution_date)
+        market_data = self.store.market_data.get(execution_date)
         if market_data is None or market_data.available_at > execution_as_of_time:
             return ShadowExecutionResult(
                 shadow_decision_id=shadow_decision_id,
@@ -875,10 +899,10 @@ class ShadowExecutionService:
             )
 
         orders = tuple(order for order in self.store.orders if order.shadow_decision_id == shadow_decision_id)
-        previous_state = self.store.account_states[decision.strategy_version_id]
         start_violations = self._validate_starting_account_state(
             decision=decision,
             previous_state=previous_state,
+            retrying_residual=retrying_residual,
         )
         if start_violations:
             return self._contract_violation_result(
@@ -934,6 +958,7 @@ class ShadowExecutionService:
             fills=fills,
             account_state=account_state,
             execution_as_of_time=execution_as_of_time,
+            retrying_residual=retrying_residual,
         )
         if output_violations:
             return self._contract_violation_result(
@@ -957,6 +982,20 @@ class ShadowExecutionService:
         self.store.set_account_state(decision.strategy_version_id, account_state)
         self.store.execution_results[key] = result
         return result
+
+    def _latest_execution_result(
+        self,
+        shadow_decision_id: str,
+    ) -> ShadowExecutionResult | None:
+        prefix = f"execution:{shadow_decision_id}:"
+        matching = [
+            (key, result)
+            for key, result in self.store.execution_results.items()
+            if key.startswith(prefix)
+        ]
+        if not matching:
+            return None
+        return max(matching, key=lambda item: item[0])[1]
 
     def _contract_violation_result(
         self,
@@ -982,6 +1021,7 @@ class ShadowExecutionService:
         *,
         decision: ShadowDecision,
         previous_state: ShadowAccountState,
+        retrying_residual: bool,
     ) -> tuple[str, ...]:
         violations: list[str] = []
         if decision.accounting_contract_version != ACCOUNTING_CONTRACT_VERSION:
@@ -992,7 +1032,7 @@ class ShadowExecutionService:
             violations.append("STARTING_ACCOUNTING_EVENT_ORDER_MISMATCH")
         if previous_state.strategy_version_id != decision.strategy_version_id:
             violations.append("STARTING_ACCOUNT_STRATEGY_MISMATCH")
-        if (
+        if not retrying_residual and (
             previous_state.cash != decision.previous_cash
             or previous_state.shadow_executable_nav != decision.previous_nav
             or previous_state.target_weights != decision.previous_targets
@@ -1021,9 +1061,16 @@ class ShadowExecutionService:
         fills: tuple[ShadowFill, ...],
         account_state: ShadowAccountState,
         execution_as_of_time: datetime,
+        retrying_residual: bool,
     ) -> tuple[str, ...]:
         violations: list[str] = []
-        expected_orders = tuple((symbol, weight) for symbol, weight in decision.new_targets)
+        previous_target_symbols = [symbol for symbol, _weight in decision.previous_targets]
+        new_target_weights = dict(decision.new_targets)
+        expected_symbols = tuple(dict.fromkeys((*previous_target_symbols, *new_target_weights)))
+        expected_orders = tuple(
+            (symbol, float(new_target_weights.get(symbol, 0.0)))
+            for symbol in expected_symbols
+        )
         actual_orders = tuple((order.symbol, order.target_weight) for order in orders)
         if actual_orders != expected_orders:
             violations.append("ORDER_TARGET_MISMATCH")
@@ -1070,7 +1117,10 @@ class ShadowExecutionService:
             abs_tol=1e-9,
         ):
             violations.append("ACCOUNT_CASH_WEIGHT_NOT_BACKED_BY_CASH")
-        if account_state.completed_rebalance_cycles != previous_state.completed_rebalance_cycles + 1:
+        expected_cycle_increment = 0 if retrying_residual else 1
+        if account_state.completed_rebalance_cycles != (
+            previous_state.completed_rebalance_cycles + expected_cycle_increment
+        ):
             violations.append("ACCOUNT_CYCLE_NOT_CONTINUOUS")
 
         return tuple(dict.fromkeys(violations))
@@ -1080,6 +1130,15 @@ class ShadowExecutionService:
             if decision.shadow_decision_id == shadow_decision_id:
                 return decision
         raise ValueError(f"unknown shadow decision: {shadow_decision_id}")
+
+
+def _is_residual_retry(
+    decision: ShadowDecision,
+    previous_state: ShadowAccountState,
+) -> bool:
+    expected_date = str(decision.expected_execution_date).replace("-", "")[:8]
+    state_date = previous_state.as_of_time.strftime("%Y%m%d")
+    return bool(previous_state.residual_orders) and state_date >= expected_date
 
 
 def _metrics_from_evidence(

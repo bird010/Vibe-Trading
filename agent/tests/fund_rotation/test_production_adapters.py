@@ -172,13 +172,24 @@ def _binding(strategy: _Strategy):
     )
 
 
+def _scheduled_data_cutoff(signal_date: str) -> datetime:
+    return datetime.strptime(str(signal_date), "%Y%m%d").replace(hour=16)
+
+
 def test_production_provider_evaluates_formal_session_without_store_signal() -> None:
     strategy = _Strategy()
+    cutoffs = []
+
+    def data_view_factory(signal_date, as_of_time):
+        cutoffs.append((signal_date, as_of_time))
+        return SimpleNamespace(
+            signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
+        )
+
     provider = ProductionFrozenStrategyDecisionProvider(
         strategy_binding=_binding(strategy),
-        data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
-            signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
-        ),
+        data_view_factory=data_view_factory,
+        data_availability_cutoff_factory=_scheduled_data_cutoff,
         calendar_factory=lambda as_of_time: ("20260105", "20260106"),
         run_id="shadow-run-1",
     )
@@ -197,7 +208,9 @@ def test_production_provider_evaluates_formal_session_without_store_signal() -> 
     assert signal is not None
     assert signal.raw_signal["decision_id"] == "formal-decision-1"
     assert signal.target_weights == (("ETF_A", 0.1),)
+    assert signal.data_available_at == datetime(2026, 1, 5, 16, 0)
     assert strategy.session.evaluated == ["20260105"]
+    assert cutoffs == [("20260105", datetime(2026, 1, 5, 16, 0))]
 
     service = build_production_shadow_execution_service(
         store,
@@ -213,7 +226,7 @@ def test_production_provider_evaluates_formal_session_without_store_signal() -> 
         rule_identity="rule-1",
     )
     result = service.seal_scheduled_decision(
-        "sv-1", datetime(2026, 1, 5, 10, 0)
+        "sv-1", datetime(2026, 1, 5, 17, 0)
     )
     assert service.decision_provider is provider
     assert result.decision.status.value == "SEALED"
@@ -226,6 +239,7 @@ def test_production_provider_reuses_strategy_session_across_shadow_cycles() -> N
         data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
             signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
         ),
+        data_availability_cutoff_factory=_scheduled_data_cutoff,
         calendar_factory=lambda as_of_time: ("20260105", "20260106"),
         run_id="shadow-run-1",
     )
@@ -255,6 +269,7 @@ def test_production_provider_restores_evaluated_dates_after_process_restart() ->
         data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
             signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
         ),
+        data_availability_cutoff_factory=_scheduled_data_cutoff,
         calendar_factory=lambda as_of_time: ("20260105", "20260106"),
         run_id="shadow-run-1",
     )
@@ -276,6 +291,7 @@ def test_production_provider_restores_evaluated_dates_after_process_restart() ->
         data_view_factory=lambda signal_date, as_of_time: SimpleNamespace(
             signal_date=pd.Timestamp(signal_date), snapshot_fingerprint="pit-1"
         ),
+        data_availability_cutoff_factory=_scheduled_data_cutoff,
         calendar_factory=lambda as_of_time: ("20260105", "20260106"),
         run_id="shadow-run-1",
     )

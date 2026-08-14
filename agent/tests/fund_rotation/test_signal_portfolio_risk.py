@@ -64,6 +64,27 @@ def test_cluster_coverage_counts_eligible_members_and_rejects_insufficient_windo
     assert report.reason_codes == ("INSUFFICIENT_CLUSTER_COVERAGE",)
 
 
+def test_cluster_coverage_can_use_historical_pit_universe_denominator():
+    week = pd.Timestamp("2026-01-02")
+    report = compute_cluster_coverage(
+        weekly_returns=pd.DataFrame({"CURRENT": [0.01]}, index=[week]),
+        cluster_members={1: ["CURRENT"]},
+        eligible_by_week={week: {"CURRENT", "HISTORICAL"}},
+        policy=ClusterCoveragePolicy(
+            min_weekly_coverage=0.5,
+            max_low_coverage_weeks=0,
+            minimum_valid_members=1,
+        ),
+        denominator_mode="pit_universe",
+    )[1]
+
+    # PIT eligibility cannot add a symbol from another cluster into this
+    # cluster's denominator.
+    assert report.eligible_member_counts == (1,)
+    assert report.valid_member_counts == (1,)
+    assert report.coverage_ratios == pytest.approx((1.0,))
+
+
 def test_momentum_families_include_baseline_skip_month_and_finite_risk_adjusted_scores():
     clusters = [101, 102, 103]
     weeks = pd.date_range("2025-01-03", periods=60, freq="W-FRI")

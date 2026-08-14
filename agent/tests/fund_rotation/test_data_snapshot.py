@@ -99,8 +99,10 @@ def test_resolve_derives_pool_and_calendar(tmp_path):
     assert snapshot.fund_version == 1
     assert snapshot.fund_adj_version == 1
     assert snapshot.dim_version == 1
+    assert snapshot.historical_candidate_codes == tuple(sorted(ETF_CODES))
     assert snapshot.fingerprint == compute_fingerprint(
         1, 1, 1, snapshot.universe_codes, snapshot.trading_dates,
+        snapshot.historical_candidate_codes,
     )
 
 

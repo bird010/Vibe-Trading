@@ -225,6 +225,7 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
         *,
         strategy_binding: object,
         data_view_factory: Callable[[str, datetime], object],
+        data_availability_cutoff_factory: Callable[[str], datetime],
         calendar_factory: Callable[[datetime], tuple[str, ...]],
         run_id: str,
         strategy_identity: object | None = None,
@@ -232,6 +233,7 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
     ) -> None:
         self.strategy_binding = strategy_binding
         self.data_view_factory = data_view_factory
+        self.data_availability_cutoff_factory = data_availability_cutoff_factory
         self.calendar_factory = calendar_factory
         self.run_id = _require_identity(run_id, "run")
         self.strategy_identity = _require_identity(
@@ -312,7 +314,15 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
             previous_targets = dict(previous_state.target_weights)
             previous_cash_weight = previous_state.cash_weight
             for signal_date in pending_signal_dates:
-                data_view = self.data_view_factory(signal_date, as_of_time)
+                data_available_at = self.data_availability_cutoff_factory(signal_date)
+                if not isinstance(data_available_at, datetime):
+                    raise ProductionAdapterError(
+                        "scheduled data availability cutoff must be a datetime"
+                    )
+                data_view = self.data_view_factory(
+                    signal_date,
+                    data_available_at,
+                )
                 decision = session.evaluate(
                     StrategyDecisionContext(
                         signal_date=signal_date,
@@ -348,7 +358,7 @@ class ProductionFrozenStrategyDecisionProvider(FrozenStrategyDecisionProvider):
                 self._signals[(strategy_version_id, signal_date)] = ScheduledSignal(
                     strategy_version_id=strategy_version_id,
                     signal_date=signal_date,
-                    data_available_at=getattr(data_view, "available_at", as_of_time),
+                    data_available_at=data_available_at,
                     snapshot_fingerprint=_snapshot_fingerprint(
                         self.strategy_binding, data_view, signal_date
                     ),
@@ -695,7 +705,13 @@ class ProductionShadowAccountingAdapter:
             shadow_ideal_nav=market_data.ideal_nav,
             shadow_executable_nav=accounting.ending_nav,
             accounting_contract_version=accounting.accounting_contract_version,
-            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + (
+                0
+                if previous_state.residual_orders
+                and previous_state.as_of_time.strftime("%Y%m%d")
+                >= decision.expected_execution_date.replace("-", "")
+                else 1
+            ),
             cash_weight=cash_weight,
             daily_accounting_event_order=accounting.daily_accounting_event_order,
             valuation_prices=tuple(

@@ -160,6 +160,15 @@ class BenchmarkPolicy:
         }
 
 
+DEFAULT_BENCHMARK_POLICY = BenchmarkPolicy(
+    primary_benchmark="510300.SH",
+    secondary_benchmarks=(),
+    cash_benchmark="cash",
+    universe_equal_weight_benchmark="equal_weight_etf",
+    benchmark_data_version="legacy-domestic-etf-v1",
+)
+
+
 @dataclass(frozen=True)
 class OOSQualificationPolicySpec:
     min_oos_weeks: int = 104

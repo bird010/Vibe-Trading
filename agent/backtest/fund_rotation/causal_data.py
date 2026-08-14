@@ -1,8 +1,10 @@
 """Controlled causal data view — Phase 2 Task 1 (design §6).
 
 ``CausalDataView`` is the ONLY data entry point a strategy receives. It exposes
-declared datasets/fields up to (and including) the current ``signal_date`` for
-the snapshot ETF universe only, returns read-only copies, and audits access.
+declared datasets/fields up to (and including) the current ``signal_date``;
+historical returns may use the pinned candidate source set, while current
+selection queries remain limited to the signal-date PIT universe. It returns
+read-only copies and audits access.
 Undeclared datasets/fields, lookback overruns, post-signal dates and
 non-snapshot ETFs are rejected with ``UNDECLARED_STRATEGY_DATA_ACCESS``.
 
@@ -13,7 +15,7 @@ it is NOT a malicious-code sandbox.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import pandas as pd
 
@@ -59,6 +61,8 @@ class CausalDataView:
     _signal_date: pd.Timestamp
     _universe_codes: frozenset
     _access_log: list = field(default_factory=list)
+    pit_universe_lookup: Callable[[str], frozenset[str]] | None = None
+    historical_candidate_codes: frozenset[str] = frozenset()
 
     # Method -> datasets that method reads (for whitelist enforcement, §6).
     _METHOD_DATASETS = {
@@ -89,6 +93,42 @@ class CausalDataView:
     @property
     def access_log(self) -> tuple[AccessRecord, ...]:
         return tuple(self._access_log)
+
+    def pit_universe_codes(self, signal_date: str) -> frozenset[str]:
+        """Return the resolver-backed universe for a historical signal date."""
+        if self.pit_universe_lookup is not None:
+            return frozenset(self.pit_universe_lookup(str(signal_date)))
+        return self._universe_codes
+
+    def historical_signal_date_eligible(
+        self,
+        codes: Sequence[str],
+        signal_date: str,
+    ) -> tuple[str, ...]:
+        """Check historical PIT candidates without applying today's universe."""
+        code_set = {str(code) for code in codes}
+        daily = self._fund_daily[
+            self._fund_daily["trade_date"].astype(str).eq(str(signal_date))
+            & self._fund_daily["ts_code"].astype(str).isin(code_set)
+        ]
+        adj = self._fund_adj[
+            self._fund_adj["trade_date"].astype(str).eq(str(signal_date))
+            & self._fund_adj["ts_code"].astype(str).isin(code_set)
+        ]
+        close_by_code = {
+            str(row.ts_code): float(row.close)
+            for row in daily.itertuples()
+            if pd.notna(row.close) and float(row.close) > 0
+        }
+        adj_by_code = {
+            str(row.ts_code): float(row.adj_factor)
+            for row in adj.itertuples()
+            if pd.notna(row.adj_factor) and float(row.adj_factor) > 0
+        }
+        return tuple(
+            code for code in sorted(code_set)
+            if code in close_by_code and code in adj_by_code
+        )
 
     # ── enforcement helpers ──
 
@@ -130,14 +170,20 @@ class CausalDataView:
             )
         return lookback
 
-    def _causal_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _causal_filter(
+        self,
+        df: pd.DataFrame,
+        *,
+        universe_codes: frozenset[str] | None = None,
+    ) -> pd.DataFrame:
         """Restrict to snapshot universe and dates <= signal_date."""
         out = df
         signal_str = self._signal_date.strftime("%Y%m%d")
         if "trade_date" in out.columns:
             out = out[out["trade_date"].astype(str) <= signal_str]
         if "ts_code" in out.columns:
-            out = out[out["ts_code"].astype(str).isin(self._universe_codes)]
+            codes = self._universe_codes if universe_codes is None else universe_codes
+            out = out[out["ts_code"].astype(str).isin(codes)]
         return out
 
     def _tail_dates(self, df: pd.DataFrame, lookback: int | None) -> pd.DataFrame:
@@ -189,7 +235,8 @@ class CausalDataView:
             self._audit("adjusted_closes", self._METHOD_FIELDS["adjusted_closes"], adj_close)
             return adj_close.copy()
         # Restrict columns to the snapshot universe.
-        cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
+        historical_codes = self.historical_candidate_codes or self._universe_codes
+        cols = [c for c in adj_close.columns if str(c) in historical_codes]
         adj_close = adj_close[cols]
         if lookback == 0:
             adj_close = adj_close.iloc[0:0]
@@ -216,13 +263,14 @@ class CausalDataView:
         if adj_close.empty:
             self._audit("returns", self._METHOD_FIELDS["returns"], adj_close)
             return adj_close.copy()
-        cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
+        historical_codes = self.historical_candidate_codes or self._universe_codes
+        cols = [c for c in adj_close.columns if str(c) in historical_codes]
         adj_close = adj_close[cols]
         if frequency == "daily":
             rets = adj_close.pct_change(fill_method=None)
         elif frequency == "weekly":
             rets = compute_weekly_returns(self._fund_daily, self._fund_adj, signal_str)
-            rets = rets[[c for c in rets.columns if str(c) in self._universe_codes]]
+            rets = rets[[c for c in rets.columns if str(c) in historical_codes]]
         elif frequency == "monthly":
             monthly = adj_close.copy()
             monthly.index = pd.to_datetime(monthly.index, format="%Y%m%d")

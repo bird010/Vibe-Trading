@@ -41,7 +41,10 @@ def compute_cluster_coverage(
     cluster_members: Mapping[Any, Sequence[str]],
     eligible_by_week: Mapping[Any, set[str] | frozenset[str]],
     policy: ClusterCoveragePolicy,
+    denominator_mode: str = "cluster_members",
 ) -> dict[Any, ClusterCoverageReport]:
+    if denominator_mode not in {"cluster_members", "pit_universe"}:
+        raise ValueError(f"unknown coverage denominator mode: {denominator_mode!r}")
     reports: dict[Any, ClusterCoverageReport] = {}
     for cluster_id, members in cluster_members.items():
         valid_counts: list[int] = []
@@ -50,6 +53,8 @@ def compute_cluster_coverage(
 
         for week, row in weekly_returns.iterrows():
             eligible = set(eligible_by_week.get(week, set(members)))
+            # PIT eligibility can widen the source universe, but it must not
+            # erase the cluster boundary: coverage is per cluster and week.
             eligible_members = [code for code in members if code in eligible]
             valid = 0
             for code in eligible_members:
