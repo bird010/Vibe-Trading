@@ -43,10 +43,20 @@ def _fund_rows(codes=ETF_CODES, dates=DATES, close=3.0):
 
 
 def _dim_rows(codes=ETF_CODES, extra=None):
-    rows = [{"ts_code": c, "name": f"测试ETF{i}", "list_date": "20200101"}
+    rows = [{
+        "ts_code": c,
+        "name": f"测试ETF{i}",
+        "list_date": "20200101",
+        "fund_type": "股票型",
+    }
             for i, c in enumerate(codes)]
     # A non-ETF (LOF) that must be filtered out of the pool.
-    rows.append({"ts_code": "999999.SH", "name": "某LOF基金", "list_date": "20200101"})
+    rows.append({
+        "ts_code": "999999.SH",
+        "name": "某LOF基金",
+        "list_date": "20200101",
+        "fund_type": "股票型",
+    })
     if extra:
         rows.extend(extra)
     return rows
@@ -105,6 +115,9 @@ def test_resolve_derives_pool_and_calendar(tmp_path):
         snapshot.historical_candidate_codes,
     )
 
+    _, _, dim_fund = load_pinned_frames(snapshot, tmp_path)
+    assert "fund_type" in dim_fund.columns
+
 
 def test_pinned_read_ignores_later_versions(tmp_path):
     _create_datasets(tmp_path)
@@ -136,7 +149,12 @@ def test_etf_pool_change_changes_fingerprint(tmp_path):
     snapshot_before = resolve_pinned_snapshot(tmp_path)
 
     # Append a new ETF to dim_fund.lance -> new dim version, larger pool.
-    extra_dim = pd.DataFrame([{"ts_code": "510030.SH", "name": "测试ETF新", "list_date": "20200101"}])
+    extra_dim = pd.DataFrame([{
+        "ts_code": "510030.SH",
+        "name": "测试ETF新",
+        "list_date": "20200101",
+        "fund_type": "股票型",
+    }])
     lance.write_dataset(extra_dim, str(tmp_path / "dim_fund.lance"), mode="append")
 
     snapshot_after = resolve_pinned_snapshot(tmp_path)

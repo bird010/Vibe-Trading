@@ -126,9 +126,33 @@ class TestRealDataSmoke:
         assert runs_dir.exists()
         children = list(runs_dir.iterdir())
         assert len(children) == 2, f"expected 2 child runs, got {len(children)}"
+        succeeded_children = 0
         for child in children:
             child_state = json.loads((child / "state.json").read_text(encoding="utf-8"))
             assert child_state["stage"] in ("SUCCEEDED", "FAILED"), f"child state={child_state}"
+            if child_state["stage"] != "SUCCEEDED":
+                continue
+            succeeded_children += 1
+            for artifact in (
+                "target_decisions.csv",
+                "orders.csv",
+                "positions.csv",
+                "equity.csv",
+            ):
+                artifact_path = child / artifact
+                assert artifact_path.exists(), f"missing {artifact} in {child.name}"
+                assert artifact_path.read_text(encoding="utf-8").count("\n") > 1
+            evidence = json.loads(
+                (child / "strategy_execution_diagnostics.json").read_text(
+                    encoding="utf-8"
+                )
+            )["execution_rule_evidence"]
+            assert evidence == {
+                "source": "RESEARCH_STATIC_RULES",
+                "pit_verified": False,
+                "rule_version": "research-cn-etf-v1",
+            }
+        assert succeeded_children >= 1, "no native Research Static child succeeded"
 
         # Comparison artifacts
         for name in ("comparison_equity.csv", "comparison_metrics.csv", "data_snapshot.json"):

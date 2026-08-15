@@ -883,8 +883,6 @@ def map_fund_type_asset_class_to_instrument_type(
 ) -> str | None:
     normalized_fund_type = (fund_type or "").strip().upper()
     normalized_asset_class = (asset_class or "").strip().lower()
-    if normalized_fund_type in {"股票型", "股票指数型"} and not normalized_asset_class:
-        return "domestic_equity_etf"
     if normalized_fund_type != "ETF":
         return None
 

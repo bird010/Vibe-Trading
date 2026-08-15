@@ -371,10 +371,20 @@ def _resolve_research_instrument_type(
     explicit = str(structured_metadata.get("instrument_type") or "").strip()
     if explicit:
         return explicit
-    return map_fund_type_asset_class_to_instrument_type(
-        str(structured_metadata.get("fund_type") or "").strip() or None,
-        str(structured_metadata.get("asset_class") or "").strip() or None,
+    fund_type = str(structured_metadata.get("fund_type") or "").strip() or None
+    asset_class = str(structured_metadata.get("asset_class") or "").strip() or None
+    instrument_type = map_fund_type_asset_class_to_instrument_type(
+        fund_type,
+        asset_class,
     )
+    if instrument_type is not None:
+        return instrument_type
+    # The current production ETF dimension uses a legacy fund_type vocabulary
+    # and has no asset_class.  This compatibility is local to Research Static;
+    # the formal PIT mapper remains strict about fund_type == ETF.
+    if fund_type in {"股票型", "股票指数型"} and asset_class is None:
+        return "domestic_equity_etf"
+    return None
 
 
 def _select_candidate(rows: list[dict[str, object]]) -> dict[str, object]:

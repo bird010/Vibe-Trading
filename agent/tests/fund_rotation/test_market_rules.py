@@ -13,7 +13,10 @@ from backtest.fund_rotation.market_rules import (
     UnknownExecutionRule,
     build_research_static_execution_rule_context,
 )
-from backtest.fund_rotation.pit_universe import PITQueryMode
+from backtest.fund_rotation.pit_universe import (
+    PITQueryMode,
+    map_fund_type_asset_class_to_instrument_type,
+)
 
 
 def test_build_research_static_context_for_supported_domestic_etf() -> None:
@@ -121,6 +124,10 @@ def test_research_static_context_uses_canonical_etf_asset_class() -> None:
     )
 
     assert context.instruments["510300.SH"].instrument_type == "domestic_equity_etf"
+
+
+def test_formal_canonical_mapper_does_not_treat_stock_fund_as_etf() -> None:
+    assert map_fund_type_asset_class_to_instrument_type("股票型", None) is None
 
 
 def test_context_rejects_provenance_not_backed_by_resolver() -> None:
