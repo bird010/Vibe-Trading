@@ -320,6 +320,8 @@ class ShadowAccountState:
     valuation_prices: tuple[tuple[str, float], ...] = ()
     execution_state: object | None = None
     execution_state_snapshot: Mapping[str, object] | None = None
+    signal_cash: float | None = None
+    execution_failure_cash: float | None = None
 
 
 @dataclass
@@ -1108,15 +1110,6 @@ class ShadowExecutionService:
             violations.append("ACCOUNT_AS_OF_TIME_MISMATCH")
         if account_state.target_weights != decision.new_targets:
             violations.append("ACCOUNT_TARGET_MISMATCH")
-        if (
-            not account_state.residual_orders
-            and not math.isclose(
-                account_state.cash_weight,
-                decision.new_cash_weight,
-                abs_tol=1e-9,
-            )
-        ):
-            violations.append("ACCOUNT_CASH_WEIGHT_MISMATCH")
         if not math.isfinite(account_state.shadow_executable_nav) or account_state.shadow_executable_nav <= 0:
             violations.append("ACCOUNT_NAV_INVALID")
         elif not math.isclose(

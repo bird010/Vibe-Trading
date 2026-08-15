@@ -833,7 +833,7 @@ class ResidualRetryAccountingAdapter:
         )
 
 
-class FinalCashMismatchAccountingAdapter:
+class FinalCashDifferenceAccountingAdapter:
     def apply(
         self,
         *,
@@ -920,13 +920,13 @@ def test_shadow_execution_retries_residual_parent_on_next_market_date() -> None:
     assert again.account_state == retry.account_state
 
 
-def test_shadow_execution_rejects_cash_mismatch_after_residual_is_cleared() -> None:
+def test_shadow_execution_persists_actual_cash_when_terminal_cash_differs_from_target() -> None:
     store, version, decision = execution_ready_store()
     previous_account_state = store.account_states[version.strategy_version_id]
     service = ShadowExecutionService(
         store,
         execution_adapter=DeterministicExecutionAdapter(),
-        accounting_adapter=FinalCashMismatchAccountingAdapter(),
+        accounting_adapter=FinalCashDifferenceAccountingAdapter(),
     )
 
     result = service.execute_due_orders(
@@ -934,11 +934,13 @@ def test_shadow_execution_rejects_cash_mismatch_after_residual_is_cleared() -> N
         execution_as_of_time=at("2026-01-06T09:31:00"),
     )
 
-    assert result.status == "CONTRACT_VIOLATION"
-    assert "ACCOUNT_CASH_WEIGHT_MISMATCH" in result.reason_codes
-    assert result.account_state is None
-    assert store.account_states[version.strategy_version_id] is previous_account_state
-    assert store.execution_results == {}
+    assert result.status == "EXECUTED"
+    assert result.reason_codes == ()
+    assert result.account_state is not None
+    assert result.account_state.cash_weight == pytest.approx(0.5)
+    assert result.account_state.residual_orders == ()
+    assert store.account_states[version.strategy_version_id] is result.account_state
+    assert store.account_states[version.strategy_version_id] is not previous_account_state
 
 
 def execution_ready_store() -> tuple[InMemoryForwardValidationStore, FrozenStrategyVersion, ShadowDecision]:

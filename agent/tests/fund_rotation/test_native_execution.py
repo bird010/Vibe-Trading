@@ -558,6 +558,67 @@ def test_native_engine_consumes_pit_rules_for_lot_tick_and_provenance():
     assert result.orders[0]["source_record_id"] == "A-src"
 
 
+def test_native_engine_lot_rounds_buy_parent_before_capacity_residual() -> None:
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates, amount=1_000_000.0)
+    result = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.031}},
+            evaluation_dates=dates[:3],
+            market=market,
+            adj=adj,
+        )
+    )
+
+    parent = result.ledger.parent_orders[0]
+    assert parent.original_requested_quantity == 300
+    assert parent.original_requested_quantity % 100 == 0
+    assert parent.status is ParentOrderStatus.FILLED
+    assert parent.remaining_quantity == 0
+    assert [attempt.filled_quantity for attempt in result.ledger.attempts] == [300]
+
+
+def test_native_engine_preserves_existing_odd_lot_when_target_is_unchanged() -> None:
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates, amount=1_000_000.0)
+    result = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.0090001}},
+            evaluation_dates=dates[:1],
+            market=market,
+            adj=adj,
+            initial_state=NativeExecutionState(
+                cash=99_100.0,
+                positions={"A": {"size": 90}},
+            ),
+        )
+    )
+
+    assert result.ledger.parent_orders == ()
+    assert result.ending_positions["A"]["size"] == 90
+
+
+def test_native_engine_rounds_buy_delta_without_rounding_away_odd_lot_holdings() -> None:
+    dates = _dates()
+    market, adj = _market(codes=("A",), dates=dates, amount=1_000_000.0)
+    result = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.015}},
+            evaluation_dates=dates[:1],
+            market=market,
+            adj=adj,
+            initial_state=NativeExecutionState(
+                cash=99_500.0,
+                positions={"A": {"size": 50}},
+            ),
+        )
+    )
+
+    assert len(result.ledger.parent_orders) == 1
+    assert result.ledger.parent_orders[0].original_requested_quantity == 100
+    assert result.ending_positions["A"]["size"] == 150
+
+
 def test_native_engine_uses_trade_date_specific_rule_knowledge_cutoffs():
     dates = _dates()
     market, adj = _market(codes=("A",), dates=dates, amount=2.0)

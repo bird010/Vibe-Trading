@@ -702,6 +702,8 @@ class ProductionShadowAccountingAdapter:
         ):
             raise ProductionAdapterError("shared accounting cash does not match native execution state")
         cash_weight = accounting.ending_cash / accounting.ending_nav
+        signal_cash = max(float(decision.new_cash_weight), 0.0) * accounting.ending_nav
+        execution_failure_cash = max(accounting.ending_cash - signal_cash, 0.0)
         residual_orders = previous_state.residual_orders
         if execution_state is not None:
             residual_orders = tuple(
@@ -735,6 +737,8 @@ class ProductionShadowAccountingAdapter:
             ),
             execution_state=execution_state,
             execution_state_snapshot=_state_snapshot(execution_state),
+            signal_cash=signal_cash,
+            execution_failure_cash=execution_failure_cash,
         )
 
 

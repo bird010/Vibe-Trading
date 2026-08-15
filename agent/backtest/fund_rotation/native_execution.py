@@ -398,14 +398,16 @@ class FundRotationExecutionEngine:
                         price = executor._last_close.get(code, 0.0)
                     if price <= 0:
                         continue
-                    target_size = int(target_weight * pre_equity / price)
+                    raw_target_size = int(target_weight * pre_equity / price)
                     _validate_short_gate(
                         code=code,
                         target_weight=target_weight,
-                        target_size=target_size,
+                        target_size=raw_target_size,
                         rules=creation_provenance[code],
                     )
-                    delta = target_size - current_size
+                    delta = raw_target_size - current_size
+                    if delta > 0:
+                        delta = creation_rules[code].round_buy_size(delta)
                     if delta:
                         deltas[code] = delta
 

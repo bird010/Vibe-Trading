@@ -742,6 +742,8 @@ def test_production_accounting_persists_actual_cash_after_partial_fill() -> None
     assert state.cash == pytest.approx(700.0)
     assert state.cash_weight == pytest.approx(0.7)
     assert state.residual_orders == (("ETF_A", 70.0),)
+    assert state.signal_cash == pytest.approx(0.0)
+    assert state.execution_failure_cash == pytest.approx(700.0)
 
 
 def test_production_execution_adapter_restores_persisted_native_snapshot() -> None:
