@@ -22,7 +22,14 @@ DIM_FUND_LANCE = "dim_fund.lance"
 FUND_ADJ_LANCE = "fact_fund_adj.lance"
 
 _FUND_COLS = ("ts_code", "trade_date", "open", "close", "vol", "amount", "high", "low", "pre_close")
-_DIM_COLS = ("ts_code", "name", "list_date")
+_DIM_COLS = (
+    "ts_code",
+    "name",
+    "list_date",
+    "fund_type",
+    "asset_class",
+    "instrument_type",
+)
 _ADJ_COLS = ("ts_code", "trade_date", "adj_factor")
 
 

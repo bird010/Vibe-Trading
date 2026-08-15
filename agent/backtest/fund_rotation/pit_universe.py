@@ -877,12 +877,14 @@ def _resolve_instrument_type(row: pd.Series) -> str | None:
     )
 
 
-def _map_fund_type_asset_class_to_instrument_type(
+def map_fund_type_asset_class_to_instrument_type(
     fund_type: str | None,
     asset_class: str | None,
 ) -> str | None:
     normalized_fund_type = (fund_type or "").strip().upper()
     normalized_asset_class = (asset_class or "").strip().lower()
+    if normalized_fund_type in {"股票型", "股票指数型"} and not normalized_asset_class:
+        return "domestic_equity_etf"
     if normalized_fund_type != "ETF":
         return None
 
@@ -897,6 +899,11 @@ def _map_fund_type_asset_class_to_instrument_type(
         "cash": "money_market_etf",
     }
     return asset_class_mapping.get(normalized_asset_class)
+
+
+_map_fund_type_asset_class_to_instrument_type = (
+    map_fund_type_asset_class_to_instrument_type
+)
 
 
 def _format_date(value: object) -> str:
@@ -922,7 +929,7 @@ def _optional_format_datetime(value: object) -> str | None:
 def to_market_rule_instrument_version(
     instrument: FundInstrumentVersion,
 ):
-    instrument_type = instrument.instrument_type or _map_fund_type_asset_class_to_instrument_type(
+    instrument_type = instrument.instrument_type or map_fund_type_asset_class_to_instrument_type(
         instrument.fund_type,
         instrument.asset_class,
     )

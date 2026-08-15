@@ -8,6 +8,7 @@ from backtest.fund_rotation.market_rules import (
     FundInstrumentVersion,
     InMemoryPITMarketRuleSource,
     MarketRuleResolver,
+    PITInvalidMarketRule,
     ResearchExecutionRuleContext,
     UnknownExecutionRule,
     build_research_static_execution_rule_context,
@@ -101,6 +102,27 @@ def test_research_static_context_requires_structured_instrument_type() -> None:
     assert context.instruments == {}
 
 
+def test_research_static_context_uses_canonical_etf_asset_class() -> None:
+    context = build_research_static_execution_rule_context(
+        dim_fund=pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "name": "沪深300ETF",
+                    "fund_type": "ETF",
+                    "asset_class": "equity",
+                }
+            ]
+        ),
+        universe_codes=["510300.SH"],
+        evaluation_start_date="20230101",
+        evaluation_end_date="20231229",
+        snapshot_version=55,
+    )
+
+    assert context.instruments["510300.SH"].instrument_type == "domestic_equity_etf"
+
+
 def test_context_rejects_provenance_not_backed_by_resolver() -> None:
     resolver = MarketRuleResolver(
         InMemoryPITMarketRuleSource(
@@ -121,6 +143,48 @@ def test_context_rejects_provenance_not_backed_by_resolver() -> None:
             rule_version="pit-r1",
             source_id="PIT",
             pit_verified=True,
+        )
+
+
+def test_resolver_rejects_record_provenance_mismatch() -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "instrument_type": "domestic_equity_etf",
+                    "valid_from": "20230101",
+                    "valid_to": None,
+                    "known_from": "20230101T000000",
+                    "snapshot_version": 55,
+                    "revision_id": "r1",
+                    "revision_order": 1,
+                    "settlement": "T+1",
+                    "lot_size": 100,
+                    "tick_size": 0.001,
+                    "price_limit_pct": 0.10,
+                    "price_limit_rule": "PCT:0.1",
+                    "short_allowed": False,
+                    "currency": "CNY",
+                    "source_record_id": "research-static:510300.SH",
+                    "source_id": "RESEARCH_STATIC_RULES",
+                    "rule_version": "research-cn-etf-v1",
+                }
+            ],
+            provenance=ExecutionRuleProvenance(
+                source_id="PIT_FIXTURE",
+                rule_version="pit-r1",
+                pit_verified=True,
+            ),
+        )
+    )
+    with pytest.raises(PITInvalidMarketRule, match="provenance mismatch"):
+        resolver.resolve(
+            FundInstrumentVersion("510300.SH", "domestic_equity_etf", "v1"),
+            trade_date="20230103",
+            knowledge_cutoff="2023-01-03T15:00:00",
+            snapshot_version=55,
+            mode=PITQueryMode.AS_WAS_KNOWN,
         )
 
 

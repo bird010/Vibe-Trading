@@ -8,7 +8,10 @@ from typing import Iterable, Mapping, Protocol
 
 import pandas as pd
 
-from .pit_universe import PITQueryMode
+from .pit_universe import (
+    PITQueryMode,
+    map_fund_type_asset_class_to_instrument_type,
+)
 
 
 class UnknownExecutionRule(ValueError):
@@ -181,7 +184,15 @@ class InMemoryPITMarketRuleSource:
             )
 
         selected = _select_candidate(candidate_rows)
-        return _record_from_row(selected)
+        record = _record_from_row(selected)
+        if self.provenance is not None and (
+            record.source_id != self.provenance.source_id
+            or record.rule_version != self.provenance.rule_version
+        ):
+            raise PITInvalidMarketRule(
+                "PIT_INVALID_EXECUTION_RULE: record provenance mismatch"
+            )
+        return record
 
 
 class MarketRuleResolver:
@@ -190,13 +201,11 @@ class MarketRuleResolver:
     def __init__(
         self,
         source: PITMarketRuleSource,
-        *,
-        provenance: ExecutionRuleProvenance | None = None,
     ):
         if source is None or not callable(getattr(source, "resolve", None)):
             raise TypeError("an explicit PIT market-rule source is required")
         self._source = source
-        self.provenance = provenance or getattr(source, "provenance", None)
+        self.provenance = getattr(source, "provenance", None)
 
     def resolve(
         self,
@@ -278,14 +287,21 @@ def build_research_static_execution_rule_context(
         )
 
     codes = tuple(sorted({str(code).strip() for code in universe_codes if str(code).strip()}))
-    has_structured_type = "fund_type" in dim_fund.columns
+    structured_columns = [
+        column
+        for column in ("fund_type", "asset_class", "instrument_type")
+        if column in dim_fund.columns
+    ]
     metadata = {
         str(row.ts_code).strip(): (
             str(row.name).strip(),
-            str(row.fund_type).strip() if has_structured_type else None,
+            {
+                column: getattr(row, column, None)
+                for column in structured_columns
+            },
         )
         for row in dim_fund[
-            ["ts_code", "name"] + (["fund_type"] if has_structured_type else [])
+            ["ts_code", "name"] + structured_columns
         ].itertuples(index=False)
     }
     records: list[dict[str, object]] = []
@@ -296,8 +312,8 @@ def build_research_static_execution_rule_context(
             raise UnknownExecutionRule(
                 f"UNKNOWN_EXECUTION_RULE: missing instrument metadata for {code}"
             )
-        name, fund_type = instrument_metadata
-        instrument_type = _research_instrument_type(name, fund_type)
+        _name, structured_metadata = instrument_metadata
+        instrument_type = _resolve_research_instrument_type(structured_metadata)
         if instrument_type != "domestic_equity_etf":
             # Leave unsupported codes unmapped.  If a strategy selects one,
             # Native Execution will fail explicitly instead of inheriting ETF
@@ -348,11 +364,17 @@ def build_research_static_execution_rule_context(
     )
 
 
-def _research_instrument_type(name: str, fund_type: str | None) -> str | None:
-    """Map only a structured, supported domestic equity fund type."""
-    if "ETF" not in name.upper() or fund_type != "股票型":
-        return None
-    return "domestic_equity_etf"
+def _resolve_research_instrument_type(
+    structured_metadata: Mapping[str, object],
+) -> str | None:
+    """Reuse the canonical PIT fund metadata classification."""
+    explicit = str(structured_metadata.get("instrument_type") or "").strip()
+    if explicit:
+        return explicit
+    return map_fund_type_asset_class_to_instrument_type(
+        str(structured_metadata.get("fund_type") or "").strip() or None,
+        str(structured_metadata.get("asset_class") or "").strip() or None,
+    )
 
 
 def _select_candidate(rows: list[dict[str, object]]) -> dict[str, object]:
