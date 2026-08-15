@@ -21,6 +21,7 @@ from backtest.fund_rotation.contracts import (
     StrategyDiagnostics,
     TargetWeightDecision,
 )
+from backtest.fund_rotation.market_rules import FundInstrumentVersion
 from src.stockpred.fund_rotation.batch_models import StrategyBatchRequest
 from src.stockpred.fund_rotation.batch_service import (
     BatchPlanningError,
@@ -222,6 +223,7 @@ def _frames_loader(snapshot, data_start, data_end):
             {
                 "ts_code": "E1",
                 "name": "测试ETF",
+                "fund_type": "股票型",
                 "list_date": "20200101",
             }
         ]
@@ -474,22 +476,52 @@ class TestExecution:
         monkeypatch,
     ):
         from backtest.fund_rotation.market_rules import (
+            ExecutionRuleProvenance,
+            InMemoryPITMarketRuleSource,
+            MarketRuleResolver,
             ResearchExecutionRuleContext,
-            build_research_static_execution_rule_context,
         )
 
-        pit_base = build_research_static_execution_rule_context(
-            dim_fund=_frames_loader(None, CALENDAR[65], CALENDAR[200])[2],
-            universe_codes=["E1"],
-            evaluation_start_date=CALENDAR[100],
-            evaluation_end_date=CALENDAR[200],
-            snapshot_version=31,
+        pit_resolver = MarketRuleResolver(
+            InMemoryPITMarketRuleSource(
+                [
+                    {
+                        "ts_code": "E1",
+                        "instrument_type": "domestic_equity_etf",
+                        "valid_from": CALENDAR[100],
+                        "valid_to": None,
+                        "known_from": f"{CALENDAR[100]}T000000",
+                        "snapshot_version": 31,
+                        "revision_id": "pit-fixture:E1:r1",
+                        "revision_order": 1,
+                        "settlement": "T+1",
+                        "lot_size": 100,
+                        "tick_size": 0.001,
+                        "price_limit_pct": 0.10,
+                        "price_limit_rule": "PCT:0.1",
+                        "short_allowed": False,
+                        "currency": "CNY",
+                        "source_record_id": "pit-fixture:E1",
+                        "source_id": "PIT_FIXTURE",
+                        "rule_version": "pit-r1",
+                    }
+                ],
+                provenance=ExecutionRuleProvenance(
+                    source_id="PIT_FIXTURE",
+                    rule_version="pit-r1",
+                    pit_verified=True,
+                ),
+            )
         )
         pit_context = ResearchExecutionRuleContext(
-            resolver=pit_base.resolver,
-            instruments=pit_base.instruments,
+            resolver=pit_resolver,
+            instruments={
+                "E1": FundInstrumentVersion(
+                    "E1", "domestic_equity_etf", "pit-fixture-v1"
+                )
+            },
             rule_version="pit-r1",
-            source_id="PIT",
+            source_id="PIT_FIXTURE",
             pit_verified=True,
         )
 
@@ -517,7 +549,7 @@ class TestExecution:
             )
         )["execution_rule_evidence"]
         assert evidence == {
-            "source": "PIT",
+            "source": "PIT_FIXTURE",
             "pit_verified": True,
             "rule_version": "pit-r1",
         }
@@ -558,6 +590,7 @@ class TestExecution:
         assert (run_dir / "orders.csv").read_text(encoding="utf-8").count("\n") > 1
         assert (run_dir / "positions.csv").read_text(encoding="utf-8").count("\n") > 1
         assert (run_dir / "equity.csv").read_text(encoding="utf-8").count("\n") > 1
+        assert (run_dir / "target_decisions.csv").read_text(encoding="utf-8").count("\n") > 1
 
     def test_each_session_receives_anchor_not_data_start(self, tmp_path):
         service = _service(tmp_path)

@@ -4,7 +4,11 @@ import pandas as pd
 import pytest
 
 from backtest.fund_rotation.market_rules import (
+    ExecutionRuleProvenance,
     FundInstrumentVersion,
+    InMemoryPITMarketRuleSource,
+    MarketRuleResolver,
+    ResearchExecutionRuleContext,
     UnknownExecutionRule,
     build_research_static_execution_rule_context,
 )
@@ -15,7 +19,12 @@ def test_build_research_static_context_for_supported_domestic_etf() -> None:
     context = build_research_static_execution_rule_context(
         dim_fund=pd.DataFrame(
             [
-                {"ts_code": "510300.SH", "name": "沪深300ETF", "list_date": "20120101"},
+                {
+                    "ts_code": "510300.SH",
+                    "name": "沪深300ETF",
+                    "fund_type": "股票型",
+                    "list_date": "20120101",
+                },
             ]
         ),
         universe_codes=["510300.SH"],
@@ -52,7 +61,12 @@ def test_research_static_context_does_not_map_unsupported_instrument_type() -> N
     context = build_research_static_execution_rule_context(
         dim_fund=pd.DataFrame(
             [
-                {"ts_code": "511010.SH", "name": "国债ETF", "list_date": "20130101"},
+                {
+                    "ts_code": "511010.SH",
+                    "name": "国债ETF",
+                    "fund_type": "债券型",
+                    "list_date": "20130101",
+                },
             ]
         ),
         universe_codes=["511010.SH"],
@@ -70,6 +84,43 @@ def test_research_static_context_does_not_map_unsupported_instrument_type() -> N
             knowledge_cutoff="2023-01-03T15:00:00",
             snapshot_version=55,
             mode=PITQueryMode.AS_WAS_KNOWN,
+        )
+
+
+def test_research_static_context_requires_structured_instrument_type() -> None:
+    context = build_research_static_execution_rule_context(
+        dim_fund=pd.DataFrame(
+            [{"ts_code": "510300.SH", "name": "沪深300ETF"}]
+        ),
+        universe_codes=["510300.SH"],
+        evaluation_start_date="20230101",
+        evaluation_end_date="20231229",
+        snapshot_version=55,
+    )
+
+    assert context.instruments == {}
+
+
+def test_context_rejects_provenance_not_backed_by_resolver() -> None:
+    resolver = MarketRuleResolver(
+        InMemoryPITMarketRuleSource(
+            [],
+            provenance=ExecutionRuleProvenance(
+                source_id="RESEARCH_STATIC_RULES",
+                rule_version="research-cn-etf-v1",
+                pit_verified=False,
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="provenance"):
+        ResearchExecutionRuleContext(
+            resolver=resolver,
+            instruments={"510300.SH": FundInstrumentVersion(
+                "510300.SH", "domestic_equity_etf", "research-static-v1"
+            )},
+            rule_version="pit-r1",
+            source_id="PIT",
+            pit_verified=True,
         )
 
 

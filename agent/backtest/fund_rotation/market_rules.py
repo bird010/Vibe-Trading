@@ -27,6 +27,13 @@ class FundInstrumentVersion:
 
 
 @dataclass(frozen=True)
+class ExecutionRuleProvenance:
+    source_id: str
+    rule_version: str
+    pit_verified: bool
+
+
+@dataclass(frozen=True)
 class MarketRuleRecord:
     ts_code: str
     instrument_type: str
@@ -81,6 +88,18 @@ class ResearchExecutionRuleContext:
     source_id: str
     pit_verified: bool = False
 
+    def __post_init__(self) -> None:
+        resolver_provenance = self.resolver.provenance
+        expected = ExecutionRuleProvenance(
+            source_id=self.source_id,
+            rule_version=self.rule_version,
+            pit_verified=self.pit_verified,
+        )
+        if resolver_provenance != expected:
+            raise ValueError(
+                "execution rule context provenance must match its resolver"
+            )
+
 
 class PITMarketRuleSource(Protocol):
     def resolve(
@@ -99,8 +118,14 @@ class PITMarketRuleSource(Protocol):
 class InMemoryPITMarketRuleSource:
     """Minimal in-memory PIT rule source for tests and research fixtures."""
 
-    def __init__(self, records: Iterable[Mapping[str, object]]):
+    def __init__(
+        self,
+        records: Iterable[Mapping[str, object]],
+        *,
+        provenance: ExecutionRuleProvenance | None = None,
+    ):
         self._records = [dict(record) for record in records]
+        self.provenance = provenance
 
     def resolve(
         self,
@@ -162,10 +187,16 @@ class InMemoryPITMarketRuleSource:
 class MarketRuleResolver:
     """Thin resolver facade that exposes versioned market-rule context."""
 
-    def __init__(self, source: PITMarketRuleSource):
+    def __init__(
+        self,
+        source: PITMarketRuleSource,
+        *,
+        provenance: ExecutionRuleProvenance | None = None,
+    ):
         if source is None or not callable(getattr(source, "resolve", None)):
             raise TypeError("an explicit PIT market-rule source is required")
         self._source = source
+        self.provenance = provenance or getattr(source, "provenance", None)
 
     def resolve(
         self,
@@ -247,19 +278,26 @@ def build_research_static_execution_rule_context(
         )
 
     codes = tuple(sorted({str(code).strip() for code in universe_codes if str(code).strip()}))
+    has_structured_type = "fund_type" in dim_fund.columns
     metadata = {
-        str(row.ts_code).strip(): str(row.name).strip()
-        for row in dim_fund[["ts_code", "name"]].itertuples(index=False)
+        str(row.ts_code).strip(): (
+            str(row.name).strip(),
+            str(row.fund_type).strip() if has_structured_type else None,
+        )
+        for row in dim_fund[
+            ["ts_code", "name"] + (["fund_type"] if has_structured_type else [])
+        ].itertuples(index=False)
     }
     records: list[dict[str, object]] = []
     instruments: dict[str, FundInstrumentVersion] = {}
     for code in codes:
-        name = metadata.get(code)
-        if not name:
+        instrument_metadata = metadata.get(code)
+        if not instrument_metadata:
             raise UnknownExecutionRule(
                 f"UNKNOWN_EXECUTION_RULE: missing instrument metadata for {code}"
             )
-        instrument_type = _research_instrument_type(name)
+        name, fund_type = instrument_metadata
+        instrument_type = _research_instrument_type(name, fund_type)
         if instrument_type != "domestic_equity_etf":
             # Leave unsupported codes unmapped.  If a strategy selects one,
             # Native Execution will fail explicitly instead of inheriting ETF
@@ -294,22 +332,26 @@ def build_research_static_execution_rule_context(
         )
 
     return ResearchExecutionRuleContext(
-        resolver=MarketRuleResolver(InMemoryPITMarketRuleSource(records)),
+        resolver=MarketRuleResolver(
+            InMemoryPITMarketRuleSource(
+                records,
+                provenance=ExecutionRuleProvenance(
+                    source_id="RESEARCH_STATIC_RULES",
+                    rule_version="research-cn-etf-v1",
+                    pit_verified=False,
+                ),
+            )
+        ),
         instruments=instruments,
         rule_version="research-cn-etf-v1",
         source_id="RESEARCH_STATIC_RULES",
     )
 
 
-def _research_instrument_type(name: str) -> str | None:
-    """Classify only types with an explicitly supported research rule set."""
-    normalized = name.upper()
-    if "ETF" not in normalized:
+def _research_instrument_type(name: str, fund_type: str | None) -> str | None:
+    """Map only a structured, supported domestic equity fund type."""
+    if "ETF" not in name.upper() or fund_type != "股票型":
         return None
-    if any(keyword in name for keyword in ("QDII", "跨境", "海外", "全球")):
-        return "cross_border_etf"
-    if any(keyword in name for keyword in ("债", "货币", "商品", "黄金")):
-        return "unsupported_etf"
     return "domestic_equity_etf"
 
 
