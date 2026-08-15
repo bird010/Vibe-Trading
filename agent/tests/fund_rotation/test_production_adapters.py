@@ -33,7 +33,9 @@ from src.stockpred.fund_rotation.forward_validation import (
     ShadowAccountState,
     ShadowDecision,
     ShadowExecutionAttempt,
+    ShadowExecutionService,
     ShadowFill,
+    ShadowOrder,
 )
 from src.stockpred.fund_rotation.production_adapters import (
     ProductionAdapterError,
@@ -512,9 +514,234 @@ def test_production_adapters_carry_native_state_into_next_accounting_cycle() -> 
     )
 
     assert seen["initial_state"] is previous.execution_state
+    assert seen["execution_mode"] == "NEW_TARGET"
     assert facts.execution_state is native_state
     assert account.execution_state is native_state
     assert account.positions == (("ETF_A", 10.0),)
+
+
+def test_production_execution_adapter_marks_residual_retry_and_drops_new_orders() -> None:
+    native_state = NativeExecutionState(cash=700.0, positions={"ETF_A": {"size": 30}})
+    seen = {}
+    adapter = ProductionShadowExecutionAdapter(
+        engine=SimpleNamespace(
+            execute=lambda request: SimpleNamespace(
+                ledger=ExecutionLedger((), (), (), ()),
+                state=native_state,
+            )
+        ),
+        request_factory=lambda **kwargs: seen.update(kwargs) or kwargs,
+        strategy_identity="strategy-1",
+        rule_identity="rule-1",
+    )
+    previous = replace(
+        _state(),
+        residual_orders=(("ETF_A", 70.0),),
+        execution_state=native_state,
+    )
+
+    adapter.execute_formal(
+        decision=_decision(),
+        orders=(SimpleNamespace(symbol="ETF_A", target_weight=0.1),),
+        previous_state=previous,
+        market_data=MarketDataForExecution(
+            execution_date="20260107",
+            available_at=datetime(2026, 1, 7, 9, 31),
+            prices=(("ETF_A", 10.0),),
+            ideal_nav=1000.0,
+            executable_nav=1000.0,
+        ),
+        execution_as_of_time=datetime(2026, 1, 7, 9, 31),
+        execution_mode="RESIDUAL_RETRY",
+    )
+
+    assert seen["execution_mode"] == "RESIDUAL_RETRY"
+    assert seen["orders"] == ()
+
+
+def test_production_shadow_service_persists_partial_cash_and_retries_native_parent() -> None:
+    parent_open = ParentOrderRecord(
+        order_id="parent-1", decision_id="sd-1", ts_code="ETF_A",
+        direction=OrderDirection.BUY, created_date="20260106",
+        original_requested_quantity=100, cumulative_filled_quantity=30,
+        remaining_quantity=70, quantity_basis_id="ETF_A:shares:1",
+        status=ParentOrderStatus.OPEN,
+    )
+    parent_filled = replace(
+        parent_open,
+        cumulative_filled_quantity=100,
+        remaining_quantity=0,
+        status=ParentOrderStatus.FILLED,
+    )
+    attempt_partial = ExecutionAttemptRecord(
+        attempt_id="attempt-1", order_id="parent-1", attempt_number=1,
+        trade_date="20260106", requested_quantity=100, filled_quantity=30,
+        unfilled_quantity=70, quantity_basis_id="ETF_A:shares:1", raw_price=10,
+        executed_price=10, commission=0, explicit_fee=0, slippage_cost=0,
+        participation_rate=0.3, status=AttemptStatus.PARTIALLY_FILLED,
+    )
+    attempt_retry = replace(
+        attempt_partial,
+        attempt_id="attempt-2",
+        attempt_number=2,
+        trade_date="20260107",
+        requested_quantity=70,
+        filled_quantity=70,
+        unfilled_quantity=0,
+        participation_rate=1.0,
+        status=AttemptStatus.FILLED,
+    )
+    trade_partial = ExecutedTradeRecord(
+        trade_id="trade-1", attempt_id="attempt-1", order_id="parent-1",
+        ts_code="ETF_A", direction=OrderDirection.BUY, quantity=30,
+        quantity_basis_id="ETF_A:shares:1", price=10, notional=300,
+        commission=0, explicit_fee=0, slippage_cost=0, trade_date="20260106",
+    )
+    trade_retry = replace(
+        trade_partial,
+        trade_id="trade-2",
+        attempt_id="attempt-2",
+        quantity=70,
+        notional=700,
+        trade_date="20260107",
+    )
+
+    class PartialFillEngine:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, request):
+            self.calls.append(request)
+            if request["execution_mode"] == "NEW_TARGET":
+                return SimpleNamespace(
+                    ledger=ExecutionLedger(
+                        (parent_open,), (attempt_partial,), (trade_partial,), ()
+                    ),
+                    state=NativeExecutionState(
+                        cash=700.0,
+                        positions={"ETF_A": {"size": 30}},
+                        active_orders=({
+                            "ts_code": "ETF_A",
+                            "parent_order_id": "parent-1",
+                            "remaining": 70,
+                        },),
+                        parent_orders=((
+                            {"order_id": "parent-1", "ts_code": "ETF_A", "target_weight": 1.0}
+                        ),),
+                        attempts=(({"attempt_id": "attempt-1"}),),
+                        trades=(({"trade_id": "trade-1"}),),
+                    ),
+                )
+            return SimpleNamespace(
+                ledger=ExecutionLedger(
+                    (parent_filled,),
+                    (attempt_partial, attempt_retry),
+                    (trade_partial, trade_retry),
+                    (),
+                ),
+                state=NativeExecutionState(
+                    cash=0.0,
+                    positions={"ETF_A": {"size": 100}},
+                    active_orders=(),
+                    parent_orders=((
+                        {"order_id": "parent-1", "ts_code": "ETF_A", "target_weight": 1.0}
+                    ),),
+                    attempts=(({"attempt_id": "attempt-1"}), {"attempt_id": "attempt-2"}),
+                    trades=(({"trade_id": "trade-1"}), {"trade_id": "trade-2"}),
+                ),
+            )
+
+    decision = replace(
+        _decision(),
+        new_targets=(("ETF_A", 1.0),),
+        new_cash_weight=0.0,
+        expected_execution_date="20260106",
+    )
+    store = InMemoryForwardValidationStore(
+        account_states={"sv-1": _state()},
+        decisions=[decision],
+        orders=[ShadowOrder("so-1", "sd-1", "ETF_A", 1.0, "20260106")],
+        market_data={
+            "20260106": MarketDataForExecution(
+                execution_date="20260106",
+                available_at=datetime(2026, 1, 6, 9, 31),
+                prices=(("ETF_A", 10.0),),
+                open_prices=(("ETF_A", 10.0),),
+                ideal_nav=1000.0,
+                executable_nav=1000.0,
+            ),
+            "20260107": MarketDataForExecution(
+                execution_date="20260107",
+                available_at=datetime(2026, 1, 7, 9, 31),
+                prices=(("ETF_A", 10.0),),
+                prior_close_prices=(("ETF_A", 10.0),),
+                open_prices=(("ETF_A", 10.0),),
+                ideal_nav=1000.0,
+                executable_nav=1000.0,
+            ),
+        },
+    )
+    engine = PartialFillEngine()
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=ProductionShadowExecutionAdapter(
+            engine=engine,
+            request_factory=lambda **kwargs: kwargs,
+            strategy_identity="strategy-1",
+            rule_identity="rule-1",
+        ),
+        accounting_adapter=ProductionShadowAccountingAdapter(),
+    )
+
+    first = service.execute_due_orders("sd-1", datetime(2026, 1, 6, 9, 31))
+    retry = service.execute_due_orders("sd-1", datetime(2026, 1, 7, 9, 31))
+
+    assert first.status == "EXECUTED"
+    assert first.account_state.cash_weight == pytest.approx(0.7)
+    assert first.account_state.residual_orders == (("ETF_A", 70.0),)
+    assert retry.status == "EXECUTED"
+    assert retry.account_state.cash_weight == pytest.approx(0.0)
+    assert retry.account_state.residual_orders == ()
+    assert [call["execution_mode"] for call in engine.calls] == [
+        "NEW_TARGET", "RESIDUAL_RETRY"
+    ]
+    assert engine.calls[1]["orders"] == ()
+    assert engine.calls[1]["initial_state"] is first.account_state.execution_state
+    assert retry.attempts[0].attempt_id == "attempt-2"
+
+
+def test_production_accounting_persists_actual_cash_after_partial_fill() -> None:
+    decision = replace(
+        _decision(),
+        new_targets=(("ETF_A", 1.0),),
+        new_cash_weight=0.0,
+    )
+    previous = replace(_state(), target_weights=(), cash=1000.0)
+    native_state = SimpleNamespace(
+        cash=700.0,
+        positions={"ETF_A": {"size": 30}},
+        active_orders=({"ts_code": "ETF_A", "remaining": 70},),
+    )
+
+    state = ProductionShadowAccountingAdapter().apply_formal(
+        decision=decision,
+        previous_state=previous,
+        fills=(ShadowFill("trade-1", "attempt-1", "ETF_A", 30.0, 10.0, 0.0),),
+        execution_state=native_state,
+        market_data=MarketDataForExecution(
+            execution_date="20260106",
+            available_at=datetime(2026, 1, 6, 9, 31),
+            prices=(("ETF_A", 10.0),),
+            open_prices=(("ETF_A", 10.0),),
+            ideal_nav=1000.0,
+            executable_nav=1000.0,
+        ),
+        execution_as_of_time=datetime(2026, 1, 6, 9, 31),
+    )
+
+    assert state.cash == pytest.approx(700.0)
+    assert state.cash_weight == pytest.approx(0.7)
+    assert state.residual_orders == (("ETF_A", 70.0),)
 
 
 def test_production_execution_adapter_restores_persisted_native_snapshot() -> None:

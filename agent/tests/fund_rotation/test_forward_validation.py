@@ -775,9 +775,22 @@ def test_shadow_account_state_is_continuous_across_decision_cycles() -> None:
 class ResidualRetryExecutionAdapter:
     def __init__(self) -> None:
         self.execution_dates: list[str] = []
+        self.execution_modes: list[str] = []
+        self.order_counts: list[int] = []
 
-    def execute_formal(self, *, decision, orders, previous_state, market_data, execution_as_of_time):
+    def execute_formal(
+        self,
+        *,
+        decision,
+        orders,
+        previous_state,
+        market_data,
+        execution_as_of_time,
+        execution_mode,
+    ):
         self.execution_dates.append(market_data.execution_date)
+        self.execution_modes.append(execution_mode)
+        self.order_counts.append(len(orders))
         attempt_number = len(self.execution_dates)
         attempt = ShadowExecutionAttempt(
             attempt_id=f"retry-attempt-{attempt_number}",
@@ -802,8 +815,8 @@ class ResidualRetryAccountingAdapter:
         return ShadowAccountState(
             strategy_version_id=decision.strategy_version_id,
             as_of_time=execution_as_of_time,
-            cash=0.0,
-            positions=(("ETF_A", sum(fill.quantity for fill in fills)),),
+            cash=700.0 if market_data.execution_date == "2026-01-06" else 0.0,
+            positions=(("ETF_A", 30.0 if market_data.execution_date == "2026-01-06" else 100.0),),
             target_weights=decision.new_targets,
             residual_orders=() if market_data.execution_date == "2026-01-07" else (("ETF_A", 7.0),),
             shadow_ideal_nav=1000.0,
@@ -816,7 +829,31 @@ class ResidualRetryAccountingAdapter:
                 >= decision.expected_execution_date.replace("-", "")
                 else 1
             ),
-            cash_weight=0.0,
+            cash_weight=0.7 if market_data.execution_date == "2026-01-06" else 0.0,
+        )
+
+
+class FinalCashMismatchAccountingAdapter:
+    def apply(
+        self,
+        *,
+        decision,
+        previous_state,
+        fills,
+        market_data,
+        execution_as_of_time,
+    ):
+        return replace(
+            previous_state,
+            as_of_time=execution_as_of_time,
+            cash=500.0,
+            positions=(("ETF_A", 50.0),),
+            target_weights=decision.new_targets,
+            residual_orders=(),
+            shadow_ideal_nav=market_data.ideal_nav,
+            shadow_executable_nav=1000.0,
+            completed_rebalance_cycles=previous_state.completed_rebalance_cycles + 1,
+            cash_weight=0.5,
         )
 
 
@@ -870,13 +907,38 @@ def test_shadow_execution_retries_residual_parent_on_next_market_date() -> None:
     )
 
     assert first.status == "EXECUTED"
+    assert first.account_state.cash_weight == pytest.approx(0.7)
     assert retry.status == "EXECUTED"
     assert execution_adapter.execution_dates == ["2026-01-06", "2026-01-07"]
+    assert execution_adapter.execution_modes == ["NEW_TARGET", "RESIDUAL_RETRY"]
+    assert execution_adapter.order_counts[0] > 0
+    assert execution_adapter.order_counts[1] == 0
     assert retry.execution_idempotency_key == f"execution:{decision.shadow_decision_id}:2026-01-07"
     assert retry.account_state.residual_orders == ()
     assert retry.account_state.completed_rebalance_cycles == first.account_state.completed_rebalance_cycles
     assert again.execution_idempotency_key == retry.execution_idempotency_key
     assert again.account_state == retry.account_state
+
+
+def test_shadow_execution_rejects_cash_mismatch_after_residual_is_cleared() -> None:
+    store, version, decision = execution_ready_store()
+    previous_account_state = store.account_states[version.strategy_version_id]
+    service = ShadowExecutionService(
+        store,
+        execution_adapter=DeterministicExecutionAdapter(),
+        accounting_adapter=FinalCashMismatchAccountingAdapter(),
+    )
+
+    result = service.execute_due_orders(
+        decision.shadow_decision_id,
+        execution_as_of_time=at("2026-01-06T09:31:00"),
+    )
+
+    assert result.status == "CONTRACT_VIOLATION"
+    assert "ACCOUNT_CASH_WEIGHT_MISMATCH" in result.reason_codes
+    assert result.account_state is None
+    assert store.account_states[version.strategy_version_id] is previous_account_state
+    assert store.execution_results == {}
 
 
 def execution_ready_store() -> tuple[InMemoryForwardValidationStore, FrozenStrategyVersion, ShadowDecision]:

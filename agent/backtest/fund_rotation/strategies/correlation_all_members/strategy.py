@@ -188,19 +188,9 @@ class CorrelationAllMembersSession:
             or not self._clusters
         )
         if reclustering:
-            historical_codes = set(
-                getattr(view, "historical_candidate_codes", ())
-                or dim_pool["ts_code"].astype(str)
-            )
-            if getattr(view, "pit_universe_lookup", None) is not None:
-                historical_pit_codes = set()
-                for week in window.index:
-                    historical_pit_codes.update(
-                        view.pit_universe_codes(_week_key_to_yyyymmdd(week))
-                    )
-                historical_codes &= historical_pit_codes
+            current_codes = set(dim_pool["ts_code"].astype(str))
             valid_codes = [
-                code for code in sorted(historical_codes) if code in window.columns
+                code for code in sorted(current_codes) if code in window.columns
             ]
             if cfg.min_valid_weeks > 0 and valid_codes:
                 counts = window[valid_codes].notna().sum()

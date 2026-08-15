@@ -234,9 +234,8 @@ class CausalDataView:
         if adj_close.empty:
             self._audit("adjusted_closes", self._METHOD_FIELDS["adjusted_closes"], adj_close)
             return adj_close.copy()
-        # Restrict columns to the snapshot universe.
-        historical_codes = self.historical_candidate_codes or self._universe_codes
-        cols = [c for c in adj_close.columns if str(c) in historical_codes]
+        # Keep the default strategy surface bounded to the signal-date universe.
+        cols = [c for c in adj_close.columns if str(c) in self._universe_codes]
         adj_close = adj_close[cols]
         if lookback == 0:
             adj_close = adj_close.iloc[0:0]
@@ -263,14 +262,15 @@ class CausalDataView:
         if adj_close.empty:
             self._audit("returns", self._METHOD_FIELDS["returns"], adj_close)
             return adj_close.copy()
-        historical_codes = self.historical_candidate_codes or self._universe_codes
-        cols = [c for c in adj_close.columns if str(c) in historical_codes]
+        # Keep the default strategy surface bounded to the signal-date universe.
+        current_codes = self._universe_codes
+        cols = [c for c in adj_close.columns if str(c) in current_codes]
         adj_close = adj_close[cols]
         if frequency == "daily":
             rets = adj_close.pct_change(fill_method=None)
         elif frequency == "weekly":
             rets = compute_weekly_returns(self._fund_daily, self._fund_adj, signal_str)
-            rets = rets[[c for c in rets.columns if str(c) in historical_codes]]
+            rets = rets[[c for c in rets.columns if str(c) in current_codes]]
         elif frequency == "monthly":
             monthly = adj_close.copy()
             monthly.index = pd.to_datetime(monthly.index, format="%Y%m%d")

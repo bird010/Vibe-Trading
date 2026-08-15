@@ -127,13 +127,15 @@ class TestQuerySurface:
         rets = view.returns("weekly", lookback=4)
         assert not rets.empty
 
-    def test_historical_candidate_returns_are_separate_from_current_selection_pool(self):
+    def test_returns_are_limited_to_current_selection_pool(self):
         view = _view(signal_date="20240110", universe=("A",))
         view.historical_candidate_codes = frozenset({"A", "B"})
 
         returns = view.returns("weekly", lookback=4)
+        adjusted_closes = view.adjusted_closes(lookback=4)
 
-        assert "B" in returns.columns
+        assert set(returns.columns) == {"A"}
+        assert set(adjusted_closes.columns) == {"A"}
         assert {instrument.ts_code for instrument in view.eligible_universe()} == {"A"}
 
     def test_returns_daily(self):

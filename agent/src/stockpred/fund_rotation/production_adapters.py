@@ -59,7 +59,7 @@ class _StrategyProviderContract(Protocol):
 
 @runtime_checkable
 class _ExecutionAdapterContract(Protocol):
-    def execute_formal(self, *, decision: ShadowDecision, orders: tuple, previous_state: ShadowAccountState, market_data: MarketDataForExecution, execution_as_of_time: datetime) -> ShadowExecutionFacts: ...
+    def execute_formal(self, *, decision: ShadowDecision, orders: tuple, previous_state: ShadowAccountState, market_data: MarketDataForExecution, execution_as_of_time: datetime, execution_mode: str) -> ShadowExecutionFacts: ...
 
 
 @runtime_checkable
@@ -80,13 +80,20 @@ def _implements_contract(value: object, contract: type[Protocol]) -> bool:
         return False
     expected_names = {
         _StrategyProviderContract: {"store", "strategy_version_id", "as_of_time"},
-        _ExecutionAdapterContract: {"decision", "orders", "previous_state", "market_data", "execution_as_of_time"},
+        _ExecutionAdapterContract: {"decision", "orders", "previous_state", "market_data", "execution_as_of_time", "execution_mode"},
         _AccountingAdapterContract: {"decision", "previous_state", "fills", "execution_state", "market_data", "execution_as_of_time"},
     }[contract]
+    optional_names = {
+        _ExecutionAdapterContract: {"execution_mode"},
+    }.get(contract, set())
     return {
         p.name for p in params if p.kind is Parameter.KEYWORD_ONLY
     } == expected_names and all(
-        p.kind is Parameter.KEYWORD_ONLY and p.default is Parameter.empty
+        p.kind is Parameter.KEYWORD_ONLY
+        and (
+            p.default is Parameter.empty
+            or p.name in optional_names
+        )
         for p in params
     )
 
@@ -444,10 +451,16 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
         previous_state: ShadowAccountState,
         market_data: MarketDataForExecution,
         execution_as_of_time: datetime,
+        execution_mode: str = "NEW_TARGET",
     ) -> ShadowExecutionFacts:
+        if execution_mode not in {"NEW_TARGET", "RESIDUAL_RETRY"}:
+            raise ProductionAdapterError(
+                f"unknown formal execution mode: {execution_mode!r}"
+            )
+        request_orders = () if execution_mode == "RESIDUAL_RETRY" else orders
         request = self.request_factory(
             decision=decision,
-            orders=orders,
+            orders=request_orders,
             previous_state=previous_state,
             initial_state=(
                 _restore_native_state(
@@ -458,6 +471,7 @@ class ProductionShadowExecutionAdapter(ShadowExecutionAdapter):
             ),
             market_data=market_data,
             execution_as_of_time=execution_as_of_time,
+            execution_mode=execution_mode,
             strategy_identity=self.strategy_identity,
             rule_identity=self.rule_identity,
         )

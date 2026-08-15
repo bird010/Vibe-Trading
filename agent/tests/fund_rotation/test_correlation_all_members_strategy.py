@@ -299,10 +299,11 @@ class TestStrategyProtocol:
         import backtest.fund_rotation.strategies.correlation_all_members.strategy as strategy_module
 
         captured_eligible_by_week = {}
+        captured_distance_columns = []
 
         def fake_cluster(_distance, k):
             assert k == 2
-            assert "HISTORICAL.SH" in _distance.index
+            captured_distance_columns.append(tuple(_distance.index))
             return {"OLD.SH": 1, "NEW.SH": 1, "WIN.SH": 2}
 
         def fake_momentum(_returns, _clusters, _window):
@@ -421,6 +422,7 @@ class TestStrategyProtocol:
         )
         assert set(captured_eligible_by_week[pd.Timestamp(signal_date)]) == set(codes)
         assert pit_calls
+        assert all("HISTORICAL.SH" not in captured for captured in captured_distance_columns)
 
 
 class TestLegacyAdapter:
