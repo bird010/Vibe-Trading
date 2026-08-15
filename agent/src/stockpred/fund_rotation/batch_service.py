@@ -37,6 +37,10 @@ from backtest.fund_rotation.runner import (
     FundRotationBacktestRunner,
     SubRunStatus,
 )
+from backtest.fund_rotation.market_rules import (
+    ResearchExecutionRuleContext,
+    build_research_static_execution_rule_context,
+)
 from backtest.fund_rotation.strategies.registry import default_fund_rotation_strategies
 from src.stockpred.fund_rotation.artifact_publisher import read_valid_manifest
 from src.stockpred.fund_rotation.batch_child_runtime import BatchChildRuntime
@@ -98,6 +102,7 @@ class BatchService:
         catalog=None,
         metadata_loader: Callable[[], Any] | None = None,
         frames_loader: Callable[..., tuple] | None = None,
+        execution_rule_context_loader: Callable[..., ResearchExecutionRuleContext | None] | None = None,
         auto_start: bool = True,
     ) -> None:
         from backtest.fund_rotation.catalog import FundRotationStrategyCatalog
@@ -121,6 +126,7 @@ class BatchService:
         )
         self.metadata_loader = metadata_loader
         self.frames_loader = frames_loader
+        self.execution_rule_context_loader = execution_rule_context_loader
         self.auto_start = auto_start
         self.executor = ThreadPoolExecutor(
             max_workers=1,
@@ -337,6 +343,37 @@ class BatchService:
     def _load_frames(self, snapshot, data_start: str, data_end: str):
         return self.frames_loader(snapshot, data_start, data_end)
 
+    def _resolve_execution_rule_context(
+        self,
+        *,
+        request: StrategyBatchRequest,
+        snapshot,
+        dim_fund,
+    ) -> ResearchExecutionRuleContext:
+        """Resolve real PIT rules first, then explicit research-static rules."""
+        loader = self.execution_rule_context_loader
+        if loader is not None:
+            context = loader(
+                request=request,
+                snapshot=snapshot,
+                dim_fund=dim_fund,
+            )
+            if context is not None:
+                if not context.instruments:
+                    raise ValueError("execution rule context has no instruments")
+                return context
+        if request.mode != "RESEARCH_ONLY":
+            raise ValueError(
+                "research static execution rules are only available for RESEARCH_ONLY"
+            )
+        return build_research_static_execution_rule_context(
+            dim_fund=dim_fund,
+            universe_codes=snapshot.universe_codes,
+            evaluation_start_date=request.evaluation_start_date,
+            evaluation_end_date=request.evaluation_end_date,
+            snapshot_version=snapshot.dim_version,
+        )
+
     # ── execution ──
 
     def run_batch_sync(self, batch_id: str) -> None:
@@ -434,7 +471,26 @@ class BatchService:
             request.evaluation_end_date,
         )
         execution_config = ExecutionConfig.model_validate(dict(request.execution))
-        runner = FundRotationBacktestRunner(fund_daily, fund_adj, dim_fund)
+        try:
+            rule_context = self._resolve_execution_rule_context(
+                request=request,
+                snapshot=snapshot,
+                dim_fund=dim_fund,
+            )
+        except Exception as exc:
+            self._fail_batch(
+                batch_id,
+                stage=BatchStage.SNAPSHOTTING_DATA.value,
+                error=f"execution rule context failed: {exc}",
+            )
+            return
+        runner = FundRotationBacktestRunner(
+            fund_daily,
+            fund_adj,
+            dim_fund,
+            market_rule_resolver=rule_context.resolver,
+            market_rule_instruments=rule_context.instruments,
+        )
 
         advance(BatchStage.RUNNING_STRATEGIES)
 
@@ -528,6 +584,11 @@ class BatchService:
                     resolved_requirements=plan["resolved_requirements"],
                     run_id=run_id,
                 )
+                result.execution_diagnostics["execution_rule_evidence"] = {
+                    "source": rule_context.source_id,
+                    "pit_verified": rule_context.pit_verified,
+                    "rule_version": rule_context.rule_version,
+                }
                 status = result.status.value
                 run_results[variant_key] = result
             except Exception as exc:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 
 import pytest
 from pydantic import BaseModel
@@ -115,6 +116,60 @@ class FakeBatchStrategy:
         return FakeBatchSession(config, self.execution_log, record)
 
 
+NATIVE_FAKE_DESCRIPTOR = FundRotationStrategyDescriptor(
+    id="native_fake_batch",
+    name="Native Fake Batch",
+    description="Native execution batch test double",
+    interface_version="1.0",
+    supported_universe=("etf",),
+    deterministic=True,
+)
+
+
+class NativeFakeBatchSession(FakeBatchSession):
+    def evaluate(self, context):
+        decision = super().evaluate(context)
+        return replace(
+            decision,
+            target_weights={"E1": 1.0},
+            cash_weight=0.0,
+        )
+
+
+class NativeFakeBatchStrategy(FakeBatchStrategy):
+    descriptor = NATIVE_FAKE_DESCRIPTOR
+
+    def resolve_requirements(self, config):
+        return StrategyDataRequirements(
+            required_datasets=("fund", "dim_fund"),
+            required_fields=(
+                "close",
+                "ts_code",
+                "trade_date",
+                "name",
+                "list_date",
+                "adj_factor",
+                "open",
+                "high",
+                "low",
+                "pre_close",
+                "vol",
+                "amount",
+            ),
+            warmup_trade_days=config.lookback_days,
+            frequency="weekly",
+            needs_benchmark=False,
+        )
+
+    def create_session(self, initialization, config):
+        record = {
+            "run_id": initialization.run_id,
+            "lookback_days": config.lookback_days,
+        }
+        self.session_log.append(record)
+        return NativeFakeBatchSession(config, self.execution_log, record)
+
+
 def _calendar_metadata():
     from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
 
@@ -174,11 +229,25 @@ def _frames_loader(snapshot, data_start, data_end):
     return fund_daily, fund_adj, dim_fund
 
 
+def _native_frames_loader(snapshot, data_start, data_end):
+    fund_daily, fund_adj, dim_fund = _frames_loader(
+        snapshot,
+        data_start,
+        data_end,
+    )
+    fund_daily = fund_daily.copy()
+    fund_daily["vol"] = 1_000_000
+    fund_daily["amount"] = 10_000_000.0
+    return fund_daily, fund_adj, dim_fund
+
+
 def _service(
     tmp_path,
     *,
     frames_loader=None,
     fail_frames=False,
+    execution_rule_context_loader=None,
+    strategy_class=FakeBatchStrategy,
     auto_start=False,
 ):
     FakeBatchStrategy.session_log = []
@@ -192,12 +261,13 @@ def _service(
 
     from backtest.fund_rotation.catalog import FundRotationStrategyCatalog
 
-    catalog = FundRotationStrategyCatalog([FakeBatchStrategy])
+    catalog = FundRotationStrategyCatalog([strategy_class])
     return BatchService(
         tmp_path,
         catalog=catalog,
         metadata_loader=_calendar_metadata,
         frames_loader=frames,
+        execution_rule_context_loader=execution_rule_context_loader,
         auto_start=auto_start,
     )
 
@@ -398,6 +468,97 @@ class TestPlanning:
 
 
 class TestExecution:
+    def test_real_pit_context_takes_priority_over_research_static(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from backtest.fund_rotation.market_rules import (
+            ResearchExecutionRuleContext,
+            build_research_static_execution_rule_context,
+        )
+
+        pit_base = build_research_static_execution_rule_context(
+            dim_fund=_frames_loader(None, CALENDAR[65], CALENDAR[200])[2],
+            universe_codes=["E1"],
+            evaluation_start_date=CALENDAR[100],
+            evaluation_end_date=CALENDAR[200],
+            snapshot_version=31,
+        )
+        pit_context = ResearchExecutionRuleContext(
+            resolver=pit_base.resolver,
+            instruments=pit_base.instruments,
+            rule_version="pit-r1",
+            source_id="PIT",
+            pit_verified=True,
+        )
+
+        def forbidden(**kwargs):
+            raise AssertionError("research fallback must not run when PIT is available")
+
+        monkeypatch.setattr(
+            "src.stockpred.fund_rotation.batch_service.build_research_static_execution_rule_context",
+            forbidden,
+        )
+        service = _service(
+            tmp_path,
+            strategy_class=NativeFakeBatchStrategy,
+            execution_rule_context_loader=lambda **kwargs: pit_context,
+        )
+        outcome = _submit_and_run(
+            service,
+            _request([{"strategy_id": "native_fake_batch", "params": {"lookback_days": 30}}]),
+        )
+
+        run_id = _resolved(service, outcome["batch_id"])["variants"][0]["run_id"]
+        evidence = json.loads(
+            (service.runs_root / run_id / "strategy_execution_diagnostics.json").read_text(
+                encoding="utf-8"
+            )
+        )["execution_rule_evidence"]
+        assert evidence == {
+            "source": "PIT",
+            "pit_verified": True,
+            "rule_version": "pit-r1",
+        }
+
+    def test_research_only_batch_uses_static_rules_and_native_execution(
+        self,
+        tmp_path,
+    ):
+        service = _service(
+            tmp_path,
+            frames_loader=_native_frames_loader,
+            strategy_class=NativeFakeBatchStrategy,
+        )
+        request = _request(
+            [{"strategy_id": "native_fake_batch", "params": {"lookback_days": 30}}]
+        )
+
+        outcome = _submit_and_run(service, request)
+        resolved = _resolved(service, outcome["batch_id"])
+        assert _state(service, outcome["batch_id"])["stage"] == "SUCCEEDED"
+
+        run_id = resolved["variants"][0]["run_id"]
+        run_dir = service.runs_root / run_id
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        evidence = json.loads(
+            (run_dir / "strategy_execution_diagnostics.json").read_text(
+                encoding="utf-8"
+            )
+        )["execution_rule_evidence"]
+
+        assert summary["status"] == "SUCCEEDED"
+        assert summary["partial"] is False
+        assert evidence == {
+            "source": "RESEARCH_STATIC_RULES",
+            "pit_verified": False,
+            "rule_version": "research-cn-etf-v1",
+        }
+        assert (run_dir / "orders.csv").read_text(encoding="utf-8").count("\n") > 1
+        assert (run_dir / "positions.csv").read_text(encoding="utf-8").count("\n") > 1
+        assert (run_dir / "equity.csv").read_text(encoding="utf-8").count("\n") > 1
+
     def test_each_session_receives_anchor_not_data_start(self, tmp_path):
         service = _service(tmp_path)
         request = _request(

@@ -71,6 +71,17 @@ class MarketRules:
     known_from: str = ""
 
 
+@dataclass(frozen=True)
+class ResearchExecutionRuleContext:
+    """Explicit static execution-rule context for research-only backtests."""
+
+    resolver: "MarketRuleResolver"
+    instruments: dict[str, FundInstrumentVersion]
+    rule_version: str
+    source_id: str
+    pit_verified: bool = False
+
+
 class PITMarketRuleSource(Protocol):
     def resolve(
         self,
@@ -202,6 +213,104 @@ class MarketRuleResolver:
             valid_to=record.valid_to,
             known_from=record.known_from,
         )
+
+
+def build_research_static_execution_rule_context(
+    *,
+    dim_fund: pd.DataFrame,
+    universe_codes: Iterable[str],
+    evaluation_start_date: str,
+    evaluation_end_date: str,
+    snapshot_version: int,
+) -> ResearchExecutionRuleContext:
+    """Build explicit, auditable static rules for ``RESEARCH_ONLY`` runs.
+
+    This is deliberately a source-backed ``MarketRuleResolver`` context so the
+    native execution engine keeps the same rule lookup and provenance path as
+    formal runs.  The rules are not PIT evidence and are marked accordingly.
+    """
+    start = _to_timestamp(evaluation_start_date, "evaluation_start_date")
+    end = _to_timestamp(evaluation_end_date, "evaluation_end_date")
+    if start > end:
+        raise ValueError("evaluation_start_date must be <= evaluation_end_date")
+    snapshot = _coerce_int(snapshot_version)
+    if snapshot < 1:
+        raise ValueError("snapshot_version must be positive")
+    if not isinstance(dim_fund, pd.DataFrame):
+        raise TypeError("dim_fund must be a pandas DataFrame")
+    required_columns = {"ts_code", "name"}
+    missing_columns = required_columns.difference(dim_fund.columns)
+    if missing_columns:
+        raise UnknownExecutionRule(
+            "missing instrument metadata columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    codes = tuple(sorted({str(code).strip() for code in universe_codes if str(code).strip()}))
+    metadata = {
+        str(row.ts_code).strip(): str(row.name).strip()
+        for row in dim_fund[["ts_code", "name"]].itertuples(index=False)
+    }
+    records: list[dict[str, object]] = []
+    instruments: dict[str, FundInstrumentVersion] = {}
+    for code in codes:
+        name = metadata.get(code)
+        if not name:
+            raise UnknownExecutionRule(
+                f"UNKNOWN_EXECUTION_RULE: missing instrument metadata for {code}"
+            )
+        instrument_type = _research_instrument_type(name)
+        if instrument_type != "domestic_equity_etf":
+            # Leave unsupported codes unmapped.  If a strategy selects one,
+            # Native Execution will fail explicitly instead of inheriting ETF
+            # rules that do not apply to it.
+            continue
+        instruments[code] = FundInstrumentVersion(
+            ts_code=code,
+            instrument_type=instrument_type,
+            version="research-static-v1",
+        )
+        records.append(
+            {
+                "ts_code": code,
+                "instrument_type": instrument_type,
+                "valid_from": start.strftime("%Y%m%d"),
+                "valid_to": None,
+                "known_from": start.strftime("%Y%m%dT000000"),
+                "snapshot_version": snapshot,
+                "revision_id": f"research-static:{code}:r1",
+                "revision_order": 1,
+                "settlement": "T+1",
+                "lot_size": 100,
+                "tick_size": 0.001,
+                "price_limit_pct": 0.10,
+                "price_limit_rule": "PCT:0.1",
+                "short_allowed": False,
+                "currency": "CNY",
+                "source_record_id": f"research-static:{code}",
+                "source_id": "RESEARCH_STATIC_RULES",
+                "rule_version": "research-cn-etf-v1",
+            }
+        )
+
+    return ResearchExecutionRuleContext(
+        resolver=MarketRuleResolver(InMemoryPITMarketRuleSource(records)),
+        instruments=instruments,
+        rule_version="research-cn-etf-v1",
+        source_id="RESEARCH_STATIC_RULES",
+    )
+
+
+def _research_instrument_type(name: str) -> str | None:
+    """Classify only types with an explicitly supported research rule set."""
+    normalized = name.upper()
+    if "ETF" not in normalized:
+        return None
+    if any(keyword in name for keyword in ("QDII", "跨境", "海外", "全球")):
+        return "cross_border_etf"
+    if any(keyword in name for keyword in ("债", "货币", "商品", "黄金")):
+        return "unsupported_etf"
+    return "domestic_equity_etf"
 
 
 def _select_candidate(rows: list[dict[str, object]]) -> dict[str, object]:
