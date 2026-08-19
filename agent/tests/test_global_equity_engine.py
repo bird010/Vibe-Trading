@@ -66,25 +66,25 @@ class TestCanExecute:
 class TestRoundSize:
     def test_us_fractional(self) -> None:
         engine = _us_engine()
-        assert engine.round_size(10.567, 180.0) == 10.57
+        assert engine.round_size("AAPL", 10.567, 180.0) == 10.57
 
     def test_us_tiny_fraction(self) -> None:
         engine = _us_engine()
-        assert engine.round_size(0.005, 180.0) == 0.01
+        assert engine.round_size("AAPL", 0.005, 180.0) == 0.01
 
     def test_us_negative_clamps(self) -> None:
         engine = _us_engine()
-        assert engine.round_size(-5.0, 180.0) == 0.0
+        assert engine.round_size("AAPL", -5.0, 180.0) == 0.0
 
     def test_hk_100_share_lots(self) -> None:
         engine = _hk_engine()
-        assert engine.round_size(350.0, 350.0) == 300
-        assert engine.round_size(99.0, 350.0) == 0
-        assert engine.round_size(500.0, 350.0) == 500
+        assert engine.round_size("0700.HK", 350.0, 350.0) == 300
+        assert engine.round_size("0700.HK", 99.0, 350.0) == 0
+        assert engine.round_size("0700.HK", 500.0, 350.0) == 500
 
     def test_hk_rounds_down(self) -> None:
         engine = _hk_engine()
-        assert engine.round_size(199.0, 80.0) == 100
+        assert engine.round_size("9988.HK", 199.0, 80.0) == 100
 
 
 # ---------------------------------------------------------------------------
@@ -95,24 +95,24 @@ class TestRoundSize:
 class TestCommission:
     def test_us_zero_commission(self) -> None:
         engine = _us_engine()
-        comm = engine.calc_commission(100.0, 180.0, 1, is_open=True)
+        comm = engine.calc_commission("AAPL", 100.0, 180.0, 1, is_open=True)
         assert comm == 0.0
 
     def test_us_zero_both_sides(self) -> None:
         engine = _us_engine()
-        assert engine.calc_commission(100.0, 180.0, 1, is_open=True) == 0.0
-        assert engine.calc_commission(100.0, 180.0, 1, is_open=False) == 0.0
+        assert engine.calc_commission("AAPL", 100.0, 180.0, 1, is_open=True) == 0.0
+        assert engine.calc_commission("AAPL", 100.0, 180.0, 1, is_open=False) == 0.0
 
     def test_hk_has_commission(self) -> None:
         engine = _hk_engine()
-        comm = engine.calc_commission(1000, 350.0, 1, is_open=True)
+        comm = engine.calc_commission("0700.HK", 1000, 350.0, 1, is_open=True)
         assert comm > 0
 
     def test_hk_stamp_tax_bilateral(self) -> None:
         """HK stamp tax charged on both buy and sell."""
         engine = _hk_engine()
-        comm_buy = engine.calc_commission(1000, 350.0, 1, is_open=True)
-        comm_sell = engine.calc_commission(1000, 350.0, 1, is_open=False)
+        comm_buy = engine.calc_commission("0700.HK", 1000, 350.0, 1, is_open=True)
+        comm_sell = engine.calc_commission("0700.HK", 1000, 350.0, 1, is_open=False)
         # Both should be approximately equal (stamp tax bilateral)
         assert comm_buy == pytest.approx(comm_sell, rel=0.01)
 
@@ -121,7 +121,7 @@ class TestCommission:
         engine = _hk_engine()
         size, price = 1000, 350.0
         notional = size * price  # 350,000
-        comm = engine.calc_commission(size, price, 1, is_open=True)
+        comm = engine.calc_commission("0700.HK", size, price, 1, is_open=True)
         # Expected components:
         expected = (
             notional * engine.hk_commission      # broker ~¥52.5
@@ -140,24 +140,24 @@ class TestCommission:
 class TestSlippage:
     def test_us_lower_slippage(self) -> None:
         engine = _us_engine()
-        us_slipped = engine.apply_slippage(100.0, 1) - 100.0
+        us_slipped = engine.apply_slippage("AAPL", 100.0, 1) - 100.0
         hk_engine = _hk_engine()
-        hk_slipped = hk_engine.apply_slippage(100.0, 1) - 100.0
+        hk_slipped = hk_engine.apply_slippage("0700.HK", 100.0, 1) - 100.0
         assert us_slipped < hk_slipped
 
     def test_us_slippage_rate(self) -> None:
         engine = _us_engine()
-        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.05)
+        assert engine.apply_slippage("AAPL", 100.0, 1) == pytest.approx(100.05)
 
     def test_hk_slippage_rate(self) -> None:
         engine = _hk_engine()
-        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.1)
+        assert engine.apply_slippage("AAPL", 100.0, 1) == pytest.approx(100.1)
 
     def test_custom_slippage(self) -> None:
         engine = GlobalEquityEngine(
             {"initial_cash": 500_000, "slippage_us": 0.002}, market="us",
         )
-        assert engine.apply_slippage(100.0, 1) == pytest.approx(100.2)
+        assert engine.apply_slippage("AAPL", 100.0, 1) == pytest.approx(100.2)
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,6 @@ data/parquet/
 data/backup/
 
 # Internal docs (plans, specs)
-docs/
 !wiki/docs/
 !wiki/docs/**
 docs/screenshots/agent-run.png
@@ -90,3 +89,13 @@ AGENTS.md
 # Alpha Zoo wiki artifacts (generated, not source)
 wiki/alpha-library/manifest.json
 wiki/alpha-library/content/
+
+tmp/
+
+.qoder/
+.worktrees/
+.superpowers/
+.playwright-cli/
+.pytest_tmp/
+
+agent/tests/.pytest-*

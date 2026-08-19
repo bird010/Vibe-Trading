@@ -272,7 +272,6 @@ class BaseEngine(ABC):
         self.trades: List[TradeRecord] = []
         self.equity_snapshots: List[EquitySnapshot] = []
         self._bar_idx: int = 0
-        self._active_symbol: str = ""  # set by _rebalance/_close_position for subclass use
 
     # ── Market rule interface (subclass must implement) ──
 
@@ -290,10 +289,11 @@ class BaseEngine(ABC):
         """
 
     @abstractmethod
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, symbol: str, raw_size: float, price: float) -> float:
         """Round position size per market lot rules.
 
         Args:
+            symbol: Instrument identifier used by product-specific rules.
             raw_size: Desired size.
             price: Current price.
 
@@ -302,10 +302,11 @@ class BaseEngine(ABC):
         """
 
     @abstractmethod
-    def calc_commission(self, size: float, price: float, direction: int, is_open: bool) -> float:
+    def calc_commission(self, symbol: str, size: float, price: float, direction: int, is_open: bool) -> float:
         """Calculate commission for a trade.
 
         Args:
+            symbol: Instrument identifier used by product-specific rules.
             size: Trade size.
             price: Execution price.
             direction: 1 or -1.
@@ -316,10 +317,11 @@ class BaseEngine(ABC):
         """
 
     @abstractmethod
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, symbol: str, price: float, direction: int) -> float:
         """Apply slippage to execution price.
 
         Args:
+            symbol: Instrument identifier used by product-specific rules.
             price: Raw price.
             direction: 1 (buying / covering short) or -1 (selling / shorting).
 
@@ -508,23 +510,23 @@ class BaseEngine(ABC):
         target_pos: pd.DataFrame,
         codes: List[str],
     ) -> None:
-        """Bar-by-bar execution with market rule enforcement."""
+        """Execute the sole target-weight contract at portfolio scope.
+
+        Every bar computes the complete portfolio delta, reduces exposure first,
+        then applies one common scale to all exposure increases.  There is no
+        legacy direction/weight runtime mode switch.
+        """
         for i, ts in enumerate(dates):
             self._bar_idx = i
 
-            # a. Per-bar hooks (funding fees, liquidation checks)
+            # a. Per-bar hooks
             for c in codes:
                 if ts in data_map[c].index:
                     self.on_bar(c, data_map[c].loc[ts], ts)
 
-            # b. Rebalance each symbol to target weight
+            # b. Portfolio rebalance
             equity = self._calc_equity(close_df, ts)
-            for c in codes:
-                try:
-                    target_w = float(target_pos.at[ts, c]) if ts in target_pos.index else 0.0
-                    self._rebalance(c, target_w, data_map.get(c), ts, equity)
-                except Exception as exc:
-                    logger.warning("Rebalance failed for %s at %s: %s", c, ts, exc)
+            self._rebalance_portfolio(ts, data_map, close_df, target_pos, codes, equity)
 
             # c. Record equity snapshot
             snap_equity = self._calc_equity(close_df, ts)
@@ -547,6 +549,153 @@ class BaseEngine(ABC):
                 price = self._safe_price(close_df, last_ts, c, self.positions[c].entry_price)
                 self._close_position(c, price, last_ts, "end_of_backtest")
 
+    def _rebalance_portfolio(
+        self,
+        ts: pd.Timestamp,
+        data_map: Dict[str, pd.DataFrame],
+        close_df: pd.DataFrame,
+        target_pos: pd.DataFrame,
+        codes: List[str],
+        equity: float,
+    ) -> None:
+        """Compute all target deltas, reduce first, then commonly scale increases."""
+        reductions: List[tuple[str, float, pd.Series]] = []
+        increases: List[tuple[str, float, pd.Series, int]] = []
+
+        for c in sorted(codes):
+            df = data_map.get(c)
+            if df is None or ts not in df.index:
+                continue
+            bar = df.loc[ts]
+            target_w = float(target_pos.at[ts, c]) if ts in target_pos.index else 0.0
+            target_dir = 1 if target_w > 1e-9 else (-1 if target_w < -1e-9 else 0)
+            current = self.positions.get(c)
+            previous_w = None
+            if ts in target_pos.index:
+                row_number = int(target_pos.index.get_indexer([ts])[0])
+                if row_number > 0:
+                    previous_w = float(target_pos.iloc[row_number - 1][c])
+            target_changed = previous_w is None or abs(target_w - previous_w) > 1e-12
+            open_price = float(bar.get("open", bar.get("close", 0)))
+            if open_price <= 0:
+                continue
+
+            if current is not None and current.direction != target_dir:
+                reductions.append((c, current.size, bar))
+                current = None
+
+            if target_dir == 0:
+                continue
+
+            # A forward-filled target is an event state, not an instruction to
+            # churn back to the exact percentage on every bar. Retry blocked
+            # opens/closes, but only resize a compatible live position when the
+            # target event itself changes. This preserves existing direction
+            # signal behaviour while exposing one target-weight contract.
+            if current is not None and current.direction == target_dir and not target_changed:
+                continue
+
+            slipped = self.apply_slippage(c, open_price, target_dir)
+            leverage = self.default_leverage
+            target_notional = abs(target_w) * equity * leverage
+            desired = self.round_size(c,
+                self._calc_raw_size(c, target_notional, slipped), slipped,
+            )
+            current_size = current.size if current is not None else 0.0
+            if desired < current_size:
+                reductions.append((c, current_size - desired, bar))
+            elif desired > current_size:
+                increases.append((c, desired - current_size, bar, target_dir))
+
+        # Releases cash/margin before any increase, independent of symbol order.
+        for c, size, bar in reductions:
+            pos = self.positions.get(c)
+            if pos is None or not self._can_execute_safely(c, 0, bar):
+                continue
+            raw_price = float(bar.get("open", bar.get("close", 0)))
+            price = self.apply_slippage(c, raw_price, -pos.direction)
+            self._close_position(c, price, ts, "signal", partial_shares=size)
+
+        # A blocked direction-changing close must not create overlapping or
+        # opposite exposure. Only increases compatible with the live position
+        # remain eligible after reductions have actually executed.
+        increases = [
+            item for item in increases
+            if self.positions.get(item[0]) is None
+            or self.positions[item[0]].direction == item[3]
+        ]
+        if not increases:
+            return
+
+        scale = self._find_portfolio_buy_scale(increases)
+        for c, desired_increase, bar, direction in increases:
+            if not self._can_execute_safely(c, direction, bar):
+                continue
+            raw_price = float(bar.get("open", bar.get("close", 0)))
+            price = self.apply_slippage(c, raw_price, direction)
+            size = self.round_size(c, desired_increase * scale, price)
+            if size <= 0:
+                continue
+            leverage = self.default_leverage
+            margin = self._calc_margin(c, size, price, leverage)
+            commission = self.calc_commission(c, size, price, direction, is_open=True)
+            if margin + commission > self.capital + 1e-9:
+                continue
+
+            self.capital -= margin + commission
+            pos = self.positions.get(c)
+            if pos is None:
+                self.positions[c] = Position(
+                    symbol=c, direction=direction, size=size,
+                    entry_price=price, entry_time=ts, leverage=leverage,
+                    entry_bar_idx=self._bar_idx, entry_commission=commission,
+                )
+            else:
+                total_size = pos.size + size
+                average_price = (pos.entry_price * pos.size + price * size) / total_size
+                self.positions[c] = Position(
+                    symbol=c, direction=pos.direction, size=total_size,
+                    entry_price=average_price, entry_time=pos.entry_time,
+                    leverage=pos.leverage, entry_bar_idx=pos.entry_bar_idx,
+                    entry_commission=pos.entry_commission + commission,
+                )
+
+    def _can_execute_safely(self, symbol: str, direction: int, bar: pd.Series) -> bool:
+        """Isolate a market-rule failure to its symbol and keep the bar running."""
+        try:
+            return self.can_execute(symbol, direction, bar)
+        except Exception as exc:
+            logger.warning("Execution rule failed for %s: %s", symbol, exc)
+            return False
+
+    def _find_portfolio_buy_scale(self, buys: List[tuple]) -> float:
+        """§12.3 step 7: binary search for max feasible scale in [0, 1]."""
+        available = self.capital
+        if available <= 0:
+            return 0.0
+
+        def total_cost_at_scale(s: float) -> float:
+            total = 0.0
+            for c, desired_size, bar, direction in buys:
+                open_price = float(bar.get("open", bar.get("close", 0)))
+                if open_price <= 0:
+                    continue
+                price = self.apply_slippage(c, open_price, direction)
+                size = self.round_size(c, desired_size * s, price)
+                if size > 0:
+                    total += self._calc_margin(c, size, price, self.default_leverage)
+                    total += self.calc_commission(c, size, price, direction, is_open=True)
+            return total
+
+        lo, hi = 0.0, 1.0
+        for _ in range(60):
+            mid = (lo + hi) / 2.0
+            if total_cost_at_scale(mid) <= available:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
     def _calc_equity(self, close_df: pd.DataFrame, ts: pd.Timestamp) -> float:
         """Total equity = free cash + sum(margin + unrealised) per position."""
         equity = self.capital
@@ -557,100 +706,36 @@ class BaseEngine(ABC):
             equity += margin + unrealized
         return equity
 
-    def _rebalance(
-        self,
-        symbol: str,
-        target_weight: float,
-        df: Optional[pd.DataFrame],
-        ts: pd.Timestamp,
-        equity: float,
-    ) -> None:
-        """Adjust position for *symbol* toward *target_weight*."""
-        self._active_symbol = symbol
-        target_dir = 1 if target_weight > 1e-9 else (-1 if target_weight < -1e-9 else 0)
-        current_pos = self.positions.get(symbol)
-
-        # Nothing to do
-        if current_pos is None and target_dir == 0:
-            return
-        if df is None or ts not in df.index:
-            return
-
-        bar = df.loc[ts]
-
-        # Close if target is flat or direction changed
-        if current_pos is not None:
-            need_close = target_dir == 0 or target_dir != current_pos.direction
-            if need_close:
-                if self.can_execute(symbol, 0, bar):
-                    open_price = float(bar.get("open", bar.get("close", 0)))
-                    price = self.apply_slippage(open_price, -current_pos.direction)
-                    self._close_position(symbol, price, ts, "signal")
-                else:
-                    return  # blocked (e.g. limit-down can't sell)
-
-        # Open new if target non-zero and no remaining position
-        if target_dir != 0 and symbol not in self.positions:
-            if not self.can_execute(symbol, target_dir, bar):
-                return  # blocked (e.g. A-share no-short)
-
-            open_price = float(bar.get("open", bar.get("close", 0)))
-            if open_price <= 0:
-                return
-
-            slipped = self.apply_slippage(open_price, target_dir)
-            leverage = self.default_leverage
-            target_notional = abs(target_weight) * equity * leverage
-            raw_size = self._calc_raw_size(symbol, target_notional, slipped)
-            size = self.round_size(raw_size, slipped)
-            if size <= 0:
-                return
-
-            margin = self._calc_margin(symbol, size, slipped, leverage)
-            comm = self.calc_commission(size, slipped, target_dir, is_open=True)
-
-            # Capital check — reduce if insufficient
-            if margin + comm > self.capital:
-                available = self.capital - comm
-                if available <= 0:
-                    return
-                size = self.round_size(
-                    self._calc_raw_size(symbol, available * leverage, slipped), slipped,
-                )
-                if size <= 0:
-                    return
-                margin = self._calc_margin(symbol, size, slipped, leverage)
-                comm = self.calc_commission(size, slipped, target_dir, is_open=True)
-
-            self.capital -= (margin + comm)
-            self.positions[symbol] = Position(
-                symbol=symbol,
-                direction=target_dir,
-                entry_price=slipped,
-                entry_time=ts,
-                size=size,
-                leverage=leverage,
-                entry_bar_idx=self._bar_idx,
-                entry_commission=comm,
-            )
-
     def _close_position(
         self,
         symbol: str,
         exit_price: float,
         exit_time: pd.Timestamp,
         reason: str,
+        partial_shares: int | None = None,
     ) -> None:
-        """Close position, record trade, return capital."""
-        self._active_symbol = symbol
-        pos = self.positions.pop(symbol, None)
+        """Close position (full or partial), record trade, return capital.
+
+        Args:
+            partial_shares: If set, close only this many shares (keep remainder).
+                If None, close entire position.
+        """
+        pos = self.positions.get(symbol)
         if pos is None:
             return
 
-        pnl = self._calc_pnl(symbol, pos.direction, pos.size, pos.entry_price, exit_price)
-        margin = self._calc_margin(symbol, pos.size, pos.entry_price, pos.leverage)
+        # Determine shares to close
+        close_size = pos.size if partial_shares is None else min(partial_shares, pos.size)
+        if close_size <= 0:
+            return
+
+        pnl = self._calc_pnl(symbol, pos.direction, close_size, pos.entry_price, exit_price)
+        margin = self._calc_margin(symbol, close_size, pos.entry_price, pos.leverage)
         pnl_pct = pnl / margin * 100 if margin > 1e-9 else 0.0
-        exit_comm = self.calc_commission(pos.size, exit_price, pos.direction, is_open=False)
+        exit_comm = self.calc_commission(
+            symbol, close_size, exit_price, pos.direction, is_open=False,
+        )
+        entry_comm = pos.entry_commission * (close_size / pos.size)
 
         self.capital += margin + pnl - exit_comm
 
@@ -663,14 +748,29 @@ class BaseEngine(ABC):
             exit_price=exit_price,
             entry_time=pos.entry_time,
             exit_time=exit_time,
-            size=pos.size,
+            size=close_size,
             leverage=pos.leverage,
             pnl=pnl,
             pnl_pct=pnl_pct,
             exit_reason=reason,
             holding_bars=holding_bars,
-            commission=pos.entry_commission + exit_comm,
+            commission=entry_comm + exit_comm,
         ))
+
+        # Update or remove position
+        if partial_shares is None or close_size >= pos.size:
+            self.positions.pop(symbol, None)
+        else:
+            self.positions[symbol] = Position(
+                symbol=pos.symbol,
+                direction=pos.direction,
+                entry_price=pos.entry_price,
+                entry_time=pos.entry_time,
+                size=pos.size - close_size,
+                leverage=pos.leverage,
+                entry_bar_idx=pos.entry_bar_idx,
+                entry_commission=pos.entry_commission - entry_comm,
+            )
 
     # ── Artifacts ──
 

@@ -77,7 +77,7 @@ class ForexEngine(BaseEngine):
         """Forex: 24x5, no restrictions."""
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """Round to micro-lot granularity (0.01 lots = 1000 units).
 
         Position size is in currency units (not lots) for PnL compatibility.
@@ -85,7 +85,7 @@ class ForexEngine(BaseEngine):
         """
         return max(int(raw_size / 1000) * 1000, 0)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
+    def calc_commission(self, _symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
         """Forex: spread is the cost, embedded in slippage. No explicit commission.
 
         Some ECN brokers charge per-lot commission; for simplicity, zero here.
@@ -95,9 +95,9 @@ class ForexEngine(BaseEngine):
         """
         return 0.0
 
-    def apply_slippage(self, price: float, direction: int) -> float:
-        """Apply half-spread + slippage using _active_symbol for correct pip/spread."""
-        return self.apply_slippage_for_symbol(self._active_symbol, price, direction)
+    def apply_slippage(self, symbol: str, price: float, direction: int) -> float:
+        """Apply half-spread + slippage for the explicit currency pair."""
+        return self.apply_slippage_for_symbol(symbol, price, direction)
 
     def apply_slippage_for_symbol(self, symbol: str, price: float, direction: int) -> float:
         """Symbol-aware slippage with correct spread.

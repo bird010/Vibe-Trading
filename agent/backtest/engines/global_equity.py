@@ -50,13 +50,13 @@ class GlobalEquityEngine(BaseEngine):
         """US/HK: T+0, both directions allowed."""
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """US: fractional shares (0.01). HK: 100-share lots."""
         if self.market == "hk":
             return max(int(raw_size / 100) * 100, 0)
         return round(max(raw_size, 0.0), 2)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
+    def calc_commission(self, _symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
         """US: zero commission. HK: stamp tax + levies.
 
         ``_direction`` is unused — reserved for future short-borrow fees
@@ -72,7 +72,7 @@ class GlobalEquityEngine(BaseEngine):
         # US: zero commission (SEC fee negligible)
         return 0.0
 
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, _symbol: str, price: float, direction: int) -> float:
         """US: low slippage. HK: moderate slippage."""
         rate = self.slippage_hk if self.market == "hk" else self.slippage_us
         return price * (1 + direction * rate)

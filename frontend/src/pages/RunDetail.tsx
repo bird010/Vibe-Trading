@@ -14,6 +14,7 @@ import {
   Fingerprint,
   List,
   Loader2,
+  Network,
   ShieldCheck,
   XCircle,
 } from "lucide-react";
@@ -23,17 +24,27 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
 import { EquityChart } from "@/components/charts/EquityChart";
+import { GraphSignalPanel } from "@/components/charts/GraphSignalPanel";
 import { MetricsCard } from "@/components/chat/MetricsCard";
+import { SymbolMetricsTable } from "@/components/run/SymbolMetricsTable";
 import { ValidationPanel } from "@/components/charts/ValidationPanel";
 import { Skeleton, SkeletonMetrics, SkeletonChart } from "@/components/common/Skeleton";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { CohortStockPredReport } from "@/components/stockpred/CohortStockPredReport";
+import { LegacyStockPredReport } from "@/components/stockpred/LegacyStockPredReport";
 
 const rehypePlugins = [rehypeHighlight];
 
-type Tab = "chart" | "trades" | "runCard" | "code" | "validation";
-type ChartPayload = Pick<RunData, "price_series" | "indicator_series" | "trade_markers">;
+type Tab = "chart" | "trades" | "runCard" | "code" | "validation" | "graph";
+type ChartPayload = Pick<RunData, "price_series" | "indicator_series" | "trade_markers" | "graph_signal_series">;
 type ChartCache = Record<string, ChartPayload>;
 type ChartLoadProgress = { done: number; total: number };
+const EMPTY_CHART_PAYLOAD: ChartPayload = {
+  price_series: {},
+  indicator_series: {},
+  trade_markers: [],
+  graph_signal_series: {},
+};
 
 function downloadCsv(filename: string, csvContent: string) {
   const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
@@ -68,18 +79,23 @@ function buildMetricsCsv(metrics: BacktestMetrics): string {
 }
 
 function cacheFromRun(run: RunData | null, requestedSymbol?: string): ChartCache {
-  if (!run?.price_series) return {};
+  if (!run) return {};
   const cache: ChartCache = {};
   const markerRows = run.trade_markers || [];
-  for (const [symbol, bars] of Object.entries(run.price_series)) {
+  const symbols = new Set([
+    ...Object.keys(run.price_series || {}),
+    ...Object.keys(run.graph_signal_series || {}),
+    ...(requestedSymbol ? [requestedSymbol] : []),
+  ]);
+  for (const symbol of symbols) {
     cache[symbol] = {
-      price_series: { [symbol]: bars },
+      price_series: run.price_series?.[symbol] ? { [symbol]: run.price_series[symbol] } : {},
       indicator_series: run.indicator_series?.[symbol] ? { [symbol]: run.indicator_series[symbol] } : {},
       trade_markers: markerRows.filter((marker) => !marker.code || marker.code === symbol),
+      graph_signal_series: run.graph_signal_series?.[symbol]
+        ? { [symbol]: run.graph_signal_series[symbol] }
+        : {},
     };
-  }
-  if (requestedSymbol && !cache[requestedSymbol]) {
-    cache[requestedSymbol] = { price_series: {}, indicator_series: {}, trade_markers: [] };
   }
   return cache;
 }
@@ -105,24 +121,48 @@ export function RunDetail() {
   const [bulkChartLoading, setBulkChartLoading] = useState(false);
   const [bulkChartProgress, setBulkChartProgress] = useState<ChartLoadProgress>({ done: 0, total: 0 });
   const chartCacheRef = useRef<ChartCache>({});
-  const cancelBulkChartLoadRef = useRef(false);
+  const loadedChartSymbolsRef = useRef(new Set<string>());
+  const chartLoadPromisesRef = useRef<Record<string, Promise<ChartPayload>>>({});
+  const runLoadGenerationRef = useRef(0);
+  const bulkChartLoadGenerationRef = useRef(0);
+
+  function isCurrentRunLoad(generation: number) {
+    return runLoadGenerationRef.current === generation;
+  }
 
   const hasValidation = !!run?.validation;
   const hasRunCard = !!run?.run_card;
+  const isGraphRun = run?.run_context?.strategy_type === "stockpred_graph";
   const TABS: { id: Tab; label: string; icon: typeof BarChart3; hidden?: boolean }[] = [
     { id: "chart", label: i18n.t("runDetail.chart"), icon: BarChart3 },
     { id: "trades", label: i18n.t("runDetail.trades"), icon: List },
     { id: "validation", label: i18n.t("runDetail.validation"), icon: ShieldCheck, hidden: !hasValidation },
     { id: "runCard", label: i18n.t("runDetail.runCard"), icon: FileCheck2, hidden: !hasRunCard },
     { id: "code", label: i18n.t("runDetail.code"), icon: Code2 },
+    { id: "graph", label: i18n.t("runDetail.graphDiagnostics"), icon: Network, hidden: !isGraphRun },
   ];
 
   useEffect(() => {
     if (!runId) return;
+    const generation = ++runLoadGenerationRef.current;
+    bulkChartLoadGenerationRef.current += 1;
+    setLoading(true);
+    setBulkChartLoading(false);
+    setBulkChartProgress({ done: 0, total: 0 });
+    chartCacheRef.current = {};
+    loadedChartSymbolsRef.current = new Set();
+    chartLoadPromisesRef.current = {};
+    setChartCache({});
+    setChartLoadingSymbols({});
     Promise.all([
-      api.getRun(runId, { chart_payload: "summary" }).catch(() => null),
-      api.getRunCode(runId).catch(() => ({})),
+      api.getRun(runId, { chart_payload: "summary" })
+        .then((value) => isCurrentRunLoad(generation) ? value : null)
+        .catch(() => null),
+      api.getRunCode(runId)
+        .then((value) => isCurrentRunLoad(generation) ? value : {})
+        .catch(() => ({})),
     ]).then(([r, c]) => {
+      if (!isCurrentRunLoad(generation)) return;
       setRun(r);
       setCode(c || {});
       const firstSymbol = r?.chart_symbols?.[0] || Object.keys(r?.price_series || {})[0] || "";
@@ -132,10 +172,15 @@ export function RunDetail() {
       const initialCache = cacheFromRun(r, firstSymbol);
       chartCacheRef.current = initialCache;
       setChartCache(initialCache);
-      if (firstSymbol && !initialCache[firstSymbol]?.price_series?.[firstSymbol]?.length) {
-        void loadChartSymbol(firstSymbol);
+    }).finally(() => {
+      if (isCurrentRunLoad(generation)) setLoading(false);
+    });
+    return () => {
+      if (isCurrentRunLoad(generation)) {
+        runLoadGenerationRef.current += 1;
+        bulkChartLoadGenerationRef.current += 1;
       }
-    }).finally(() => setLoading(false));
+    };
   }, [runId]);
 
   if (loading) {
@@ -165,29 +210,50 @@ export function RunDetail() {
 
   const ok = run.status === "success";
 
-  async function loadChartSymbol(symbol: string) {
-    if (!runId || !symbol) return;
-    if (chartCacheRef.current[symbol]?.price_series?.[symbol]?.length) return;
-    setChartLoadingSymbols((prev) => ({ ...prev, [symbol]: true }));
-    try {
-      const nextRun = await api.getRun(runId, { chart_symbol: symbol });
-      const nextCache = cacheFromRun(nextRun, symbol);
-      const mergedCache = { ...chartCacheRef.current, ...nextCache };
-      chartCacheRef.current = mergedCache;
-      setChartCache(mergedCache);
-      setRun((prev) => prev ? {
-        ...prev,
-        chart_symbols: nextRun.chart_symbols?.length ? nextRun.chart_symbols : prev.chart_symbols,
-        equity_curve: nextRun.equity_curve?.length ? nextRun.equity_curve : prev.equity_curve,
-        trade_log: nextRun.trade_log?.length ? nextRun.trade_log : prev.trade_log,
-      } : nextRun);
-    } finally {
-      setChartLoadingSymbols((prev) => {
-        const next = { ...prev };
-        delete next[symbol];
-        return next;
-      });
+  function loadChartSymbol(symbol: string): Promise<ChartPayload> {
+    if (!runId || !symbol) return Promise.resolve(EMPTY_CHART_PAYLOAD);
+    const generation = runLoadGenerationRef.current;
+    if (loadedChartSymbolsRef.current.has(symbol)) {
+      return Promise.resolve(chartCacheRef.current[symbol] || EMPTY_CHART_PAYLOAD);
     }
+
+    const inFlight = chartLoadPromisesRef.current[symbol];
+    if (inFlight) return inFlight;
+
+    setChartLoadingSymbols((prev) => ({ ...prev, [symbol]: true }));
+    const request = api.getRun(runId, { chart_symbol: symbol })
+      .then((nextRun) => {
+        if (!isCurrentRunLoad(generation)) return EMPTY_CHART_PAYLOAD;
+        const nextCache = cacheFromRun(nextRun, symbol);
+        const mergedCache = { ...chartCacheRef.current, ...nextCache };
+        chartCacheRef.current = mergedCache;
+        loadedChartSymbolsRef.current.add(symbol);
+        setChartCache(mergedCache);
+        setRun((prev) => prev ? {
+          ...prev,
+          chart_symbols: nextRun.chart_symbols?.length ? nextRun.chart_symbols : prev.chart_symbols,
+          equity_curve: nextRun.equity_curve?.length ? nextRun.equity_curve : prev.equity_curve,
+          trade_log: nextRun.trade_log?.length ? nextRun.trade_log : prev.trade_log,
+        } : nextRun);
+        return mergedCache[symbol] || EMPTY_CHART_PAYLOAD;
+      })
+      .catch((error: unknown) => {
+        if (!isCurrentRunLoad(generation)) return EMPTY_CHART_PAYLOAD;
+        throw error;
+      })
+      .finally(() => {
+        if (!isCurrentRunLoad(generation)) return;
+        if (chartLoadPromisesRef.current[symbol] === request) {
+          delete chartLoadPromisesRef.current[symbol];
+        }
+        setChartLoadingSymbols((prev) => {
+          const next = { ...prev };
+          delete next[symbol];
+          return next;
+        });
+      });
+    chartLoadPromisesRef.current[symbol] = request;
+    return request;
   }
 
   async function handleAddChartSymbol(symbol: string) {
@@ -219,30 +285,61 @@ export function RunDetail() {
   async function handleLoadAllChartSymbols() {
     const symbols = run?.chart_symbols || [];
     if (symbols.length === 0 || bulkChartLoading) return;
-    cancelBulkChartLoadRef.current = false;
+    const runGeneration = runLoadGenerationRef.current;
+    const bulkGeneration = ++bulkChartLoadGenerationRef.current;
+    const isCurrentBulkLoad = () => (
+      isCurrentRunLoad(runGeneration)
+      && bulkChartLoadGenerationRef.current === bulkGeneration
+    );
     setBulkChartLoading(true);
     setBulkChartProgress({ done: 0, total: symbols.length });
     try {
       for (let index = 0; index < symbols.length; index += 1) {
-        if (cancelBulkChartLoadRef.current) break;
+        if (!isCurrentBulkLoad()) break;
         const symbol = symbols[index];
         setSelectedSymbol(symbol);
         setChartPickerSymbol(symbol);
         setSelectedSymbols((prev) => prev.includes(symbol) ? prev : [...prev, symbol]);
         await loadChartSymbol(symbol);
+        if (!isCurrentBulkLoad()) break;
         setBulkChartProgress({ done: index + 1, total: symbols.length });
         await yieldToBrowser();
       }
     } finally {
-      setBulkChartLoading(false);
+      if (isCurrentBulkLoad()) setBulkChartLoading(false);
     }
   }
 
   function handleCancelLoadAllCharts() {
-    cancelBulkChartLoadRef.current = true;
+    bulkChartLoadGenerationRef.current += 1;
+    setBulkChartLoading(false);
+    setBulkChartProgress({ done: 0, total: 0 });
   }
 
-  return (
+  // Schema-based routing: cohort runs get the dedicated CohortStockPredReport
+  const metricSchema = (run?.run_context as Record<string, unknown>)?.metric_schema_version as string | undefined;
+  if (metricSchema === "signal_cohort_v1" && runId) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="border-b p-4 flex items-center gap-3">
+          <button onClick={() => navigate(-1)} className="p-1 rounded-md hover:bg-muted transition-colors text-muted-foreground hover:text-foreground" title={i18n.t("runDetail.goBack")}>
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <CheckCircle2 className="h-5 w-5 text-success" />
+          <h1 className="font-mono text-sm font-medium">{runId}</h1>
+          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">signal_cohort_v1</span>
+        </div>
+        <div className="flex-1 overflow-auto">
+          <CohortStockPredReport runId={runId} />
+        </div>
+      </div>
+    );
+  }
+  if (metricSchema && metricSchema !== "legacy_portfolio_like_v1") {
+    return <div className="flex items-center gap-2 p-4 text-red-600"><XCircle className="h-4 w-4" />Unsupported StockPred report schema: {metricSchema}</div>;
+  }
+
+  const reportContent = (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="border-b p-4 space-y-3">
@@ -259,7 +356,14 @@ export function RunDetail() {
           {run.elapsed_seconds && <span className="text-xs text-muted-foreground">{run.elapsed_seconds.toFixed(1)}s</span>}
         </div>
         {run.prompt && <p className="text-sm text-muted-foreground">{run.prompt}</p>}
+        {run.strategy_snapshot ? <section className="rounded-md border bg-muted/30 p-3 text-xs"><div className="font-medium">{run.strategy_snapshot.descriptor.name || run.strategy_snapshot.descriptor.id}</div><div className="mt-1 font-mono">{run.strategy_snapshot.descriptor.id} · {run.strategy_snapshot.descriptor.kind}{run.strategy_snapshot.descriptor.zoo ? ` · ${run.strategy_snapshot.descriptor.zoo}` : ""}</div><div className="mt-1 break-all font-mono text-muted-foreground">版本 {run.strategy_snapshot.strategy_version}{run.strategy_snapshot.git_commit ? ` · Git ${run.strategy_snapshot.git_commit}${run.strategy_snapshot.git_dirty ? " (dirty)" : ""}` : ""}</div></section> : null}
         {run.metrics && <MetricsCard metrics={run.metrics as Record<string, number>} />}
+        {isGraphRun && run.symbol_metrics?.length ? (
+          <section className="space-y-2">
+            <h2 className="text-sm font-medium">{i18n.t("runDetail.symbolPerformance")}</h2>
+            <SymbolMetricsTable runId={runId || ""} metrics={run.symbol_metrics} onLoadSymbol={loadChartSymbol} />
+          </section>
+        ) : null}
 
         <div className="flex items-center gap-1">
           {TABS.filter(t => !t.hidden).map(({ id, label, icon: Icon }) => (
@@ -321,10 +425,21 @@ export function RunDetail() {
           {tab === "validation" && run.validation && <ValidationPanel data={run.validation} />}
           {tab === "runCard" && run.run_card && <RunCardTab card={run.run_card} />}
           {tab === "code" && <CodeTab code={code} />}
+          {tab === "graph" && isGraphRun && (
+            <div className="p-4">
+              <GraphSignalPanel
+                symbol={selectedSymbol}
+                points={chartCache[selectedSymbol]?.graph_signal_series?.[selectedSymbol] || []}
+              />
+            </div>
+          )}
         </ErrorBoundary>
       </div>
     </div>
   );
+  return metricSchema === "legacy_portfolio_like_v1"
+    ? <LegacyStockPredReport>{reportContent}</LegacyStockPredReport>
+    : reportContent;
 }
 
 function RunCardTab({ card }: { card: RunCard }) {

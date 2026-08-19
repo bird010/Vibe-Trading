@@ -44,11 +44,11 @@ class CryptoEngine(BaseEngine):
         """Crypto: 24/7, long/short/close all allowed."""
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """Crypto supports fractional sizes, round to 6 decimals."""
         return round(max(raw_size, 0.0), 6)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
+    def calc_commission(self, _symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
         """Maker/Taker separated. Opens typically hit taker, closes hit maker.
 
         ``_direction`` is unused — reserved for future funding-rate asymmetry
@@ -57,7 +57,7 @@ class CryptoEngine(BaseEngine):
         rate = self.taker_rate if is_open else self.maker_rate
         return size * price * rate
 
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, _symbol: str, price: float, direction: int) -> float:
         """Slippage: unfavourable direction."""
         return price * (1 + direction * self.slippage_rate)
 
@@ -73,5 +73,5 @@ class CryptoEngine(BaseEngine):
             pos = self.positions.get(symbol)
             if pos is not None:
                 mark_price = float(bar.get("close", pos.entry_price))
-                liq_price = self.apply_slippage(mark_price, -pos.direction)
+                liq_price = self.apply_slippage(symbol, mark_price, -pos.direction)
                 self._close_position(symbol, liq_price, timestamp, "liquidation")

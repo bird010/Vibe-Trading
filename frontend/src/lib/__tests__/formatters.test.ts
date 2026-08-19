@@ -1,6 +1,7 @@
 import {
   getMetricLabel,
   formatMetricVal,
+  formatOptionalMetric,
   metricSentiment,
   formatTimestamp,
   abbreviateNum,
@@ -20,6 +21,13 @@ describe("getMetricLabel", () => {
 });
 
 describe("formatMetricVal", () => {
+  it("formats volatility and missing optional metrics", () => {
+    expect(formatMetricVal("annual_volatility", 0.142)).toBe("+14.20%");
+    expect(formatOptionalMetric("sharpe", undefined)).toBe("—");
+    expect(formatOptionalMetric("sharpe", Number.NaN)).toBe("—");
+    expect(getMetricLabel("annual_volatility")).toBe("Annual Volatility");
+  });
+
   // Percentage keys
   it("formats percentage keys with sign and %", () => {
     expect(formatMetricVal("total_return", 0.1234)).toBe("+12.34%");

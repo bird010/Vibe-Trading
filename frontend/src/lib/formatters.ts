@@ -3,6 +3,7 @@ import i18n from '@/i18n';
 const METRIC_LABELS_EN: Record<string, string> = {
   total_return: "Total Return",
   annual_return: "Annual",
+  annual_volatility: "Annual Volatility",
   sharpe: "Sharpe",
   max_drawdown: "Max DD",
   win_rate: "Win Rate",
@@ -21,6 +22,7 @@ const METRIC_LABELS_EN: Record<string, string> = {
 const METRIC_LABELS_ZH: Record<string, string> = {
   total_return: "总收益率",
   annual_return: "年化",
+  annual_volatility: "年化波动率",
   sharpe: "夏普比率",
   max_drawdown: "最大回撤",
   win_rate: "胜率",
@@ -46,7 +48,7 @@ export function getMetricLabel(k: string): string {
   return METRIC_LABELS_EN[k] || k;
 }
 
-const PCT_KEYS = ["total_return", "annual_return", "win_rate", "max_drawdown", "benchmark_return", "excess_return"];
+const PCT_KEYS = ["total_return", "annual_return", "annual_volatility", "win_rate", "max_drawdown", "benchmark_return", "excess_return"];
 const RATIO_KEYS = ["sharpe", "calmar", "sortino", "profit_loss_ratio", "information_ratio"];
 const INT_KEYS = ["trade_count", "max_consecutive_loss"];
 const NEUTRAL_KEYS = new Set(["trade_count", "avg_holding_days", "final_value"]);
@@ -66,6 +68,10 @@ export function formatMetricVal(k: string, v: number): string {
   return v.toFixed(4);
 }
 
+export function formatOptionalMetric(key: string, value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? formatMetricVal(key, value) : "—";
+}
+
 export function metricSentiment(k: string, v: number): "positive" | "neutral" | "negative" {
   if (NEUTRAL_KEYS.has(k)) return "neutral";
   if (k === "max_drawdown") return v > -0.05 ? "positive" : v > -0.2 ? "neutral" : "negative";
@@ -77,7 +83,7 @@ export function metricSentiment(k: string, v: number): "positive" | "neutral" | 
 }
 
 export const DISPLAY_ORDER = [
-  "total_return", "annual_return", "sharpe", "max_drawdown", "win_rate", "trade_count",
+  "total_return", "annual_return", "annual_volatility", "sharpe", "max_drawdown", "win_rate", "trade_count",
   "calmar", "sortino", "profit_loss_ratio", "max_consecutive_loss",
   "benchmark_return", "excess_return", "information_ratio", "final_value", "avg_holding_days",
 ];

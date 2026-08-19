@@ -1,3 +1,5 @@
+import i18n from "@/i18n";
+
 function css(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
@@ -16,7 +18,7 @@ function hslToHex(hsl: string): string {
 }
 
 function isChinese(): boolean {
-  return (document.documentElement.lang || navigator.language || "").startsWith("zh");
+  return i18n.language.startsWith("zh");
 }
 
 let _cache: ReturnType<typeof buildTheme> | null = null;
@@ -57,7 +59,7 @@ function buildTheme() {
 }
 
 export function getChartTheme() {
-  const key = `${document.documentElement.className}|${document.documentElement.lang || navigator.language}`;
+  const key = `${document.documentElement.className}|${i18n.language}`;
   if (_cache && _cacheKey === key) return _cache;
   _cache = buildTheme();
   _cacheKey = key;

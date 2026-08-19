@@ -72,11 +72,11 @@ class ChinaAEngine(BaseEngine):
 
         return True
 
-    def round_size(self, raw_size: float, price: float) -> float:
+    def round_size(self, _symbol: str, raw_size: float, price: float) -> float:
         """Round down to 100-share lots."""
         return max(int(raw_size / 100) * 100, 0)
 
-    def calc_commission(self, size: float, price: float, _direction: int, is_open: bool) -> float:
+    def calc_commission(self, _symbol: str, size: float, price: float, _direction: int, is_open: bool) -> float:
         """A-share fee structure: commission + stamp tax (sell) + transfer fee.
 
         ``_direction`` is unused today — reserved for future asymmetric
@@ -92,7 +92,7 @@ class ChinaAEngine(BaseEngine):
             comm += notional * self.stamp_tax
         return comm
 
-    def apply_slippage(self, price: float, direction: int) -> float:
+    def apply_slippage(self, _symbol: str, price: float, direction: int) -> float:
         """A-share slippage (relatively small due to tick size)."""
         return price * (1 + direction * self.slippage_rate)
 

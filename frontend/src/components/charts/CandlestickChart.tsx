@@ -25,22 +25,68 @@ const OVERLAY_OPTIONS: { id: Overlay; label: string; group: string }[] = [
 
 const RANGE_BARS: Record<Range, number> = { "1M": 22, "3M": 63, "6M": 126, "1Y": 252, ALL: Infinity };
 const OVERLAY_COLORS = ["#f59e0b", "#8b5cf6", "#3b82f6", "#ec4899", "#10b981", "#f97316", "#6366f1"];
+const SHARED_ZOOM_SOURCE = "stockpred-shared-zoom";
+
+function sharedRangePercent(data: PriceBar[], range: ChartZoomRange): { start: number; end: number } {
+  if (data.length < 2) return { start: 0, end: 100 };
+  const firstAtOrAfter = data.findIndex((bar) => bar.time >= range.start);
+  let lastAtOrBefore = -1;
+  for (let index = data.length - 1; index >= 0; index -= 1) {
+    if (data[index].time <= range.end) {
+      lastAtOrBefore = index;
+      break;
+    }
+  }
+  const startIndex = firstAtOrAfter >= 0 ? firstAtOrAfter : data.length - 1;
+  const endIndex = lastAtOrBefore >= 0 ? lastAtOrBefore : 0;
+  const left = Math.min(startIndex, endIndex);
+  const right = Math.max(startIndex, endIndex);
+  return {
+    start: (left / (data.length - 1)) * 100,
+    end: (right / (data.length - 1)) * 100,
+  };
+}
+
+export interface ChartZoomRange {
+  start: string;
+  end: string;
+}
 
 interface Props {
   data: PriceBar[];
   markers?: TradeMarker[];
   indicators?: Record<string, IndicatorPoint[]>;
+  strategyScore?: Record<string, IndicatorPoint[]>;
+  /** @deprecated V2 compatibility for non-fund-rotation callers. */
+  strategyIndicators?: Record<string, IndicatorPoint[]>;
   height?: number;
+  focusTime?: string;
+  focusRequest?: number;
+  sharedZoomRange?: ChartZoomRange | null;
+  onZoomRangeChange?: (range: ChartZoomRange) => void;
+  onMarkerClick?: (time: string) => void;
 }
 
-export function CandlestickChart({ data, markers, indicators, height = 500 }: Props) {
+export function CandlestickChart({ data, markers, indicators, strategyScore, strategyIndicators, height = 500, focusTime, focusRequest = 0, sharedZoomRange, onZoomRangeChange, onMarkerClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
   const [sub, setSub] = useState<Sub>("vol");
   const [range, setRange] = useState<Range>("ALL");
   const [overlays, setOverlays] = useState<Set<Overlay>>(new Set(["ma5", "ma20"]));
   const [showMenu, setShowMenu] = useState(false);
+  const appliedRangeRef = useRef<Range | null>(null);
+  const appliedFocusRef = useRef<{ time: string; request: number } | null>(null);
+  const markerClickRef = useRef(onMarkerClick);
+  const zoomRangeChangeRef = useRef(onZoomRangeChange);
   const { dark } = useDarkMode();
+
+  useEffect(() => {
+    markerClickRef.current = onMarkerClick;
+  }, [onMarkerClick]);
+
+  useEffect(() => {
+    zoomRangeChangeRef.current = onZoomRangeChange;
+  }, [onZoomRangeChange]);
 
   const toggleOverlay = useCallback((id: Overlay) => {
     setOverlays(prev => {
@@ -84,18 +130,60 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
     });
   }, [indicators, baseData.dates]);
 
+  const extraStrategyIndicators = useMemo(() => {
+    const source = strategyScore ?? strategyIndicators;
+    if (!source) return [];
+    return Object.entries(source).map(([name, points]) => {
+      const lookup = new Map(points.map((point) => [point.time, point.value]));
+      return { name, values: baseData.dates.map((date) => lookup.get(date) ?? null) };
+    });
+  }, [strategyScore, strategyIndicators, baseData.dates]);
+
   // Init chart instance — only on mount/unmount and dark mode change
   useEffect(() => {
     if (!containerRef.current || data.length === 0) return;
     const chart = echarts.init(containerRef.current);
-    chart.group = CHART_GROUP;
-    connectCharts();
+    if (onZoomRangeChange) {
+      // Annual evidence charts synchronize absolute dates through the parent;
+      // the shared percentage-based group would map ranges differently per symbol.
+      chart.group = "";
+    } else {
+      chart.group = CHART_GROUP;
+      connectCharts();
+    }
     chartRef.current = chart;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handleChartClick = (params: any) => {
+      if (params.componentType !== "markPoint") return;
+      const time = params.data?.coord?.[0];
+      if (typeof time === "string") markerClickRef.current?.(time);
+    };
+    const handleZoomChange = (rawParams: unknown) => {
+      const params = rawParams as { from?: string } | undefined;
+      if (params?.from === SHARED_ZOOM_SOURCE) return;
+      const option = chart.getOption?.() as {
+        dataZoom?: Array<{ start?: number; end?: number; startValue?: unknown; endValue?: unknown }>;
+      } | undefined;
+      const zoom = option?.dataZoom?.[0];
+      if (!zoomRangeChangeRef.current || !zoom) return;
+      const dateAt = (value: unknown, fallbackPercent: number): string => {
+        if (typeof value === "string" && value) return value;
+        if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value < data.length) return data[value].time;
+        const index = Math.round((fallbackPercent / 100) * (data.length - 1));
+        return data[Math.max(0, Math.min(data.length - 1, index))].time;
+      };
+      zoomRangeChangeRef.current({
+        start: dateAt(zoom.startValue, Number(zoom.start ?? 0)),
+        end: dateAt(zoom.endValue, Number(zoom.end ?? 100)),
+      });
+    };
+    chart.on?.("click", handleChartClick);
+    chart.on?.("datazoom", handleZoomChange);
 
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(containerRef.current);
-    return () => { ro.disconnect(); chart.dispose(); chartRef.current = null; };
-  }, [data.length === 0, dark]); // only re-init when going empty↔non-empty or theme changes
+    return () => { ro.disconnect(); chart.off?.("click", handleChartClick); chart.off?.("datazoom", handleZoomChange); chart.dispose(); chartRef.current = null; };
+  }, [data.length === 0, dark, Boolean(onZoomRangeChange)]); // only re-init when going empty↔non-empty, theme, or sync mode changes
 
   // Update chart options — setOption on existing instance, no dispose
   useEffect(() => {
@@ -139,13 +227,37 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
     }
 
     // Trade markers
-    const marks = (markers || []).map(m => ({
-      coord: [m.time, m.price],
-      value: m.side === "BUY" ? "B" : "S",
-      name: [`${m.side} @ ${m.price}`, m.qty ? `Qty: ${m.qty}` : "", m.reason || ""].filter(Boolean).join("\n"),
-      itemStyle: { color: m.side === "BUY" ? t.upColor : t.downColor },
-      label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
-    }));
+    const marks = (markers || []).map(m => {
+      const status = m.status?.toUpperCase();
+      const delayed = Number(m.exit_delay_days || 0) > 0;
+      const value = delayed
+        ? "D"
+        : status === "REJECTED"
+          ? "X"
+          : status === "PARTIAL"
+            ? "P"
+            : m.side === "BUY" ? "B" : "S";
+      const color = delayed
+        ? "#8b5cf6"
+        : status === "REJECTED"
+          ? t.textColor
+          : status === "PARTIAL"
+            ? t.warningColor
+            : m.side === "BUY" ? t.upColor : t.downColor;
+      return {
+        coord: [m.time, m.price],
+        value,
+        name: [
+          `${m.side} @ ${m.price}`,
+          m.qty ? `Qty: ${m.qty}` : "",
+          status ? `Status: ${status}` : "",
+          delayed ? `Delay: ${m.exit_delay_days}d` : "",
+          m.reason ? `Reason: ${m.reason}` : "",
+        ].filter(Boolean).join("\n"),
+        itemStyle: { color },
+        label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
+      };
+    });
 
     // Volume
     const vol = data.map((d, i) => ({
@@ -190,9 +302,29 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
       legendNames.push(ind.name);
       return { name: ind.name, type: "line" as const, data: ind.values, xAxisIndex: 0, yAxisIndex: 0, symbol: "none", lineStyle: { width: 1, color: OVERLAY_COLORS[(colorIdx + i) % OVERLAY_COLORS.length], type: "dashed" as const } };
     });
+    const strategySeries = extraStrategyIndicators.map((ind, i) => {
+      legendNames.push(ind.name);
+      return { name: ind.name, type: "line" as const, data: ind.values, xAxisIndex: 0, yAxisIndex: 2, symbol: "circle", showSymbol: true, connectNulls: true, lineStyle: { width: 1.5, color: ["#0ea5e9", "#a855f7", "#14b8a6"][i % 3] } };
+    });
+    const strategyYAxis = extraStrategyIndicators.length > 0
+      ? [{ gridIndex: 0, position: "right", name: extraStrategyIndicators.length === 1 ? extraStrategyIndicators[0].name : "Strategy", scale: true, splitLine: { show: false }, axisLabel: { color: t.textColor, fontSize: 10 } }]
+      : [];
 
     const maxBars = RANGE_BARS[range];
     const defaultStart = maxBars >= data.length ? 0 : Math.max(0, 100 - (maxBars / data.length) * 100);
+    const currentOption = chart.getOption?.() as {
+      dataZoom?: Array<{ start?: number; end?: number }>;
+    } | undefined;
+    const currentZoom = currentOption?.dataZoom?.[0];
+    const preserveZoom = appliedRangeRef.current === range;
+    const sharedZoom = sharedZoomRange ? sharedRangePercent(data, sharedZoomRange) : null;
+    const zoomStart = sharedZoom?.start ?? (preserveZoom && currentZoom?.start !== undefined
+      ? currentZoom.start
+      : defaultStart);
+    const zoomEnd = sharedZoom?.end ?? (preserveZoom && currentZoom?.end !== undefined
+      ? currentZoom.end
+      : 100);
+    appliedRangeRef.current = range;
 
     chart.setOption({
       backgroundColor: "transparent",
@@ -227,8 +359,8 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
       },
       legend: { data: legendNames, textStyle: { color: t.textColor, fontSize: 10 }, right: 80, top: 2, type: "scroll", itemWidth: 12, itemHeight: 8, itemGap: 8 },
       grid: [
-        { left: 8, right: 8, top: 36, height: "55%", containLabel: true },
-        { left: 8, right: 8, top: "66%", height: "22%", containLabel: true },
+        { left: 8, right: extraStrategyIndicators.length > 0 ? 48 : 8, top: 36, height: "55%", containLabel: true },
+        { left: 8, right: extraStrategyIndicators.length > 0 ? 48 : 8, top: "66%", height: "22%", containLabel: true },
       ],
       xAxis: [
         { type: "category", data: dates, gridIndex: 0, axisLine: { lineStyle: { color: t.axisColor } }, axisLabel: { color: t.textColor, fontSize: 10 }, boundaryGap: true },
@@ -237,9 +369,10 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
       yAxis: [
         { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: t.gridColor } }, axisLabel: { color: t.textColor, fontSize: 10 } },
         subYAxis,
+        ...strategyYAxis,
       ],
       dataZoom: [
-        { type: "inside", xAxisIndex: [0, 1], start: defaultStart, end: 100 },
+        { type: "inside", xAxisIndex: [0, 1], start: zoomStart, end: zoomEnd },
         { type: "slider", xAxisIndex: [0, 1], bottom: 4, height: 20, labelFormatter: (val: string) => val },
       ],
       series: [
@@ -250,10 +383,70 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
         },
         ...overlaySeries,
         ...extraSeries,
+        ...strategySeries,
         ...subSeries,
       ],
     }, true);
-  }, [data, markers, baseData, indicatorCache, extraIndicators, sub, range, overlays, dark]);
+  }, [data, markers, baseData, indicatorCache, extraIndicators, extraStrategyIndicators, sub, range, overlays, dark, sharedZoomRange?.start, sharedZoomRange?.end]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!focusTime) {
+      appliedFocusRef.current = null;
+      return;
+    }
+    if (appliedFocusRef.current?.time === focusTime && appliedFocusRef.current.request === focusRequest) return;
+    if (!chart || data.length < 2) return;
+    const index = data.findIndex((bar) => bar.time === focusTime);
+    if (index < 0) return;
+
+    const currentOption = chart.getOption?.() as {
+      dataZoom?: Array<{ start?: number; end?: number; startValue?: unknown; endValue?: unknown }>;
+    } | undefined;
+    const currentZoom = currentOption?.dataZoom?.[0];
+    const maxBars = RANGE_BARS[range];
+    const defaultStart = maxBars >= data.length ? 0 : Math.max(0, 100 - (maxBars / data.length) * 100);
+    const indexForZoomValue = (value: unknown, fallbackPercent: number) => {
+      if (typeof value === "number" && Number.isInteger(value)) {
+        return Math.max(0, Math.min(data.length - 1, value));
+      }
+      if (typeof value === "string" && value) {
+        const index = data.findIndex((bar) => bar.time === value);
+        if (index >= 0) return index;
+      }
+      const percent = Number(fallbackPercent);
+      const normalized = Number.isFinite(percent) ? percent : 0;
+      return Math.max(0, Math.min(data.length - 1, Math.round((normalized / 100) * (data.length - 1))));
+    };
+    const visibleStartIndex = indexForZoomValue(currentZoom?.startValue, currentZoom?.start ?? defaultStart);
+    const visibleEndIndex = indexForZoomValue(currentZoom?.endValue, currentZoom?.end ?? 100);
+    if (index >= Math.min(visibleStartIndex, visibleEndIndex) && index <= Math.max(visibleStartIndex, visibleEndIndex)) {
+      appliedFocusRef.current = { time: focusTime, request: focusRequest };
+      return;
+    }
+    const currentStart = Number(currentZoom?.start ?? defaultStart);
+    const currentEnd = Number(currentZoom?.end ?? 100);
+    const span = Number.isFinite(currentStart) && Number.isFinite(currentEnd)
+      ? Math.max(0, Math.min(100, currentEnd - currentStart))
+      : 100 - defaultStart;
+    const center = (index / (data.length - 1)) * 100;
+    const start = span >= 100 ? 0 : Math.max(0, Math.min(100 - span, center - span / 2));
+
+    chart.dispatchAction?.({ type: "dataZoom", dataZoomIndex: [0, 1], start, end: start + span });
+    appliedFocusRef.current = { time: focusTime, request: focusRequest };
+  }, [data, focusTime, focusRequest, range]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !sharedZoomRange) return;
+    chart.dispatchAction?.({
+      type: "dataZoom",
+      from: SHARED_ZOOM_SOURCE,
+      dataZoomIndex: [0, 1],
+      startValue: sharedZoomRange.start,
+      endValue: sharedZoomRange.end,
+    });
+  }, [sharedZoomRange?.start, sharedZoomRange?.end]);
 
   if (data.length === 0) {
     return <div className="text-muted-foreground text-sm p-4">{i18n.t("charts.noPriceData")}</div>;

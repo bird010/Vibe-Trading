@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +31,7 @@ from rich.console import Console
 
 from cli._version import __version__ as APP_VERSION
 from src.goal.context import default_goal_criteria
-from src.ui_services import build_run_analysis, load_run_context
+from src.ui_services import build_run_analysis, load_run_context, load_symbol_metrics
 
 # UTF-8 on Windows
 import sys as _sys
@@ -71,13 +71,13 @@ class BacktestMetrics(BaseModel):
     """Backtest summary metrics."""
     model_config = {"extra": "allow"}
 
-    final_value: float = Field(..., description="Ending portfolio value")
-    total_return: float = Field(..., description="Total return")
-    annual_return: float = Field(..., description="Annualized return")
-    max_drawdown: float = Field(..., description="Max drawdown")
-    sharpe: float = Field(..., description="Sharpe ratio")
-    win_rate: float = Field(..., description="Win rate")
-    trade_count: int = Field(..., description="Number of trades")
+    final_value: Optional[float] = Field(None, description="Ending portfolio value")
+    total_return: Optional[float] = Field(None, description="Total return")
+    annual_return: Optional[float] = Field(None, description="Annualized return")
+    max_drawdown: Optional[float] = Field(None, description="Max drawdown")
+    sharpe: Optional[float] = Field(None, description="Sharpe ratio")
+    win_rate: Optional[float] = Field(None, description="Win rate")
+    trade_count: Optional[int] = Field(None, description="Number of trades")
 
 
 
@@ -135,6 +135,18 @@ class RunResponse(BaseModel):
         description="Grouped indicator overlays",
     )
     trade_markers: Optional[List[Dict[str, Any]]] = Field(None, description="Trade markers for charts")
+    graph_signal_series: Optional[Dict[str, List[Dict[str, Any]]]] = Field(
+        None,
+        description="Selected StockPred Graph signals grouped by symbol",
+    )
+    strategy_snapshot: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Immutable StockPred strategy source and version snapshot",
+    )
+    symbol_metrics: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="StockPred Graph metrics grouped by symbol",
+    )
     run_logs: Optional[List[Dict[str, Any]]] = Field(None, description="Structured stdout/stderr lines")
 
 
@@ -1271,11 +1283,21 @@ def _build_response_from_run_dir(
                         parsed[k] = int(float(v)) if k == "trade_count" or k == "max_consecutive_loss" else float(v)
                     except (ValueError, TypeError):
                         continue
-                if "final_value" in parsed:
+                if parsed:
                     response.metrics = BacktestMetrics(**parsed)
             except (ValueError, TypeError):
                 pass
 
+    # Fallback: strategy runs inside a batch may lack artifacts/ when the
+    # process-pool worker did not persist them.  Read metrics from the
+    # parent batch's reports.json so the detail page is not empty.
+    if response.metrics is None:
+        batch_metrics = _batch_report_metrics(run_dir)
+        if batch_metrics:
+            try:
+                response.metrics = BacktestMetrics(**batch_metrics)
+            except (ValueError, TypeError):
+                pass
 
     artifacts_dir = run_dir / "artifacts"
     if artifacts_dir.exists():
@@ -1315,8 +1337,7 @@ def _build_response_from_run_dir(
             pass
 
     trades_path = run_dir / "artifacts" / "trades.csv"
-    if trades_path.exists():
-        response.artifacts_trades_csv = _load_csv_to_dict(trades_path)
+    trade_rows = _load_csv_to_dict(trades_path) if trades_path.exists() else []
 
     validation_path = run_dir / "artifacts" / "validation.json"
     if validation_path.exists():
@@ -1338,8 +1359,8 @@ def _build_response_from_run_dir(
             filtered_equity.append(filtered_row)
         response.equity_curve = filtered_equity
 
-    if response.artifacts_trades_csv:
-        response.trade_log = response.artifacts_trades_csv[:500]
+    if trade_rows:
+        response.trade_log = trade_rows[:500]
 
     if include_analysis:
         analysis = build_run_analysis(
@@ -1355,14 +1376,32 @@ def _build_response_from_run_dir(
         response.price_series = analysis.get("price_series")
         response.indicator_series = analysis.get("indicator_series")
         response.trade_markers = analysis.get("trade_markers")
+        response.graph_signal_series = analysis.get("graph_signal_series")
+        response.strategy_snapshot = analysis.get("strategy_snapshot")
+        # Fallback: batch strategy runs store the snapshot inside config.json
+        # rather than a standalone strategy_snapshot.json file.
+        if response.strategy_snapshot is None:
+            config_data = _load_json_file(run_dir / "config.json")
+            if config_data and isinstance(config_data.get("strategy_snapshot"), dict):
+                response.strategy_snapshot = config_data["strategy_snapshot"]
+        if response.run_context and response.run_context.get("strategy_type") in {"stockpred_graph", "stockpred_strategy"}:
+            symbol_metrics = load_symbol_metrics(run_dir)
+            if symbol_metrics or (run_dir / "artifacts" / "symbol_metrics.csv").exists():
+                response.symbol_metrics = symbol_metrics
         response.run_logs = analysis.get("run_logs")
 
     return response
 
 
 def _run_response_payload(response: RunResponse) -> Dict[str, Any]:
-    """Return a JSON-ready payload for opt-in run response variants."""
-    return response.model_dump(mode="json")
+    """Return a JSON-ready run payload without an empty symbol metrics field."""
+    payload = response.model_dump(mode="json")
+    if response.metrics is not None:
+        payload["metrics"] = response.metrics.model_dump(mode="json", exclude_unset=True)
+    if payload.get("symbol_metrics") is None:
+        payload.pop("symbol_metrics")
+    payload.pop("artifacts_trades_csv", None)
+    return payload
 
 
 # ============================================================================
@@ -1394,6 +1433,41 @@ def _validate_path_param(value: str, kind: str) -> None:
 # API Endpoints
 # ============================================================================
 
+def _find_run_dir(runs_root: Path, run_id: str) -> Path | None:
+    """Locate a run directory, searching flat and nested under strategy_batches."""
+    candidate = runs_root / run_id
+    if candidate.is_dir():
+        return candidate
+    for found in runs_root.rglob(run_id):
+        if found.is_dir():
+            return found
+    return None
+
+
+def _batch_report_metrics(run_dir: Path) -> Dict[str, Any] | None:
+    """Read metrics from the parent batch reports.json for a strategy run.
+
+    Strategy runs created by the batch coordinator live at
+    ``runs/strategy_batches/<batch_id>/<run_id>/``.  When the process-pool
+    worker did not persist ``artifacts/metrics.csv``, the batch-level
+    ``reports.json`` still carries the computed metrics.  This helper
+    retrieves them so the detail page is not empty.
+    """
+    # Walk up: run_dir -> batch_dir -> strategy_batches
+    batch_dir = run_dir.parent
+    if batch_dir.name == "strategy_batches" or not (batch_dir / "reports.json").is_file():
+        return None
+    try:
+        reports_payload = json.loads((batch_dir / "reports.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    run_name = run_dir.name
+    for row in reports_payload.get("reports", []):
+        if row.get("run_id") == run_name and row.get("metrics"):
+            return dict(row["metrics"])
+    return None
+
+
 @app.get("/runs/{run_id}/code", dependencies=[Depends(require_auth)])
 async def get_run_code(run_id: str):
     """Return strategy source files for a run.
@@ -1405,12 +1479,29 @@ async def get_run_code(run_id: str):
         Map filename -> source text.
     """
     _validate_path_param(run_id, "run_id")
-    run_dir = RUNS_DIR / run_id / "code"
-    if not run_dir.exists():
+    run_dir = _find_run_dir(RUNS_DIR, run_id)
+    if run_dir is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    result: dict[str, str] = {}
+    if run_id.startswith("strategy_"):
+        snapshot = run_dir / "strategy_snapshot.json"
+        if snapshot.exists():
+            try:
+                data = json.loads(snapshot.read_text(encoding="utf-8"))
+                for source in data.get("source_files", []):
+                    name = source.get("path", source.get("name", ""))
+                    content = source.get("content", "")
+                    if name and content:
+                        result[name] = content
+            except (json.JSONDecodeError, OSError):
+                pass
+        if result:
+            return result
+    code_dir = run_dir / "code"
+    if not code_dir.exists():
         raise HTTPException(status_code=404, detail=f"Code directory for run {run_id} not found")
-    result = {}
     for f in ["signal_engine.py"]:
-        p = run_dir / f
+        p = code_dir / f
         if p.exists():
             result[f] = p.read_text(encoding="utf-8")
     return result
@@ -1427,7 +1518,10 @@ async def get_run_pine(run_id: str):
         Object with pine script content and exists flag.
     """
     _validate_path_param(run_id, "run_id")
-    pine_path = RUNS_DIR / run_id / "artifacts" / "strategy.pine"
+    run_dir = _find_run_dir(RUNS_DIR, run_id)
+    if run_dir is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    pine_path = run_dir / "artifacts" / "strategy.pine"
     if not pine_path.exists():
         return {"exists": False, "content": None}
     return {
@@ -1436,7 +1530,11 @@ async def get_run_pine(run_id: str):
     }
 
 
-@app.get("/runs/{run_id}", response_model=RunResponse, dependencies=[Depends(require_auth)])
+@app.get(
+    "/runs/{run_id}",
+    response_model=RunResponse,
+    dependencies=[Depends(require_auth)],
+)
 async def get_run_result(
     run_id: str,
     chart_symbol: Optional[str] = Query(None, description="Opt in to chart payloads for a single symbol"),
@@ -1453,9 +1551,9 @@ async def get_run_result(
     _validate_path_param(run_id, "run_id")
     if chart_payload not in (None, "summary"):
         raise HTTPException(status_code=400, detail="invalid chart_payload")
-    run_dir = RUNS_DIR / run_id
+    run_dir = _find_run_dir(RUNS_DIR, run_id)
 
-    if not run_dir.exists():
+    if run_dir is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Run {run_id} not found"
@@ -1472,12 +1570,10 @@ async def get_run_result(
         chart_symbols_out=chart_symbols if wants_chart_meta else None,
     )
 
+    payload = _run_response_payload(response)
     if wants_chart_meta:
-        payload = _run_response_payload(response)
         payload["chart_symbols"] = chart_symbols
-        return JSONResponse(payload)
-
-    return response
+    return JSONResponse(payload)
 
 
 @app.get("/runs", response_model=List[RunInfo], dependencies=[Depends(require_auth)])
@@ -3307,6 +3403,23 @@ async def stop_runner_endpoint(payload: LiveRunnerControlRequest):
 from src.api.alpha_routes import register_alpha_routes  # noqa: E402
 register_alpha_routes(app)
 
+from src.api.stockpred_routes import register_stockpred_routes  # noqa: E402
+register_stockpred_routes(
+    app,
+    runs_dir=RUNS_DIR,
+    require_auth=require_auth,
+    require_event_stream_auth=require_event_stream_auth,
+)
+
+from src.api.fund_rotation_routes import register_fund_rotation_routes  # noqa: E402
+register_fund_rotation_routes(
+    app,
+    runs_dir=RUNS_DIR,
+    require_auth=require_auth,
+    require_event_stream_auth=require_event_stream_auth,
+    stockpred_root=Path(__file__).resolve().parent.parent.parent / "StockPred",
+)
+
 
 # ============================================================================
 # Scheduled Research Routes
@@ -3458,14 +3571,16 @@ async def list_scheduled_runs(
 @app.delete(
     "/scheduled-runs/{job_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
     dependencies=[Depends(require_auth)],
 )
-async def delete_scheduled_run(job_id: str) -> None:
+async def delete_scheduled_run(job_id: str):
     """Cancel (delete) a scheduled research job by id."""
     _validate_path_param(job_id, "job_id")
     removed = _get_scheduled_research_store().delete(job_id)
     if not removed:
         raise HTTPException(status_code=404, detail=f"scheduled run {job_id} not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ============================================================================

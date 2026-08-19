@@ -73,15 +73,15 @@ class TestCanExecute:
 class TestRoundSize:
     def test_fractional_preserved(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(0.123456, 60000.0) == 0.123456
+        assert engine.round_size("BTC-USDT", 0.123456, 60000.0) == 0.123456
 
     def test_six_decimal_precision(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(0.1234567890, 60000.0) == pytest.approx(0.123457, abs=1e-7)
+        assert engine.round_size("BTC-USDT", 0.1234567890, 60000.0) == pytest.approx(0.123457, abs=1e-7)
 
     def test_negative_clamps_to_zero(self) -> None:
         engine = _make_engine()
-        assert engine.round_size(-0.5, 60000.0) == 0.0
+        assert engine.round_size("BTC-USDT", -0.5, 60000.0) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -92,20 +92,20 @@ class TestRoundSize:
 class TestCommission:
     def test_open_uses_taker(self) -> None:
         engine = _make_engine(taker_rate=0.0005, maker_rate=0.0002)
-        comm = engine.calc_commission(1.0, 60000.0, 1, is_open=True)
+        comm = engine.calc_commission("BTC-USDT", 1.0, 60000.0, 1, is_open=True)
         # 1 BTC × $60000 × 0.0005 = $30
         assert comm == pytest.approx(30.0)
 
     def test_close_uses_maker(self) -> None:
         engine = _make_engine(taker_rate=0.0005, maker_rate=0.0002)
-        comm = engine.calc_commission(1.0, 60000.0, 1, is_open=False)
+        comm = engine.calc_commission("BTC-USDT", 1.0, 60000.0, 1, is_open=False)
         # 1 BTC × $60000 × 0.0002 = $12
         assert comm == pytest.approx(12.0)
 
     def test_taker_higher_than_maker(self) -> None:
         engine = _make_engine()
-        open_comm = engine.calc_commission(1.0, 60000.0, 1, is_open=True)
-        close_comm = engine.calc_commission(1.0, 60000.0, 1, is_open=False)
+        open_comm = engine.calc_commission("BTC-USDT", 1.0, 60000.0, 1, is_open=True)
+        close_comm = engine.calc_commission("BTC-USDT", 1.0, 60000.0, 1, is_open=False)
         assert open_comm > close_comm
 
 
@@ -117,11 +117,11 @@ class TestCommission:
 class TestSlippage:
     def test_long_slippage_increases_price(self) -> None:
         engine = _make_engine(slippage=0.001)
-        assert engine.apply_slippage(60000.0, 1) == pytest.approx(60060.0)
+        assert engine.apply_slippage("BTC-USDT", 60000.0, 1) == pytest.approx(60060.0)
 
     def test_short_slippage_decreases_price(self) -> None:
         engine = _make_engine(slippage=0.001)
-        assert engine.apply_slippage(60000.0, -1) == pytest.approx(59940.0)
+        assert engine.apply_slippage("BTC-USDT", 60000.0, -1) == pytest.approx(59940.0)
 
 
 # ---------------------------------------------------------------------------

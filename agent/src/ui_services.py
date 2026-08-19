@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
+
+import pandas as pd
+
+from backtest.stockpred_graph.performance import build_symbol_metrics
 
 DEFAULT_ANALYSIS_PERIODS = [5, 20]
+_SAFE_SYMBOL_SUFFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def format_run_date(date_str: Optional[str]) -> Optional[str]:
@@ -111,6 +118,13 @@ def load_run_context(run_dir: Path) -> Dict[str, Any]:
     """
     request_data = load_json_file(run_dir / "req.json") or {}
     context = dict(request_data.get("context") or {})
+    metric_schema_version = context.get("metric_schema_version")
+    if (
+        not metric_schema_version
+        and context.get("strategy_type") == "stockpred_strategy"
+        and (run_dir / "artifacts").is_dir()
+    ):
+        metric_schema_version = "legacy_portfolio_like_v1"
     prompt = str(request_data.get("prompt") or "").strip()
     codes = normalize_codes(context.get("codes"))
     start_date = format_run_date(context.get("start_date"))
@@ -142,6 +156,8 @@ def load_run_context(run_dir: Path) -> Dict[str, Any]:
         "codes": codes,
         "start_date": start_date,
         "end_date": end_date,
+        "strategy_type": context.get("strategy_type"),
+        "metric_schema_version": metric_schema_version,
         "raw_context": context,
     }
 
@@ -268,7 +284,8 @@ def build_trade_markers(
         if symbols and code not in symbols:
             continue
         side = str(row.get("side") or "").upper()
-        timestamp = str(row.get("timestamp") or "")
+        timestamp = str(row.get("timestamp") or row.get("time") or "")
+        exit_delay_days = row.get("exit_delay_days")
         markers.append(
             {
                 "time": timestamp[:10],
@@ -277,12 +294,108 @@ def build_trade_markers(
                 "side": side,
                 "price": _safe_float(row.get("price")),
                 "qty": _safe_float(row.get("qty")),
+                "status": row.get("status"),
                 "reason": row.get("reason"),
+                "exit_delay_days": (
+                    None
+                    if exit_delay_days in (None, "")
+                    else int(float(exit_delay_days))
+                ),
                 "text": f"{side} {row.get('code') or ''}".strip(),
             }
         )
     return markers
 
+
+def load_graph_signal_series(
+    run_dir: Path,
+    symbols: Sequence[str] | None = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Load selected StockPred Graph signals grouped by symbol."""
+    context = load_run_context(run_dir)
+    if context.get("strategy_type") != "stockpred_graph":
+        return {}
+
+    rows = load_csv_records(run_dir / "artifacts" / "selected_signals.csv")
+    allowed = set(symbols or [])
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        code = str(row.get("ts_code") or row.get("code") or "")
+        if not code or (allowed and code not in allowed):
+            continue
+        grouped.setdefault(code, []).append(
+            {
+                **row,
+                "time": format_run_date(row.get("eval_date") or row.get("trade_date")) or "",
+                "code": code,
+                "score": _safe_float(row.get("score")),
+                "rank": int(float(row.get("rank") or 0)),
+                "risk_adjustment": (
+                    None
+                    if row.get("risk_adjustment") in (None, "")
+                    else _safe_float(row.get("risk_adjustment"))
+                ),
+            }
+        )
+    return grouped
+
+
+def _numeric_metric_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep only non-empty symbols and finite numeric metric values."""
+    metrics: List[Dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        metric_row: Dict[str, Any] = {"symbol": symbol}
+        for key, value in row.items():
+            if key == "symbol" or value in (None, ""):
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric_value):
+                metric_row[key] = numeric_value
+        metrics.append(metric_row)
+    return metrics
+
+
+def _load_graph_ohlcv_frames(run_dir: Path) -> Dict[str, pd.DataFrame]:
+    """Load safe legacy Graph OHLCV artifacts without modifying the run."""
+    artifacts = run_dir / "artifacts"
+    if not artifacts.is_dir():
+        return {}
+
+    frames: Dict[str, pd.DataFrame] = {}
+    for path in sorted(artifacts.glob("ohlcv_*.csv")):
+        symbol = path.stem.removeprefix("ohlcv_")
+        if not _SAFE_SYMBOL_SUFFIX_RE.fullmatch(symbol):
+            continue
+        rows = load_csv_records(path)
+        if rows:
+            frames[symbol] = pd.DataFrame(rows)
+    return frames
+
+
+def load_symbol_metrics(run_dir: Path) -> List[Dict[str, Any]]:
+    """Load Graph per-symbol metrics, rebuilding legacy artifacts in memory."""
+    if load_run_context(run_dir).get("strategy_type") not in {"stockpred_graph", "stockpred_strategy"}:
+        return []
+
+    persisted_path = run_dir / "artifacts" / "symbol_metrics.csv"
+    persisted = load_csv_records(persisted_path)
+    if persisted_path.exists():
+        return _numeric_metric_rows(persisted)
+
+    trades = pd.DataFrame(load_csv_records(run_dir / "artifacts" / "trades.csv"))
+    prices = _load_graph_ohlcv_frames(run_dir)
+    if trades.empty or "code" not in trades or not prices:
+        return []
+    try:
+        return _numeric_metric_rows(build_symbol_metrics(trades, prices))
+    except (KeyError, TypeError, ValueError):
+        return []
 
 def group_price_rows(price_rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group normalized price rows by symbol.
@@ -347,7 +460,7 @@ def build_indicator_series(
 
 
 def _load_ohlcv_artifacts(run_dir: Path) -> List[Dict[str, Any]]:
-    """Read individual ohlcv_*.csv files saved by the backtest engine.
+    """Read individual ohlcv_*.csv files from the artifacts directory.
 
     The engine writes ``ohlcv_{code}.csv`` per symbol with columns
     ``trade_date,open,high,low,close,volume``. This function reads
@@ -381,8 +494,46 @@ def _load_ohlcv_artifacts(run_dir: Path) -> List[Dict[str, Any]]:
     return _normalize_price_rows(rows)
 
 
+def _detail_publish_complete(run_dir: Path) -> bool:
+    """Delegate to the shared strategy_detail implementation."""
+    from src.stockpred.strategy_detail import detail_publish_complete
+    return detail_publish_complete(run_dir)
+
+
+def _try_materialize_detail(run_dir: Path) -> bool:
+    """Attempt lazy OHLCV materialization for a stockpred strategy run.
+
+    Writes ohlcv_*.csv into ``artifacts/`` using the pinned data snapshot.
+    Returns True if OHLCV files are available in artifacts/ after the call.
+    """
+    artifacts = run_dir / "artifacts"
+    if artifacts.is_dir() and any(artifacts.glob("ohlcv_*.csv")):
+        # Only accept existing CSVs if the publish is complete
+        if _detail_publish_complete(run_dir):
+            return True
+    manifest_path = run_dir / "detail_manifest.json"
+    snapshot_path = run_dir / "data_snapshot.json"
+    if not manifest_path.is_file() or not snapshot_path.is_file():
+        return False
+    try:
+        from src.stockpred.contracts import DataSnapshotManifest
+        from src.stockpred.gateway import StockPredDataGateway
+        from src.stockpred.snapshot import resolve_stockpred_root
+        from src.stockpred.strategy_detail import materialize_strategy_detail
+
+        snapshot = DataSnapshotManifest.model_validate(
+            json.loads(snapshot_path.read_text(encoding="utf-8"))
+        )
+        root = resolve_stockpred_root()
+        gateway = StockPredDataGateway(root, snapshot)
+        materialize_strategy_detail(run_dir, gateway)
+        return True
+    except Exception:
+        return False
+
+
 def load_price_series(run_dir: Path) -> List[Dict[str, Any]]:
-    """Load chart-ready price rows: price_series.csv > ohlcv_*.csv > API reconstruct.
+    """Load chart-ready price rows: price_series.csv > ohlcv_*.csv > lazy materialization > API reconstruct.
 
     Args:
         run_dir: The run directory under ``runs/``.
@@ -393,15 +544,38 @@ def load_price_series(run_dir: Path) -> List[Dict[str, Any]]:
     artifact_path = run_dir / "artifacts" / "price_series.csv"
     if artifact_path.exists():
         return _normalize_price_rows(load_csv_records(artifact_path))
-    rows = _load_ohlcv_artifacts(run_dir)
-    if rows:
-        return rows
+    # Only serve existing ohlcv_*.csv if the publish is complete
+    if _detail_publish_complete(run_dir):
+        rows = _load_ohlcv_artifacts(run_dir)
+        if rows:
+            return rows
+    # Lazy materialization: write ohlcv_*.csv into artifacts/ from the
+    # pinned data snapshot for stockpred strategy runs.
+    if _try_materialize_detail(run_dir):
+        rows = _load_ohlcv_artifacts(run_dir)
+        if rows:
+            return rows
     return reconstruct_price_series(run_dir)
 
 
 def load_chart_symbols(run_dir: Path, context: Optional[Dict[str, Any]] = None) -> List[str]:
     """Load chart symbol names without materializing all chart rows."""
     artifacts = run_dir / "artifacts"
+
+    # For staged runs with incomplete publish, use manifest codes (not partial CSV scan)
+    manifest_path = run_dir / "detail_manifest.json"
+    if manifest_path.is_file() and not _detail_publish_complete(run_dir):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            codes = [str(c) for c in manifest.get("codes", []) if c]
+            if codes:
+                return sorted(codes)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        # Fallback to context codes
+        raw_codes = (context or load_run_context(run_dir)).get("codes") or []
+        return sorted(str(code) for code in raw_codes if code)
+
     symbols: set[str] = set()
 
     price_path = artifacts / "price_series.csv"
@@ -506,6 +680,8 @@ def build_run_analysis(
             "price_series": {},
             "indicator_series": {},
             "trade_markers": [],
+            "graph_signal_series": {},
+            "strategy_snapshot": load_json_file(run_dir / "strategy_snapshot.json"),
             "run_logs": collect_run_logs(run_dir),
         }
 
@@ -525,6 +701,11 @@ def build_run_analysis(
         "price_series": group_price_rows(price_rows),
         "indicator_series": build_indicator_series(price_rows, periods) if price_rows else {},
         "trade_markers": build_trade_markers(trades, selected_symbols or None),
+        "graph_signal_series": load_graph_signal_series(
+            run_dir,
+            sorted(selected_symbols) if selected_symbols else None,
+        ),
+        "strategy_snapshot": load_json_file(run_dir / "strategy_snapshot.json"),
         "run_logs": collect_run_logs(run_dir),
     }
 

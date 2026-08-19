@@ -1,0 +1,18 @@
+{
+  "reports": [
+    {"strategy_id": "alpha101_0", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_1", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_2", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_3", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_4", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_5", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_6", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_7", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_8", "files": 7, "bytes": 1789},
+    {"strategy_id": "alpha101_9", "files": 7, "bytes": 1789}
+  ],
+  "timings": {"data_load": 0.0, "panel_build": 0.0, "factor_compute": 0.0, "execution": 0.0, "artifact_write": 0.0},
+  "cache": {"hits": 0, "misses": 0},
+  "screening_artifacts": {"files": 70, "bytes": 17890},
+  "equivalent": true
+}

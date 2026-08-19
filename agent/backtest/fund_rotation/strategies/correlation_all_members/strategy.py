@@ -1,0 +1,677 @@
+"""Correlation all-members strategy — migration baseline (design §32.2).
+
+The session resolves point-in-time eligibility on every signal date. Clusters
+remain stateful between reclustering dates, but listing/data/adjustment
+eligibility is never cached as a run-wide pool.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+import pandas as pd
+from pydantic import BaseModel
+
+from backtest.fund_rotation.clustering import hierarchical_cluster
+from backtest.fund_rotation.contracts import (
+    DecisionKind,
+    FundRotationStrategyDescriptor,
+    QualityStatus,
+    StrategyArtifact,
+    StrategyDataRequirements,
+    StrategyDecisionContext,
+    StrategyDiagnostics,
+    StrategyInitializationContext,
+    TargetWeightDecision,
+)
+from backtest.fund_rotation.correlation import (
+    compute_correlation_distance,
+    iterative_exclude,
+)
+from backtest.fund_rotation.signal_portfolio_risk import (
+    ClusterCoveragePolicy,
+    PortfolioPolicy,
+    RiskPolicy,
+    SelectionPolicy,
+    SelectionState,
+    HeldCluster,
+    compute_cluster_coverage,
+    run_decision_pipeline,
+    serialize_stage_records,
+)
+from backtest.fund_rotation.scoring.cluster_momentum import ClusterMomentumScoreModel
+from backtest.fund_rotation.scoring.contracts import StrategyScore, rank_scores
+from backtest.fund_rotation.strategies.correlation_all_members.config import (
+    CorrelationAllMembersConfig,
+)
+from backtest.fund_rotation.strategies.correlation_all_members.signals import (
+    ensure_instrument_pool,
+    iso_week_endings,
+    signal_date_eligible,
+)
+from backtest.fund_rotation.universe import (
+    ExclusionReason,
+    ExclusionRecord,
+    check_historical_eligibility,
+)
+
+
+def _serialize_score(score: StrategyScore) -> dict[str, object]:
+    return {
+        "id": "primary_score",
+        "label": score.label,
+        "display_label": score.display_label,
+        "model_label": score.model_label,
+        "value": score.value,
+        "eligible": score.eligible,
+        "direction": score.direction.value,
+        "frequency": score.frequency,
+        "scope": score.scope,
+        "subject_id": score.subject_id,
+        "model_id": score.model_id,
+        "model_version": score.model_version,
+        "components": dict(score.components),
+    }
+
+DESCRIPTOR = FundRotationStrategyDescriptor(
+    id="correlation_all_members",
+    name="相关性聚类全成员等权",
+    description=(
+        "基线策略：PIT 周收益相关距离聚类，簇动量 Top-N，入选簇内全部 ETF 等权。"
+        "作为迁移基准，封装首版固定流程行为。"
+    ),
+    interface_version="1.0",
+    supported_universe=("etf",),
+    deterministic=True,
+)
+
+
+class CorrelationAllMembersSession:
+    """Per-run session for the baseline strategy."""
+
+    def __init__(self, config: CorrelationAllMembersConfig) -> None:
+        self._config = config
+        self._week_index = 0
+        self._clusters: dict[str, int] = {}
+        self._selection_state: SelectionState | None = None
+        self._last_recluster_week = -config.recluster_interval_weeks
+        self._cluster_history: list[dict] = []
+        self._exclusions: list = []
+        self._decision_trace: list[dict] = []
+        self._previous_weights: dict[str, float] = {}
+
+    def scheduled_dates(
+        self,
+        calendar: tuple[str, ...],
+        simulation_start_date: str,
+        evaluation_end_date: str,
+    ) -> tuple[str, ...]:
+        endings = iso_week_endings(calendar)
+        return tuple(
+            date
+            for date in endings
+            if simulation_start_date <= date <= evaluation_end_date
+        )
+
+    def to_snapshot(self) -> dict[str, object]:
+        holdings = {}
+        if self._selection_state is not None:
+            holdings = {
+                str(key): {
+                    "weeks_held": value.weeks_held,
+                    "entry_score": value.entry_score,
+                }
+                for key, value in self._selection_state.holdings.items()
+            }
+        return {
+            "week_index": self._week_index,
+            "clusters": dict(self._clusters),
+            "last_recluster_week": self._last_recluster_week,
+            "cluster_history": list(self._cluster_history),
+            "clustering_cycle_id": (
+                str(self._cluster_history[-1]["week"])
+                if self._cluster_history
+                else "initial"
+            ),
+            "selection_state": {
+                "cycle_id": self._selection_state.cycle_id if self._selection_state else None,
+                "holdings": holdings,
+            },
+            "decision_trace": list(self._decision_trace),
+            "previous_weights": dict(self._previous_weights),
+        }
+
+    def restore_snapshot(self, snapshot: dict[str, object]) -> None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("strategy session snapshot must be a mapping")
+        self._week_index = int(snapshot.get("week_index", 0))
+        self._clusters = {
+            str(key): int(value)
+            for key, value in dict(snapshot.get("clusters", {})).items()
+        }
+        self._last_recluster_week = int(
+            snapshot.get("last_recluster_week", -self._config.recluster_interval_weeks)
+        )
+        self._cluster_history = [
+            dict(record) for record in snapshot.get("cluster_history", ())
+        ]
+        raw_selection = dict(snapshot.get("selection_state", {}))
+        raw_holdings = dict(raw_selection.get("holdings", {}))
+        self._selection_state = SelectionState(
+            cycle_id=raw_selection.get("cycle_id"),
+            holdings={
+                str(key): HeldCluster(
+                    weeks_held=int(value["weeks_held"]),
+                    entry_score=float(value["entry_score"]),
+                )
+                for key, value in raw_holdings.items()
+            },
+        )
+        self._decision_trace = [
+            dict(record) for record in snapshot.get("decision_trace", ())
+        ]
+        self._previous_weights = {
+            str(key): float(value)
+            for key, value in dict(snapshot.get("previous_weights", {})).items()
+        }
+
+    def _pool_at_signal(self, view) -> pd.DataFrame:
+        cfg = self._config
+        lookback_days = (
+            max(cfg.min_training_weeks, cfg.correlation_lookback_weeks) + 1
+        ) * 5 - 1
+        return ensure_instrument_pool(
+            view,
+            lookback_trade_days=lookback_days,
+        )
+
+    def _eligible_at_signal(
+        self,
+        view,
+        dim_pool: pd.DataFrame,
+        signal_date: str,
+    ) -> tuple[list[str], list]:
+        eligible, _historical_excluded = check_historical_eligibility(
+            dim_pool,
+            signal_date,
+        )
+        kept, market_excluded = signal_date_eligible(
+            view,
+            eligible,
+            signal_date,
+        )
+        return kept, market_excluded
+
+    def evaluate(self, context: StrategyDecisionContext) -> TargetWeightDecision:
+        cfg = self._config
+        signal_date = context.signal_date
+        view = context.data_view
+        dim_pool = self._pool_at_signal(view)
+
+        week_idx = self._week_index
+        self._week_index += 1
+        window = view.returns("weekly", cfg.correlation_lookback_weeks)
+
+        weeks_since_recluster = week_idx - self._last_recluster_week
+        reclustering = (
+            weeks_since_recluster >= cfg.recluster_interval_weeks
+            or not self._clusters
+        )
+        if reclustering:
+            current_codes = set(dim_pool["ts_code"].astype(str))
+            valid_codes = [
+                code for code in sorted(current_codes) if code in window.columns
+            ]
+            if cfg.min_valid_weeks > 0 and valid_codes:
+                counts = window[valid_codes].notna().sum()
+                qualified_codes = [
+                    code
+                    for code in valid_codes
+                    if counts.get(code, 0) >= cfg.min_valid_weeks
+                ]
+                for code in sorted(
+                    set(valid_codes) - set(qualified_codes)
+                ):
+                    self._exclusions.append(
+                        ExclusionRecord(
+                            ts_code=code,
+                            reason=(
+                                ExclusionReason.INSUFFICIENT_VALID_WEEKS
+                            ),
+                            details=(
+                                f"valid_weeks={int(counts.get(code, 0))}; "
+                                f"required={cfg.min_valid_weeks}"
+                            ),
+                            signal_date=signal_date,
+                        )
+                    )
+                valid_codes = qualified_codes
+            if len(valid_codes) < cfg.k:
+                raise ValueError(
+                    f"Recluster at {signal_date}: only {len(valid_codes)} "
+                    f"eligible ETFs, need at least K={cfg.k}."
+                )
+            distance = compute_correlation_distance(
+                window[valid_codes],
+                min_pairwise_weeks=cfg.min_pairwise_weeks,
+            )
+            kept_codes, pair_excluded = iterative_exclude(
+                distance,
+                k=cfg.k,
+            )
+            self._exclusions.extend(pair_excluded)
+            sub_distance = distance.loc[kept_codes, kept_codes]
+            self._clusters = hierarchical_cluster(
+                sub_distance,
+                k=cfg.k,
+            )
+            self._last_recluster_week = week_idx
+            self._cluster_history.append(
+                {
+                    "week": signal_date,
+                    "clusters": dict(self._clusters),
+                    "num_etfs": len(self._clusters),
+                }
+            )
+
+        eligible, market_excluded = self._eligible_at_signal(
+            view,
+            dim_pool,
+            signal_date,
+        )
+        self._exclusions.extend(market_excluded)
+
+        if not self._clusters:
+            decision = TargetWeightDecision(
+                decision_id=f"{signal_date}-correlation_all_members",
+                signal_date=signal_date,
+                action=DecisionKind.HOLD_TARGETS,
+            )
+            self._log_decision(decision, scores={})
+            return decision
+
+        momentum_returns = window.iloc[
+            -(cfg.momentum_window_weeks + 1):
+        ]
+        score_model = ClusterMomentumScoreModel()
+        scores = score_model.score(
+            momentum_returns,
+            self._clusters,
+            cfg.momentum_window_weeks,
+            minimum_eligible_score=cfg.momentum_threshold,
+        )
+        momentum = {
+            cluster_id: score.value if score.value is not None else float("nan")
+            for cluster_id, score in scores.items()
+        }
+        cluster_members: dict[int, list[str]] = {}
+        for code, cluster_id in self._clusters.items():
+            cluster_members.setdefault(cluster_id, []).append(code)
+
+        eligible_set = set(eligible)
+        filtered_members = {
+            cluster_id: [
+                code for code in members if code in eligible_set
+            ]
+            for cluster_id, members in cluster_members.items()
+        }
+        all_cluster_members = {
+            code for members in cluster_members.values() for code in members
+        }
+        coverage_reports = compute_cluster_coverage(
+            weekly_returns=momentum_returns,
+            cluster_members=cluster_members,
+            eligible_by_week=_coverage_eligible_by_week(
+                view,
+                dim_pool,
+                all_cluster_members,
+                momentum_returns.index,
+            ),
+            policy=ClusterCoveragePolicy(
+                min_weekly_coverage=self._config.min_weekly_coverage,
+                max_low_coverage_weeks=self._config.max_low_coverage_weeks,
+                minimum_valid_members=self._config.minimum_valid_members,
+            ),
+            denominator_mode=(
+                "pit_universe"
+                if getattr(view, "pit_universe_lookup", None) is not None
+                else "cluster_members"
+            ),
+        )
+        cycle_id = (
+            str(self._cluster_history[-1]["week"])
+            if self._cluster_history
+            else "initial"
+        )
+        rankable_scores = {
+            cluster_id: score
+            for cluster_id, score in scores.items()
+            if coverage_reports.get(cluster_id) is not None
+            and coverage_reports[cluster_id].is_available
+            and any(
+                code in eligible_set
+                for code, code_cluster in self._clusters.items()
+                if code_cluster == cluster_id
+            )
+        }
+        ranked_subjects = rank_scores(rankable_scores, cluster_members=cluster_members)
+        pipeline_decision = run_decision_pipeline(
+            raw_signal_scores=dict(momentum),
+            coverage_available={
+                cluster_id: report.is_available
+                for cluster_id, report in coverage_reports.items()
+            },
+            representatives=filtered_members,
+            asset_metadata={
+                code: {
+                    "cluster_id": cluster_id,
+                    "asset_class": "etf",
+                }
+                for cluster_id, members in filtered_members.items()
+                for code in members
+            },
+            selection_policy=SelectionPolicy(
+                top_n=cfg.top_n,
+                minimum_entry_score=cfg.momentum_threshold,
+            ),
+            portfolio_policy=PortfolioPolicy(
+                method="equal_weight_by_cluster_slot",
+                target_cluster_slots=cfg.top_n,
+            ),
+            risk_policy=RiskPolicy(enabled=False),
+            policy_versions={
+                "signal": "correlation_all_members:momentum",
+                "coverage": "correlation_all_members:coverage",
+                "selection": "correlation_all_members:hysteresis",
+                "representative": "correlation_all_members:all_members",
+                "portfolio": (
+                    "correlation_all_members:equal_weight_by_cluster_slot"
+                ),
+                "risk": "correlation_all_members:risk_identity",
+            },
+            selection_state=self._selection_state,
+            cycle_id=cycle_id,
+            ranking_order=ranked_subjects,
+        )
+        self._selection_state = pipeline_decision.next_selection_state
+        execution_stage = pipeline_decision.stage_records[-1]
+        execution_output = execution_stage.output
+        targets = dict(execution_output["weights"])
+        decision = TargetWeightDecision(
+            decision_id=f"{signal_date}-correlation_all_members",
+            signal_date=signal_date,
+            action=DecisionKind.SET_TARGETS,
+            target_weights=dict(targets),
+            cash_weight=max(0.0, 1.0 - sum(targets.values())),
+            quality_status=QualityStatus.VALID,
+            diagnostics={
+                "num_clusters": len(self._clusters),
+                "eligible_codes": list(eligible),
+                "signal_pipeline_stage_records": serialize_stage_records(
+                    pipeline_decision.stage_records
+                ),
+                "signal_pipeline_reason_codes": list(
+                    pipeline_decision.reason_codes
+                ),
+                "score_model": {
+                    "id": score_model.id,
+                    "label": score_model.label,
+                    "version": score_model.version,
+                    "direction": "HIGHER_BETTER",
+                },
+                "strategy_scores": {
+                    str(cluster_id): _serialize_score(score)
+                    for cluster_id, score in scores.items()
+                },
+            },
+        )
+        self._log_decision(
+            decision,
+            scores=scores,
+            ranked_subjects=ranked_subjects,
+            coverage_available={
+                cluster_id: report.is_available
+                for cluster_id, report in coverage_reports.items()
+            },
+            eligible_codes=eligible_set,
+        )
+        return decision
+
+    def _log_decision(
+        self,
+        decision: TargetWeightDecision,
+        *,
+        scores: Mapping[int, StrategyScore],
+        coverage_available: Mapping[int, bool] | None = None,
+        eligible_codes: set[str] | None = None,
+        ranked_subjects: list[int] | None = None,
+    ) -> None:
+        coverage = coverage_available or {}
+        point_eligible_codes = eligible_codes or set()
+        if ranked_subjects is None:
+            ranked_subjects = rank_scores(
+                {
+                    cluster_id: score
+                    for cluster_id, score in scores.items()
+                    if coverage.get(cluster_id, True)
+                    and any(
+                        code in point_eligible_codes
+                        for code, code_cluster in self._clusters.items()
+                        if code_cluster == cluster_id
+                    )
+                }
+            )
+        rank_by_cluster = {
+            cluster_id: index
+            for index, cluster_id in enumerate(ranked_subjects, start=1)
+        }
+        selected_codes = set(decision.target_weights)
+        candidates: list[dict[str, object]] = []
+        for code, cluster_id in sorted(self._clusters.items()):
+            score = scores.get(cluster_id)
+            score_is_eligible = bool(
+                score is not None
+                and score.eligible
+                and coverage.get(cluster_id, True)
+                and code in point_eligible_codes
+            )
+            candidates.append(
+                {
+                    "ts_code": code,
+                    "stages": {
+                        "universe_eligible": code in point_eligible_codes,
+                        "cluster_id": cluster_id,
+                        "cluster_representative": False,
+                        "ranking_eligible": score_is_eligible,
+                        "rank": rank_by_cluster.get(cluster_id) if score_is_eligible else None,
+                        "portfolio_selected": code in selected_codes,
+                    },
+                    "primary_metric": (
+                        {
+                            "id": score.model_id,
+                            "label": score.label,
+                            "value": score.value,
+                        }
+                        if score is not None and score.value is not None
+                        else None
+                    ),
+                    "score": _serialize_score(score) if score is not None else None,
+                    "previous_weight": float(self._previous_weights.get(code, 0.0)),
+                    "target_weight": float(decision.target_weights.get(code, 0.0)),
+                    "exclusion_stage": (
+                        "UNIVERSE"
+                        if code not in point_eligible_codes
+                        else "COVERAGE"
+                        if score is not None and not coverage.get(cluster_id, True)
+                        else "SCORE"
+                        if score is not None and not score.eligible
+                        else None
+                    ),
+                    "exclusion_reason": (
+                        "SIGNAL_INELIGIBLE"
+                        if code not in point_eligible_codes
+                        else "INSUFFICIENT_CLUSTER_COVERAGE"
+                        if score is not None and not coverage.get(cluster_id, True)
+                        else "SCORE_INELIGIBLE"
+                        if score is not None and not score.eligible
+                        else None
+                    ),
+                }
+            )
+        self._decision_trace.append(
+            {
+                "signal_date": decision.signal_date,
+                "cluster_snapshot": (
+                    {
+                        "snapshot_date": self._cluster_history[-1]["week"],
+                        "clusters": dict(self._clusters),
+                    }
+                    if self._cluster_history
+                    else None
+                ),
+                "candidates": candidates,
+            }
+        )
+        self._previous_weights = dict(decision.target_weights)
+
+    def finalize(self) -> StrategyDiagnostics:
+        return StrategyDiagnostics(
+            artifacts=(
+                StrategyArtifact(
+                    role="cluster_history",
+                    media_type="application/json",
+                    payload=self._cluster_history,
+                ),
+                StrategyArtifact(
+                    role="exclusions",
+                    media_type="application/json",
+                    payload=self._exclusions,
+                ),
+            ),
+            decision_trace=tuple(self._decision_trace),
+        )
+
+
+def _coverage_eligible_by_week(
+    view,
+    dim_pool: pd.DataFrame,
+    codes: set[str],
+    weeks,
+) -> dict[object, set[str]]:
+    list_dates = {
+        str(row["ts_code"]): _week_key_to_yyyymmdd(row.get("list_date", ""))
+        for _, row in dim_pool.iterrows()
+    }
+    has_pit_lookup = hasattr(view, "pit_universe_codes") and getattr(
+        view, "pit_universe_lookup", None
+    ) is not None
+    eligible_by_week: dict[object, set[str]] = {}
+    for week in weeks:
+        week_date = _week_key_to_yyyymmdd(week)
+        pit_codes = frozenset(
+            view.pit_universe_codes(week_date)
+            if hasattr(view, "pit_universe_codes")
+            else codes
+        )
+        historically_eligible = (
+            sorted(pit_codes)
+            if has_pit_lookup
+            else [
+                code
+                for code in sorted(codes)
+                if list_dates.get(code, "") <= week_date
+            ]
+        )
+        if has_pit_lookup and hasattr(view, "historical_signal_date_eligible"):
+            kept = list(
+                view.historical_signal_date_eligible(
+                    historically_eligible,
+                    week_date,
+                )
+            )
+        else:
+            kept, _excluded = signal_date_eligible(
+                view,
+                historically_eligible,
+                week_date,
+            )
+        eligible_by_week[week] = set(kept)
+        eligible_by_week[pd.Timestamp(week_date)] = set(kept)
+    return eligible_by_week
+
+
+def _week_key_to_yyyymmdd(week) -> str:
+    if isinstance(week, pd.Timestamp):
+        return week.strftime("%Y%m%d")
+    return pd.Timestamp(str(week)).strftime("%Y%m%d")
+
+
+class CorrelationAllMembersStrategy:
+    """Complete fund-rotation strategy plug-in (baseline)."""
+
+    descriptor = DESCRIPTOR
+    config_model = CorrelationAllMembersConfig
+    artifact_roles: tuple[str, ...] = (
+        "cluster_history",
+        "exclusions",
+    )
+
+    def describe_decision_pipeline(self, config: BaseModel) -> dict[str, object]:
+        cfg: CorrelationAllMembersConfig = config  # type: ignore[assignment]
+        return {
+            "universe": "ETF",
+            "dedup_method": "Correlation Clustering",
+            "representative_method": "All cluster members",
+            "score_model": {
+                "id": "cluster_momentum",
+                "label": "Cluster Momentum",
+                "version": "1",
+                "direction": "HIGHER_BETTER",
+            },
+            "selection_rule": f"Top {cfg.top_n}",
+            "top_n": cfg.top_n,
+            "weighting_rule": "Equal Weight within selected clusters",
+            "rebalance_frequency": "Weekly" if cfg.rebalance_freq == "W" else cfg.rebalance_freq,
+        }
+
+    def resolve_requirements(
+        self,
+        config: BaseModel,
+    ) -> StrategyDataRequirements:
+        cfg: CorrelationAllMembersConfig = config  # type: ignore[assignment]
+        min_weeks = max(
+            cfg.min_training_weeks,
+            cfg.correlation_lookback_weeks,
+        )
+        warmup_trade_days = (min_weeks + 1) * 5 - 1
+        return StrategyDataRequirements(
+            required_datasets=(
+                "fund",
+                "fact_fund_adj",
+                "dim_fund",
+            ),
+            required_fields=(
+                "ts_code",
+                "trade_date",
+                "name",
+                "list_date",
+                "open",
+                "close",
+                "high",
+                "low",
+                "pre_close",
+                "vol",
+                "amount",
+                "adj_factor",
+            ),
+            warmup_trade_days=warmup_trade_days,
+            frequency=cfg.rebalance_freq,
+            needs_benchmark=True,
+        )
+
+    def create_session(
+        self,
+        initialization: StrategyInitializationContext,
+        config: BaseModel,
+    ) -> CorrelationAllMembersSession:
+        return CorrelationAllMembersSession(config)  # type: ignore[arg-type]
