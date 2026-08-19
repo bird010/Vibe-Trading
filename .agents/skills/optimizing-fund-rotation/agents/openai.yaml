@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 基金轮动优化"
+  short_description: "顺序执行可审计的基金轮动 Champion-Challenger 实验"
+  default_prompt: "Use $optimizing-fund-rotation to run an auditable fund-rotation research campaign from an existing backtest."
