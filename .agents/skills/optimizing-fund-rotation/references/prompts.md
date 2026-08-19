@@ -21,9 +21,9 @@ Prefer the smallest mechanism with few parameters. No broad search, post-hoc int
 ```text
 You are the gpt-5.6-luna implementer for round {round_no}. Implement {design_path} with the smallest traceable diff.
 
-Read AGENTS.md, the design, strategy interface, common Runner, registry, and focused tests. Write a behavior test first and verify the expected failure; then add ai_rotation_r{round_no}_{slug} in a new strategy directory and make the minimal registry/test changes.
+Read AGENTS.md, the design, strategy interface, common Runner, registry, and focused tests. Write a behavior test first and verify the expected failure; then add ai_rotation_r{round_no}_{slug} in a new strategy directory and make the minimal registry/test changes. If an exact catalog/registry regression assertion enumerates the registered strategies, update that existing assertion only to append the new strategy ID while preserving all prior IDs and invariants; do not delete, weaken, generalize, or special-case the assertion.
 
-Do not modify an existing strategy or default, shared Runner, data/execution/API contract, or evaluation policy. If the design requires that, stop with DESIGN_SCOPE_BLOCKED. Preserve causal availability and explicit lag. Do not weaken assertions, enlarge tolerances, or add unrelated refactors.
+Do not modify an existing strategy or default, shared Runner, data/execution/API contract, or evaluation policy. Updating an exact catalog/registry regression assertion is allowed only when required to register the new strategy, and only by appending the new ID while retaining all existing assertions. If the design requires any broader existing-test or contract change, stop with DESIGN_SCOPE_BLOCKED. Preserve causal availability and explicit lag. Do not weaken assertions, enlarge tolerances, or add unrelated refactors.
 
 Run the focused and fund-rotation regression tests. Write implementation_report.md with changed files, test commands/results, deviations, and residual risks. Do not run confirmation selection or decide Champion status.
 
@@ -35,7 +35,7 @@ On review findings, repair only P0/P1 with tests and explain root cause and fix.
 ```text
 You are a fresh, independent gpt-5.6-luna reviewer for round {round_no}. Review only; do not edit files.
 
-Compare {design_path}, the frozen contract, diff, and tests. Check: existing-strategy isolation; formulas/config; signal/data/trade/valuation timing; PIT, listings, survivorship, adjustment and missing data; costs, slippage, capacity, lots, cash and residual orders; NaN/inf, short samples, constants, empty Universe, ties and determinism; shared-contract drift; confirmation-data leakage; and whether tests prove the mechanism.
+Compare {design_path}, the frozen contract, diff, and tests. Check: existing-strategy isolation; formulas/config; signal/data/trade/valuation timing; PIT, listings, survivorship, adjustment and missing data; costs, slippage, capacity, lots, cash and residual orders; NaN/inf, short samples, constants, empty Universe, ties and determinism; shared-contract drift; confirmation-data leakage; whether tests prove the mechanism; and whether any catalog assertion change only appends the new strategy while preserving all prior IDs and invariants.
 
 P0 means the conclusion is invalid or destructive effects are possible. P1 means return/risk is materially distorted, an invariant is violated, or core behavior/tests are broken. Style preferences are not P1.
 

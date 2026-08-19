@@ -65,7 +65,7 @@ For a numeric tie, prefer lower drawdown, then lower turnover, then lower comple
 - Strategy IDs: `ai_rotation_rNN_<short-slug>`.
 - One principal hypothesis per round.
 - New strategy directory and focused tests are allowed.
-- Minimal registry changes are allowed.
+- Minimal registry changes are allowed. If an exact catalog/registry regression assertion enumerates the registered strategies, the round may update that existing assertion only to append the new strategy ID; all pre-existing IDs and catalog invariants must remain asserted, and no assertion may be deleted, weakened, generalized, or special-cased.
 - Existing strategy code/defaults, shared execution semantics, and public data contracts are outside scope.
 - Use a fresh reviewer after each fix. Reuse the original implementer for fixes. Five review cycles is the per-round limit.
 

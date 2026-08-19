@@ -99,3 +99,4 @@ tmp/
 .pytest_tmp/
 
 agent/tests/.pytest-*
+experiments/

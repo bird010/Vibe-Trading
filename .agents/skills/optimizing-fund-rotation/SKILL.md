@@ -32,6 +32,7 @@ Before acting, read:
 ## Hard Gates
 
 - Add a new strategy ID; never alter an existing strategy implementation or its defaults.
+- When registering a new strategy changes an exact catalog/registry regression assertion, update that assertion only to append the new strategy while preserving every existing strategy ID and invariant. Do not delete, weaken, broaden, or special-case the existing catalog contract.
 - Stop a round before backtesting while P0/P1 findings or required tests remain.
 - Do not change the public Runner, PIT/data contract, execution semantics, or evaluation policy without explicit approval.
 - Do not rank incomparable, partial, corrupt, or quality-gate-failing runs.
