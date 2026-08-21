@@ -61,7 +61,7 @@ Resolve both registered strategies and server defaults. Create and save one Stra
 
 Persist batch_id and wait by SSE or GET /stockpred/fund-rotation/strategy-batches/{batch_id} until a verified terminal state. HTTP 202 is acceptance, not completion. Retry transient failures with the same idempotency key.
 
-At terminal state, verify batch and child manifests/checksums, quality/partial/comparison flags, snapshot, framework, execution, folds, and metric identities. If any technical or comparability gate fails, do not rank; record failure and retain Champion. Otherwise apply every frozen Champion gate, persist raw fold metrics and gate decisions, and update Champion only if all pass.
+At terminal state, verify batch and child manifests/checksums, quality/partial/comparison flags, snapshot, framework, execution, folds, and metric identities. If any technical or comparability gate fails, do not rank; record failure and retain Champion. Treat a shared `RESEARCH_ONLY_UNVERIFIED_UNIVERSE` status as an allowed research quality state when both variants have the same snapshot/universe status and are publishable/comparable. Otherwise apply every frozen Champion gate, persist raw fold metrics and gate decisions, and update the research Champion only if all pass; deployment qualification remains disallowed.
 ```
 
 ## Master controller

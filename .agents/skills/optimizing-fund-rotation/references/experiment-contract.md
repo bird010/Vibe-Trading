@@ -56,7 +56,7 @@ Compare Champion and Challenger on identical folds and a continuous-account metr
 2. Validation annual return is not lower.
 3. Maximum drawdown worsens by no more than 1 percentage point.
 4. Challenger Sharpe wins in more than half of valid folds.
-5. No PIT, look-ahead, data-quality, execution-quality, reconciliation, corruption, or comparability gate fails.
+5. No PIT, look-ahead, execution-quality, reconciliation, corruption, or comparability gate fails. `RESEARCH_ONLY_UNVERIFIED_UNIVERSE` is an allowed shared research quality state: if Champion and Challenger have identical snapshot/universe quality status and both are publishable/comparable, it does not by itself fail promotion. The result remains research-only and cannot support deployment qualification.
 
 For a numeric tie, prefer lower drawdown, then lower turnover, then lower complexity; otherwise retain Champion.
 

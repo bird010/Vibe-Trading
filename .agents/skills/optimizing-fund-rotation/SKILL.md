@@ -26,7 +26,7 @@ Before acting, read:
    - dispatch a fresh `gpt-5.6-luna` reviewer;
    - return P0/P1 findings to the same implementer, then use a fresh reviewer, for at most five review cycles;
    - after tests and review pass, submit Champion and Challenger together through the strategy-batch API and wait for a verified terminal state;
-   - replace Champion only when every pre-registered gate passes.
+   - replace the research Champion only when every pre-registered performance, identity, comparability, and implementation gate passes; deployment qualification remains separate.
 6. Freeze the final candidate. A consumed confirmation run cannot change it. Pre-register at least 104 weeks of forward shadow before any deployment qualification claim.
 
 ## Hard Gates
@@ -35,7 +35,7 @@ Before acting, read:
 - When registering a new strategy changes an exact catalog/registry regression assertion, update that assertion only to append the new strategy while preserving every existing strategy ID and invariant. Do not delete, weaken, broaden, or special-case the existing catalog contract.
 - Stop a round before backtesting while P0/P1 findings or required tests remain.
 - Do not change the public Runner, PIT/data contract, execution semantics, or evaluation policy without explicit approval.
-- Do not rank incomparable, partial, corrupt, or quality-gate-failing runs.
+- Do not rank incomparable, partial, corrupt, or quality-gate-failing runs. `RESEARCH_ONLY_UNVERIFIED_UNIVERSE` is an allowed research quality state: when Champion and Challenger share the same snapshot, universe, quality status, and publishable/comparability flags, it does not by itself block ranking or research-Champion promotion. Record the limitation and keep the campaign research-only.
 - HTTP `202`, a process ID, or a disconnected SSE stream is not completion. Reuse the idempotency key and poll the batch ID to a terminal state.
 - Do not add an extra round, silently shorten folds, consume the confirmation interval, delete failed trials, or relabel historical evidence as OOS.
 
