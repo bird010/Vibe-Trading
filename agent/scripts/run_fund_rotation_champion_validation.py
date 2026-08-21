@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 from backtest.fund_rotation.champion_validation.controller import ChampionValidationController
 from backtest.fund_rotation.champion_validation.contracts import DateInterval, ValidationContract
+from backtest.fund_rotation.champion_validation.historical_handlers import (
+    build_historical_stage_handlers,
+    historical_identity,
+)
 
 
 _TUPLE_FIELDS = {
@@ -59,9 +63,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contract", help="JSON 文件形式的冻结 ValidationContract")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--idempotency-key", default="")
+    parser.add_argument("--source-dir", help="Round 11 frozen artifact directory")
     args = parser.parse_args(argv)
     contract = _load_contract(args.contract)
-    ChampionValidationController(Path(args.experiment_dir), contract=contract).run(
+    ChampionValidationController(
+        Path(args.experiment_dir),
+        contract=contract,
+        identity=historical_identity(args.source_dir),
+        stage_handlers=build_historical_stage_handlers(args.source_dir),
+    ).run(
         resume=args.resume,
         idempotency_key=args.idempotency_key,
     )

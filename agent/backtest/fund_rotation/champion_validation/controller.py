@@ -320,7 +320,7 @@ class ChampionValidationController:
         for index, stage in enumerate(EXPECTED_STAGE_ORDER[:-1]):
             canonical_gate = _GATE_ALIASES.get(stage, stage)
             if any(
-                r.status is not StageStatus.PASS
+                r.status is StageStatus.FAIL
                 and _GATE_ALIASES.get(name, name) == canonical_gate
                 for name, r in results.items()
             ):
@@ -334,7 +334,7 @@ class ChampionValidationController:
                 repair_chain = True
             if prior is not None:
                 results[stage] = prior
-                if prior.status is not StageStatus.PASS:
+                if prior.status is StageStatus.FAIL:
                     break
                 continue
             handler = self.stage_handlers.get(stage)
@@ -363,11 +363,11 @@ class ChampionValidationController:
             result = _stage_result(stage, artifact, self.contract, self._identity_map)
             results[stage] = result
             append_once(stage, artifact)
-            if result.status is not StageStatus.PASS:
+            if result.status is StageStatus.FAIL:
                 break
 
         decision = self._guard_default_identity(
-            evaluate_final_decision({(_GATE_ALIASES.get(k, k)): v for k, v in results.items()})
+            evaluate_final_decision(results)
         )
         final_path = self.experiment_dir / "stages" / "08_final" / "result.json"
         reasons = self._final_reasons(decision, results)

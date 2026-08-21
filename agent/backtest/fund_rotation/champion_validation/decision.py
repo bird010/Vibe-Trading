@@ -110,9 +110,14 @@ class ValidationDecision:
 _STAGE_ALIASES = {
     "preflight": "preflight",
     "universe": "universe",
+    "benchmarks": "economic",
     "economic": "economic",
     "economic-value": "economic",
+    "ablation": "mechanism",
     "mechanism": "mechanism",
+    "stability": "robustness",
+    "stress": "robustness",
+    "attribution": "robustness",
     "robustness": "robustness",
     "statistics": "statistics",
     "statistical": "statistics",
@@ -173,7 +178,7 @@ def evaluate_final_decision(
 
     if statuses.get("universe") is not StageStatus.PASS:
         return ValidationDecision(
-            FinalAction.STOP_CURRENT_ARCHITECTURE,
+            FinalAction.FORWARD_SHADOW_ONLY,
             ValidationState.INCONCLUSIVE_UNIVERSE,
             statuses,
             ("UNIVERSE_EVIDENCE_INSUFFICIENT",),

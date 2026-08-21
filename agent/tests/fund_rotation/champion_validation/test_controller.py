@@ -61,7 +61,7 @@ def test_controller_runs_stages_in_order_and_writes_auditable_experiment(tmp_pat
     assert all(json.loads(line)["sequence"] == index for index, line in enumerate(ledger_lines, 1))
 
 
-def test_controller_stops_after_universe_gap_and_does_not_interpret_later_stages(tmp_path: Path):
+def test_controller_records_later_stages_after_universe_gap(tmp_path: Path):
     calls: list[str] = []
     controller = ChampionValidationController(
         tmp_path / "experiment",
@@ -70,10 +70,10 @@ def test_controller_stops_after_universe_gap_and_does_not_interpret_later_stages
 
     result = controller.run(idempotency_key="fixture-gap")
 
-    assert calls == ["preflight", "universe"]
+    assert calls == list(EXPECTED_STAGE_ORDER[:-1])
     assert result.stage_results["universe"].status.value == "INCONCLUSIVE"
-    assert "benchmarks" not in result.stage_results
-    assert result.decision.action.value == "STOP_CURRENT_ARCHITECTURE"
+    assert result.stage_results["benchmarks"].status.value == "PASS"
+    assert result.decision.action.value == "FORWARD_SHADOW_ONLY"
     assert "UNIVERSE_EVIDENCE_INSUFFICIENT" in result.decision.reason_codes
 
 
@@ -233,7 +233,7 @@ def test_final_artifact_preserves_actual_non_pass_status_action_and_reasons(tmp_
     assert final["payload"]["action"] == result.decision.action.value
     assert "FIXTURE_RESULT" in final["reason_codes"]
     if fail_stage == "universe":
-        assert result.decision.action.value == "STOP_CURRENT_ARCHITECTURE"
+        assert result.decision.action.value == "FORWARD_SHADOW_ONLY"
     else:
         assert result.decision.action.value == "FORWARD_SHADOW_ONLY"
 
