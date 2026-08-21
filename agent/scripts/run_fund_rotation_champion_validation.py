@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Mapping
+
+_AGENT_ROOT = Path(__file__).resolve().parents[1]
+if str(_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_AGENT_ROOT))
 
 from backtest.fund_rotation.champion_validation.controller import ChampionValidationController
 from backtest.fund_rotation.champion_validation.contracts import DateInterval, ValidationContract

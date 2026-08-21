@@ -169,9 +169,10 @@ def evaluate_final_decision(
     required = ("preflight", "universe", "economic", "mechanism", "robustness", "statistics")
     failed = [stage for stage in required if statuses.get(stage) is StageStatus.FAIL]
     if failed:
+        failed_stage = failed[0]
         return ValidationDecision(
             FinalAction.STOP_CURRENT_ARCHITECTURE,
-            ValidationState.DATA_GAP if "universe" in failed else ValidationState.ECONOMIC_VALUE_FAILED,
+            _failure_state(failed_stage, statuses[failed_stage]),
             statuses,
             tuple(f"{stage.upper()}_FAIL" for stage in failed),
         )

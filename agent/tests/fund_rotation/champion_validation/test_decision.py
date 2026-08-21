@@ -124,3 +124,24 @@ def test_duplicate_canonical_stage_cannot_have_later_pass_cover_earlier_fail():
 
     assert decision.action is FinalAction.STOP_CURRENT_ARCHITECTURE
     assert "ECONOMIC_FAIL" in decision.reason_codes
+
+
+@pytest.mark.parametrize("failed_stage", ["robustness", "stability", "stress", "attribution"])
+def test_robustness_failure_is_not_overwritten_by_a_later_pass(failed_stage):
+    results = all_passing_results()
+    results.insert(4, result(failed_stage, StageStatus.FAIL))
+
+    decision = evaluate_final_decision(results)
+
+    assert decision.action is FinalAction.STOP_CURRENT_ARCHITECTURE
+    assert decision.state is ValidationState.ROBUSTNESS_FAILED
+
+
+def test_statistics_failure_maps_to_statistical_failed():
+    results = all_passing_results()
+    results[-1] = result("statistics", StageStatus.FAIL)
+
+    decision = evaluate_final_decision(results)
+
+    assert decision.action is FinalAction.STOP_CURRENT_ARCHITECTURE
+    assert decision.state is ValidationState.STATISTICAL_FAILED

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -12,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from backtest.fund_rotation.champion_validation.contracts import ValidationContract
 
 _CLI_PATH = Path(__file__).resolve().parents[3] / "scripts" / "run_fund_rotation_champion_validation.py"
+_REPO_ROOT = _CLI_PATH.parents[2]
 _CLI_SPEC = importlib.util.spec_from_file_location("fund_rotation_validation_cli", _CLI_PATH)
 assert _CLI_SPEC and _CLI_SPEC.loader
 _CLI_MODULE = importlib.util.module_from_spec(_CLI_SPEC)
@@ -84,3 +87,32 @@ def test_cli_rejects_invalid_contract_file(tmp_path: Path):
                 "invalid-contract-key",
             ]
         )
+
+
+def test_cli_runs_from_repository_root_without_pythonpath(tmp_path: Path):
+    experiment_dir = tmp_path / "experiment"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_CLI_PATH),
+            "--experiment-dir",
+            str(experiment_dir),
+            "--idempotency-key",
+            "subprocess-smoke-key",
+        ],
+        cwd=_REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report_path = experiment_dir / "report.md"
+    ledger_path = experiment_dir / "validation_ledger.jsonl"
+    assert report_path.is_file()
+    assert report_path.read_text(encoding="utf-8")
+    assert ledger_path.is_file()
+    assert ledger_path.read_text(encoding="utf-8")
