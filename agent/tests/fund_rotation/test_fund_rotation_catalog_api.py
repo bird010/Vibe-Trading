@@ -41,7 +41,36 @@ class TestStrategyList:
         assert body["mode"] == "RESEARCH_ONLY"
         assert body["catalog_version"]
         ids = [s["strategy_id"] for s in body["strategies"]]
-        assert ids == ["correlation_all_members", "correlation_representative"]
+        assert ids == [
+            "ai_rotation_r05_mom_persist",
+            "ai_rotation_r06_rank_buffer",
+            "ai_rotation_r07_tail_persist",
+            "ai_rotation_r11_persist_geom",
+            "ai_rotation_r12_nondecay_geom",
+            "ai_rotation_r13_arith_persist",
+            "ai_rotation_r14_median_persist",
+            "ai_rotation_r15_weighted_persist",
+            "ai_rotation_r16_rank_consensus",
+            "ai_rotation_r17_winsor_geom",
+            "ai_rotation_r18_min_persist",
+            "ai_rotation_r19_top2_cash",
+            "ai_rotation_r20_rank_frontload",
+            "ai_rotation_r21_harmonic_persist",
+            "ai_rotation_r22_path_consistency",
+            "ai_rotation_r23_downside_geom",
+            "ai_rotation_r24_dispersion_geom",
+            "ai_rotation_r25_rep_persist_geom",
+            "ai_rotation_r26_path_vol_geom",
+            "ai_rotation_r27_breadth_persist_geom",
+            "ai_rotation_r28_size_reliability_geom",
+            "ai_rotation_r29_invvol_slots",
+            "ai_rotation_r30_endpoint_breadth_geom",
+            "ai_rotation_r31_fast_exit",
+            "ai_rotation_r32_market_regime",
+            "ai_rotation_r33_quality_fallback",
+            "ai_rotation_r34_staged_reentry",
+            "correlation_all_members", "correlation_representative",
+        ]
 
     def test_entries_carry_catalog_fields(self, tmp_path):
         body = _client(tmp_path).get("/stockpred/fund-rotation/strategies").json()

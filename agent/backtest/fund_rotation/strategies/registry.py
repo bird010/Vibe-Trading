@@ -14,8 +14,119 @@ from backtest.fund_rotation.strategies.correlation_all_members.strategy import (
 from backtest.fund_rotation.strategies.correlation_representative.strategy import (
     CorrelationRepresentativeStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r05_mom_persist.strategy import (
+    AiRotationR05MomPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r06_rank_buffer.strategy import (
+    AiRotationR06RankBufferStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r07_tail_persist.strategy import (
+    AiRotationR07TailPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r11_persist_geom.strategy import (
+    AiRotationR11PersistGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r12_nondecay_geom.strategy import (
+    AiRotationR12NondecayGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r13_arith_persist.strategy import (
+    AiRotationR13ArithPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r14_median_persist.strategy import (
+    AiRotationR14MedianPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r15_weighted_persist.strategy import (
+    AiRotationR15WeightedPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r16_rank_consensus.strategy import (
+    AiRotationR16RankConsensusStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r17_winsor_geom.strategy import (
+    AiRotationR17WinsorGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r18_min_persist.strategy import (
+    AiRotationR18MinPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r19_top2_cash.strategy import (
+    AiRotationR19Top2CashStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r20_rank_frontload.strategy import (
+    AiRotationR20RankFrontloadStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r21_harmonic_persist.strategy import (
+    AiRotationR21HarmonicPersistStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r22_path_consistency.strategy import (
+    AiRotationR22PathConsistencyStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r23_downside_geom.strategy import (
+    AiRotationR23DownsideGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r24_dispersion_geom.strategy import (
+    AiRotationR24DispersionGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r25_rep_persist_geom.strategy import (
+    AiRotationR25RepPersistGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r26_path_vol_geom.strategy import (
+    AiRotationR26PathVolGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r27_breadth_persist_geom.strategy import (
+    AiRotationR27BreadthPersistGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r28_size_reliability_geom.strategy import (
+    AiRotationR28SizeReliabilityGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r29_invvol_slots.strategy import (
+    AiRotationR29InvvolSlotsStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r30_endpoint_breadth_geom.strategy import (
+    AiRotationR30EndpointBreadthGeomStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r31_fast_exit.strategy import (
+    AiRotationR31FastExitStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r32_market_regime.strategy import (
+    AiRotationR32MarketRegimeStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r33_quality_fallback.strategy import (
+    AiRotationR33QualityFallbackStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import (
+    AiRotationR34StagedReentryStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
     """§16.1 — the explicit strategy whitelist."""
-    return (CorrelationAllMembersStrategy, CorrelationRepresentativeStrategy)
+    return (
+        CorrelationAllMembersStrategy,
+        CorrelationRepresentativeStrategy,
+        AiRotationR05MomPersistStrategy,
+        AiRotationR06RankBufferStrategy,
+        AiRotationR07TailPersistStrategy,
+        AiRotationR11PersistGeomStrategy,
+        AiRotationR12NondecayGeomStrategy,
+        AiRotationR13ArithPersistStrategy,
+        AiRotationR14MedianPersistStrategy,
+        AiRotationR15WeightedPersistStrategy,
+        AiRotationR16RankConsensusStrategy,
+        AiRotationR17WinsorGeomStrategy,
+        AiRotationR18MinPersistStrategy,
+        AiRotationR19Top2CashStrategy,
+        AiRotationR20RankFrontloadStrategy,
+        AiRotationR21HarmonicPersistStrategy,
+        AiRotationR22PathConsistencyStrategy,
+        AiRotationR23DownsideGeomStrategy,
+        AiRotationR24DispersionGeomStrategy,
+        AiRotationR25RepPersistGeomStrategy,
+        AiRotationR26PathVolGeomStrategy,
+        AiRotationR27BreadthPersistGeomStrategy,
+        AiRotationR28SizeReliabilityGeomStrategy,
+        AiRotationR29InvvolSlotsStrategy,
+        AiRotationR30EndpointBreadthGeomStrategy,
+        AiRotationR31FastExitStrategy,
+        AiRotationR32MarketRegimeStrategy,
+        AiRotationR33QualityFallbackStrategy,
+        AiRotationR34StagedReentryStrategy,
+    )

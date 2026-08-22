@@ -40,6 +40,18 @@ const mockState = vi.hoisted(() => ({
       required_fields: ["close"],
       frequency: "weekly",
     },
+    {
+      strategy_id: "ai_rotation_r34_staged_reentry",
+      name: "半仓试探再入场持续几何动量相关性代表ETF",
+      description: "R34",
+      interface_version: "1.0",
+      implementation_hash: "r34",
+      supported_universe: ["cn_etf"],
+      warmup_trade_days: 260,
+      required_datasets: ["fund"],
+      required_fields: ["close"],
+      frequency: "weekly",
+    },
   ],
   strategyDetails: new Map([
     [
@@ -105,6 +117,27 @@ const mockState = vi.hoisted(() => ({
         artifact_roles: [],
       },
     ],
+    [
+      "ai_rotation_r34_staged_reentry",
+      {
+        strategy_id: "ai_rotation_r34_staged_reentry",
+        name: "半仓试探再入场持续几何动量相关性代表ETF",
+        description: "R34",
+        interface_version: "1.0",
+        implementation_hash: "r34",
+        supported_universe: ["cn_etf"],
+        warmup_trade_days: 260,
+        required_datasets: ["fund"],
+        required_fields: ["close"],
+        frequency: "weekly",
+        config_schema: { type: "object", properties: {} },
+        config_schema_version: "v1",
+        config_schema_hash: "h-r34",
+        default_config: {},
+        parameter_descriptions: {},
+        artifact_roles: [],
+      },
+    ],
   ]),
   catalogLoading: false,
   catalogError: null,
@@ -157,13 +190,13 @@ describe("FundRotationTab (batch UI)", () => {
     expect(screen.getByText("初始资金")).toBeDefined();
   });
 
-  it("uses the requested default dates and r11 strategy", () => {
+  it("uses the requested default dates and r34 strategy", () => {
     render(<FundRotationTab />);
 
     expect(screen.getByLabelText("开始日期")).toHaveValue("2022-08-01");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-08-01");
     expect(screen.getAllByRole("combobox")[0]).toHaveValue(
-      "ai_rotation_r11_persist_geom",
+      "ai_rotation_r34_staged_reentry",
     );
   });
 
@@ -206,6 +239,8 @@ describe("FundRotationTab (batch UI)", () => {
   it("renders variant editor with strategy option", () => {
     render(<FundRotationTab />);
     expect(screen.getByText("+ 添加策略变体")).toBeDefined();
-    expect(screen.getAllByText("持续几何动量相关性代表ETF").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("半仓试探再入场持续几何动量相关性代表ETF").length,
+    ).toBeGreaterThan(0);
   });
 });

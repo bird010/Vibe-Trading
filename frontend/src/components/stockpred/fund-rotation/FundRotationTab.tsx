@@ -20,6 +20,8 @@ import { fetchBatchDetail } from "./api";
 import { readFundRotationUrl } from "./deepLinks";
 
 const RESEARCH_WARNING = "RESEARCH_ONLY · 仅供研究，不构成投资建议";
+const DEFAULT_STRATEGY_ID = "ai_rotation_r34_staged_reentry";
+const FALLBACK_STRATEGY_ID = "ai_rotation_r11_persist_geom";
 const TERMINAL_STAGES = new Set([
   "SUCCEEDED",
   "PARTIAL_SUCCEEDED",
@@ -94,7 +96,10 @@ export function FundRotationTab() {
     if (strategies.length > 0 && variants.length === 0) {
       const strategy =
         strategies.find(
-          (item) => item.strategy_id === "ai_rotation_r11_persist_geom",
+          (item) => item.strategy_id === DEFAULT_STRATEGY_ID,
+        ) ??
+        strategies.find(
+          (item) => item.strategy_id === FALLBACK_STRATEGY_ID,
         ) ?? strategies[0];
       setVariants([
         {
