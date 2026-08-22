@@ -476,6 +476,7 @@ export interface TradeMarker {
   code?: string;
   side: "BUY" | "SELL";
   price: number;
+  muted?: boolean;
   qty?: number;
   status?: "FILLED" | "PARTIAL" | "REJECTED";
   reason?: string;

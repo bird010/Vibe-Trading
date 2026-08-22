@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { TradeMarkersChart } from "./TradeMarkersChart";
 import type { ChartZoomRange } from "@/components/charts/CandlestickChart";
-import type { InstrumentChartResponse, InstrumentTrade } from "./types";
+import type { InstrumentChartResponse, InstrumentSignal, InstrumentTrade } from "./types";
 import type { YearlyEvidenceYear, WeeklyEvidenceEvent } from "./weeklyEvidence";
 
 interface Props {
@@ -50,7 +50,7 @@ function evidenceRows(
 ) {
   return events.map((event, index) => {
     const trade = tradeOf(event);
-    const signal = event.kind === "signal" ? event.record : null;
+    const signal = event.kind === "signal" ? event.record as InstrumentSignal : null;
     const rowKey = eventKey(tsCode, event.date, index);
     const blocked = trade ? ["BLOCKED", "REJECTED"].includes(String(trade.status ?? "").toUpperCase()) || Boolean(trade.blocked_reason) || Number(trade.filled) <= 0 : false;
     return (
@@ -69,7 +69,7 @@ function evidenceRows(
         <td className="px-2 py-1.5 text-center">
           {trade ? (blocked ? <X className="mx-auto h-3.5 w-3.5 text-amber-600" aria-label="阻断" /> : trade.action === "BUY" ? <ArrowUp className="mx-auto h-3.5 w-3.5 text-emerald-600" aria-label="买入" /> : <ArrowDown className="mx-auto h-3.5 w-3.5 text-red-600" aria-label="卖出" />) : "—"}
         </td>
-        <td className="px-2 py-1.5">{formatWeight(signal ? signal.target_weight : trade?.target_weight)}</td>
+        <td className="px-2 py-1.5">{formatWeight(signal ? signal.weight ?? signal.target_weight : trade?.target_weight)}</td>
         <td className="px-2 py-1.5">{signal ? "信号" : trade?.status === "PARTIAL" ? "部分成交" : trade?.status === "FILLED" ? "已成交" : "阻断/未成交"}</td>
         <td className="px-2 py-1.5">{formatValue(trade?.filled)}</td>
         <td className="px-2 py-1.5">{trade ? formatValue(trade.price) : "—"}</td>

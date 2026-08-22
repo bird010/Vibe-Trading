@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mockState = vi.hoisted(() => ({
@@ -133,6 +133,8 @@ import { FundRotationTab } from "../fund-rotation/FundRotationTab";
 
 describe("FundRotationTab (batch UI)", () => {
   beforeEach(() => {
+    mockState.batches = [];
+    mockState.activeBatchId = null;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: false,
       json: async () => null,
@@ -165,10 +167,30 @@ describe("FundRotationTab (batch UI)", () => {
     );
   });
 
-  it("renders progress section", () => {
+  it("renders empty history section", () => {
     render(<FundRotationTab />);
-    expect(screen.getByText("批次进度")).toBeDefined();
+    expect(screen.getByText("历史批次")).toBeDefined();
     expect(screen.getByText(/暂无批次/)).toBeDefined();
+    expect(screen.queryByText("批次进度")).toBeNull();
+  });
+
+  it("renders a history batch", () => {
+    mockState.batches = [{ batch_id: "batch-history", status: "SUCCEEDED" }];
+    mockState.activeBatchId = "batch-history";
+    mockState.selectBatch.mockClear();
+
+    render(<FundRotationTab />);
+
+    expect(screen.getByText("历史批次")).toBeDefined();
+    expect(screen.getByText("batch-histor…")).toBeDefined();
+    expect(screen.getByText("完成")).toBeDefined();
+    const batchRow = screen.getByRole("button", {
+      name: /batch-histor…完成/,
+    });
+    expect(batchRow).toHaveClass("bg-blue-50", "text-blue-700");
+    fireEvent.click(batchRow);
+    expect(mockState.selectBatch).toHaveBeenCalledWith("batch-history");
+    expect(screen.queryByText("批次进度")).toBeNull();
   });
 
   it("renders comparison section", () => {

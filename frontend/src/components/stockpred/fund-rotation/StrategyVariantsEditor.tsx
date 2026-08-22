@@ -86,9 +86,16 @@ export function StrategyVariantsEditor({
         const strategy = strategyMap.get(variant.strategyId);
         return (
           <div key={variant.uiKey} className="rounded-lg border p-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <GripVertical className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div
+              data-testid="variant-first-row"
+              className="flex min-w-0 items-center gap-2"
+            >
+              <GripVertical
+                data-testid="variant-drag-handle"
+                className="h-4 w-4 text-muted-foreground shrink-0"
+              />
               <select
+                aria-label="策略"
                 value={variant.strategyId}
                 onChange={(event) => {
                   const strategyId = event.target.value;
@@ -102,7 +109,7 @@ export function StrategyVariantsEditor({
                   });
                 }}
                 disabled={disabled}
-                className="flex-1 rounded border px-2 py-1.5 text-sm disabled:opacity-50"
+                className="min-w-0 flex-1 truncate rounded border px-2 py-1.5 text-sm disabled:opacity-50"
               >
                 {strategies.map((item) => (
                   <option key={item.strategy_id} value={item.strategy_id}>
@@ -118,13 +125,13 @@ export function StrategyVariantsEditor({
                 }
                 placeholder="变体标签（可选）"
                 disabled={disabled}
-                className="w-32 rounded border px-2 py-1.5 text-sm disabled:opacity-50"
+                className="min-w-0 w-32 rounded border px-2 py-1.5 text-sm disabled:opacity-50"
               />
               <button
                 type="button"
                 onClick={() => copyVariant(variant.uiKey)}
                 disabled={disabled}
-                className="rounded p-1.5 hover:bg-muted disabled:opacity-30"
+                className="shrink-0 rounded p-1.5 hover:bg-muted disabled:opacity-30"
                 title="复制变体"
               >
                 <Copy className="h-3.5 w-3.5" />
@@ -133,7 +140,7 @@ export function StrategyVariantsEditor({
                 type="button"
                 onClick={() => removeVariant(variant.uiKey)}
                 disabled={disabled || variants.length <= 1}
-                className="rounded p-1.5 hover:bg-red-50 disabled:opacity-30"
+                className="shrink-0 rounded p-1.5 hover:bg-red-50 disabled:opacity-30"
                 title="删除变体"
               >
                 <Trash2 className="h-3.5 w-3.5 text-red-500" />

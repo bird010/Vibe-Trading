@@ -68,6 +68,40 @@ describe("StrategyVariantsEditor", () => {
     expect(screen.getByText(/变体\s*1/)).toBeDefined();
   });
 
+  it("protects the first-row controls from long strategy and variant labels", () => {
+    const onChange = vi.fn();
+    render(
+      <StrategyVariantsEditor
+        strategies={[
+          { ...STRATEGIES[0], name: "一个非常长的策略名称用于验证布局不会挤压控件" },
+        ]}
+        variants={[
+          {
+            uiKey: "v1",
+            strategyId: "baseline",
+            label: "一个非常长的变体标签",
+            params: { k: 8 },
+          },
+        ]}
+        onChange={onChange}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "策略" })).toHaveClass(
+      "min-w-0",
+      "flex-1",
+      "truncate",
+    );
+    expect(screen.getByTestId("variant-first-row")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("variant-drag-handle")).toHaveClass("shrink-0");
+    expect(screen.getByPlaceholderText("变体标签（可选）")).toHaveClass(
+      "min-w-0",
+      "w-32",
+    );
+    expect(screen.getByTitle("复制变体")).toHaveClass("shrink-0");
+    expect(screen.getByTitle("删除变体")).toHaveClass("shrink-0");
+  });
+
   it("adds a variant via the dropdown", () => {
     const onChange = vi.fn();
     const variants = [

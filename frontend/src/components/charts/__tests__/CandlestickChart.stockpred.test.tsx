@@ -2,6 +2,7 @@ import { render } from "@testing-library/react";
 import { CandlestickChart } from "../CandlestickChart";
 import type { PriceBar, TradeMarker } from "@/lib/api";
 import i18n from "@/i18n";
+import { getChartTheme } from "@/lib/chart-theme";
 
 
 const chartMock = vi.hoisted(() => ({
@@ -244,6 +245,31 @@ describe("CandlestickChart StockPred execution markers", () => {
     expect(encoded).toContain('"value":"D"');
     expect(encoded).toContain("REJECTED");
     expect(encoded).toContain("limit_down");
+  });
+
+  it("uses a muted color only for normal muted trade markers", () => {
+    render(
+      <CandlestickChart
+        data={BARS}
+        markers={[
+          { time: "2025-01-03", side: "BUY", price: 10, muted: true },
+          { time: "2025-01-06", side: "SELL", price: 11 },
+          { time: "2025-01-06", side: "SELL", price: 11.1, status: "REJECTED" },
+          { time: "2025-01-03", side: "BUY", price: 10.2, status: "PARTIAL" },
+          { time: "2025-01-06", side: "SELL", price: 11.2, exit_delay_days: 2 },
+        ]}
+      />,
+    );
+
+    const theme = getChartTheme();
+    const option = chartMock.setOption.mock.calls[chartMock.setOption.mock.calls.length - 1]?.[0];
+    const marks = option.series[0].markPoint.data;
+
+    expect(marks.find((mark: { value: string }) => mark.value === "B").itemStyle.color).not.toBe(theme.upColor);
+    expect(marks.find((mark: { value: string }) => mark.value === "S").itemStyle.color).toBe(theme.downColor);
+    expect(marks.find((mark: { value: string }) => mark.value === "X").itemStyle.color).toBe(theme.textColor);
+    expect(marks.find((mark: { value: string }) => mark.value === "P").itemStyle.color).toBe(theme.warningColor);
+    expect(marks.find((mark: { value: string }) => mark.value === "D").itemStyle.color).toBe("#8b5cf6");
   });
 
   it("keeps legacy markers on the B/S mapping", () => {

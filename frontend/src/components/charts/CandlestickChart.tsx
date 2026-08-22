@@ -27,6 +27,10 @@ const RANGE_BARS: Record<Range, number> = { "1M": 22, "3M": 63, "6M": 126, "1Y":
 const OVERLAY_COLORS = ["#f59e0b", "#8b5cf6", "#3b82f6", "#ec4899", "#10b981", "#f97316", "#6366f1"];
 const SHARED_ZOOM_SOURCE = "stockpred-shared-zoom";
 
+function mutedMarkerColor(color: string, fallback: string): string {
+  return /^#[0-9a-f]{6}$/i.test(color) ? `${color}80` : fallback;
+}
+
 function sharedRangePercent(data: PriceBar[], range: ChartZoomRange): { start: number; end: number } {
   if (data.length < 2) return { start: 0, end: 100 };
   const firstAtOrAfter = data.findIndex((bar) => bar.time >= range.start);
@@ -243,7 +247,9 @@ export function CandlestickChart({ data, markers, indicators, strategyScore, str
           ? t.textColor
           : status === "PARTIAL"
             ? t.warningColor
-            : m.side === "BUY" ? t.upColor : t.downColor;
+            : m.side === "BUY"
+              ? m.muted ? mutedMarkerColor(t.upColor, "#86efac") : t.upColor
+              : m.muted ? mutedMarkerColor(t.downColor, "#fca5a5") : t.downColor;
       return {
         coord: [m.time, m.price],
         value,

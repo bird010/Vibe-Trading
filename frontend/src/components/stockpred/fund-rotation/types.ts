@@ -552,7 +552,8 @@ export interface InstrumentOHLCVBar {
 export interface InstrumentSignal {
   date?: string;
   week_ending?: string;
-  target_weight: number;
+  weight?: number;
+  target_weight?: number;
   ts_code?: string;
 }
 

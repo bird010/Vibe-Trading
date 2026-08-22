@@ -38,7 +38,8 @@ export interface OHLCVBar {
 export interface SignalMarker {
   date?: string;
   week_ending?: string;
-  target_weight: number;
+  weight?: number;
+  target_weight?: number;
 }
 
 interface Props {
@@ -63,6 +64,14 @@ interface Props {
 const EMPTY_SIGNALS: SignalMarker[] = [];
 
 function finite(value: unknown): number | null {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "boolean" ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return null;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -76,6 +85,12 @@ function canonicalDate(value: unknown): string {
 
 function dateOfSignal(signal: SignalMarker): string {
   return canonicalDate(signal.date ?? signal.week_ending ?? "");
+}
+
+function targetWeightOfSignal(signal: SignalMarker): number | null {
+  return signal.weight !== undefined
+    ? finite(signal.weight)
+    : finite(signal.target_weight);
 }
 
 function scoreFrequencyLabel(frequency: string | undefined): string {
@@ -149,6 +164,66 @@ export function TradeMarkersChart({
     const filteredTrades = normalizedTrades.filter((trade) =>
       inRange(trade.trade_date),
     );
+    const mutedByTrade = new Map<TradeMarker, boolean>();
+    const signalTargets = normalizedSignals
+      .map((signal, index) => ({
+        date: dateOfSignal(signal),
+        index,
+        targetWeight: targetWeightOfSignal(signal),
+      }))
+      .filter((signal) => signal.date)
+      .sort(
+        (left, right) =>
+          left.date.localeCompare(right.date) || left.index - right.index,
+      );
+    const latestSignalBefore = (date: string, finiteOnly: boolean) => {
+      for (let index = signalTargets.length - 1; index >= 0; index -= 1) {
+        const signal = signalTargets[index];
+        if (
+          signal.date < date &&
+          (!finiteOnly || signal.targetWeight !== null)
+        ) {
+          return signal;
+        }
+      }
+      return null;
+    };
+    const orderedTrades = filteredTrades
+      .map((trade, index) => ({
+        index,
+        trade,
+      }))
+      .sort(
+        (left, right) =>
+          left.trade.trade_date.localeCompare(right.trade.trade_date) ||
+          left.index - right.index,
+      );
+    let seenTrade = false;
+    let processedSignalDate: string | undefined;
+    let processedTargetWeight: number | null = null;
+    for (const { trade } of orderedTrades) {
+      const targetWeight = finite(trade.target_weight);
+      const currentSignalDate = trade.signal_date ||
+        latestSignalBefore(trade.trade_date, false)?.date;
+      if (currentSignalDate !== processedSignalDate) {
+        processedSignalDate = currentSignalDate;
+        processedTargetWeight = currentSignalDate
+          ? latestSignalBefore(currentSignalDate, true)?.targetWeight ?? null
+          : null;
+      }
+      if (
+        seenTrade &&
+        targetWeight !== null &&
+        processedTargetWeight !== null &&
+        targetWeight === processedTargetWeight
+      ) {
+        mutedByTrade.set(trade, true);
+      }
+      if (targetWeight !== null) {
+        processedTargetWeight = targetWeight;
+      }
+      seenTrade = true;
+    }
 
     const priceBars: PriceBar[] = ohlcv
       .map((bar) => ({
@@ -198,6 +273,7 @@ export function TradeMarkersChart({
               ? "PARTIAL"
               : "FILLED",
           reason: markerReason(trade),
+          ...(mutedByTrade.get(trade) ? { muted: true } : {}),
         };
       });
     const strategyOverlay = Object.fromEntries(

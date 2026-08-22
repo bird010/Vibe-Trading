@@ -3,9 +3,7 @@ import {
   Play,
   Loader2,
   AlertTriangle,
-  CheckCircle2,
   TrendingUp,
-  XCircle,
 } from "lucide-react";
 import { useFundRotation } from "./useFundRotation";
 import { useBacktestDetail } from "./useBacktestDetail";
@@ -61,7 +59,6 @@ export function FundRotationTab() {
     fetchBatches,
     submitStrategyBatch,
     selectBatch,
-    cancelActiveBatch,
   } = useFundRotation();
   const {
     selectedVariantKey,
@@ -328,93 +325,32 @@ export function FundRotationTab() {
             </div>
           )}
 
-          {batches.length > 0 && (
-            <div>
-              <h4 className="text-xs font-medium text-muted-foreground mb-1">
-                历史批次
-              </h4>
-              <div className="max-h-36 overflow-y-auto space-y-0.5">
-                {batches.map((batch) => (
-                  <button
-                    key={batch.batch_id}
-                    onClick={() => void selectBatch(batch.batch_id)}
-                    className={`w-full text-left text-xs px-2 py-1 rounded flex justify-between ${
-                      batch.batch_id === activeBatchId
-                        ? "bg-blue-50 text-blue-700"
-                        : "hover:bg-muted"
-                    }`}
-                  >
-                    <span className="font-mono">
-                      {batch.batch_id.slice(0, 12)}…
-                    </span>
-                    <span>{BATCH_STAGE_LABELS[batch.status] ?? batch.status}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="space-y-4 rounded-lg border p-4">
-          <h3 className="font-semibold text-sm flex items-center gap-2">
-            批次进度
-            {!isTerminal && activeBatchId && (
-              <Loader2 className="h-3 w-3 animate-spin text-blue-500" />
-            )}
-            {currentStage && (
-              <span className="text-xs font-normal text-muted-foreground">
-                {BATCH_STAGE_LABELS[currentStage] ?? currentStage}
-              </span>
-            )}
-          </h3>
-
-          {currentStage && isTerminal && (
-            <div className="flex items-center gap-2 text-xs">
-              {currentStage === "SUCCEEDED" ||
-              currentStage === "PARTIAL_SUCCEEDED" ? (
-                <CheckCircle2 className="h-4 w-4 text-green-500" />
-              ) : currentStage === "CANCELED" ? (
-                <XCircle className="h-4 w-4 text-gray-400" />
-              ) : (
-                <AlertTriangle className="h-4 w-4 text-red-500" />
-              )}
-              <span>{BATCH_STAGE_LABELS[currentStage] ?? currentStage}</span>
-            </div>
-          )}
-
-          {!isTerminal && activeBatchId && (
-            <button
-              onClick={() => void cancelActiveBatch()}
-              className="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
-            >
-              取消批次
-            </button>
-          )}
-
-          {events.length > 0 && (
-            <div className="max-h-64 overflow-y-auto space-y-0.5 text-xs">
-              {events.slice(-20).map((event) => (
-                <div key={event.seq} className="flex gap-2 border-b py-0.5">
-                  <span className="text-muted-foreground font-mono shrink-0">
-                    #{event.seq}
+          <h3 className="font-semibold text-sm">历史批次</h3>
+          {batches.length > 0 ? (
+            <div className="max-h-36 overflow-y-auto space-y-0.5">
+              {batches.map((batch) => (
+                <button
+                  key={batch.batch_id}
+                  onClick={() => void selectBatch(batch.batch_id)}
+                  className={`w-full text-left text-xs px-2 py-1 rounded flex justify-between ${
+                    batch.batch_id === activeBatchId
+                      ? "bg-blue-50 text-blue-700"
+                      : "hover:bg-muted"
+                  }`}
+                >
+                  <span className="font-mono">
+                    {batch.batch_id.slice(0, 12)}…
                   </span>
-                  <span className="text-muted-foreground">
-                    {BATCH_STAGE_LABELS[event.stage ?? ""] ?? event.event_type}
-                  </span>
-                  {event.variant_key && (
-                    <span className="font-mono text-muted-foreground">
-                      {event.variant_key}
-                    </span>
-                  )}
-                  {event.message && <span className="truncate">{event.message}</span>}
-                </div>
+                  <span>{BATCH_STAGE_LABELS[batch.status] ?? batch.status}</span>
+                </button>
               ))}
             </div>
-          )}
-
-          {!activeBatchId && events.length === 0 && (
+          ) : (
             <div className="text-xs text-muted-foreground">
-              暂无批次 — 提交策略变体后开始
+              暂无批次
             </div>
           )}
         </div>
