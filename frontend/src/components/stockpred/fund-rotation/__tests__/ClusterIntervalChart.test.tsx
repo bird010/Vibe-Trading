@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CandidatePoolResponse,
@@ -67,6 +67,32 @@ const candidatePool: CandidatePoolResponse = {
       effective_cluster_count: null,
       effective_cluster_count_status: null,
       representatives: [],
+    },
+  ],
+};
+
+function representative(selected_code: string) {
+  return {
+    cluster_id: 1,
+    cluster_size: 1,
+    selected_code,
+    selected_name: null,
+    selected_fund_type: null,
+    lock_maintained: false,
+    exclusion_reason: "",
+  };
+}
+
+const candidatePoolWithRepresentatives: CandidatePoolResponse = {
+  ...candidatePool,
+  reclusters: [
+    {
+      ...candidatePool.reclusters[0],
+      representatives: [representative("159001.SZ")],
+    },
+    {
+      ...candidatePool.reclusters[1],
+      representatives: [representative("510300.SH")],
     },
   ],
 };
@@ -161,6 +187,52 @@ describe("buildClusterIntervalChartModel", () => {
       ["20250113", 1.1],
     ]);
     expect(fundSegments.some((series) => series.instrument === "000000.SZ")).toBe(false);
+  });
+
+  it("filters the selected interval to its representative fund and markers", () => {
+    const model = buildClusterIntervalChartModel({
+      equity,
+      candidatePool: candidatePoolWithRepresentatives,
+      selectedIntervalIndex: 0,
+      charts: {
+        "159001.SZ": chart("159001.SZ", [
+          { trade_date: "20250103", open: 9, high: 11, low: 8, close: 10, vol: 1 },
+          { trade_date: "20250106", open: 10, high: 12, low: 9, close: 11, vol: 1 },
+          { trade_date: "20250110", open: 12, high: 14, low: 11, close: 13, vol: 1 },
+          { trade_date: "20250113", open: 13, high: 15, low: 12, close: 14, vol: 1 },
+        ], [
+          { trade_date: "20250106", action: "BUY", status: "FILLED", filled: 1, price: 11 },
+          { trade_date: "20250113", action: "SELL", status: "REJECTED", filled: 0, price: 14 },
+        ]),
+        "510300.SH": chart("510300.SH", [
+          { trade_date: "20250103", open: 19, high: 21, low: 18, close: 20, vol: 1 },
+          { trade_date: "20250106", open: 20, high: 22, low: 19, close: 21, vol: 1 },
+          { trade_date: "20250110", open: 21, high: 23, low: 20, close: 22, vol: 1 },
+        ], [
+          { trade_date: "20250106", action: "SELL", status: "FILLED", filled: 1, price: 21 },
+        ]),
+        "000000.SZ": chart("000000.SZ", [
+          { trade_date: "20250103", open: 29, high: 31, low: 28, close: 30, vol: 1 },
+          { trade_date: "20250106", open: 30, high: 32, low: 29, close: 31, vol: 1 },
+        ], [
+          { trade_date: "20250106", action: "BUY", status: "FILLED", filled: 1, price: 31 },
+        ]),
+      },
+    });
+
+    expect(model.series.map(({ id }) => id)).toEqual([
+      "equity:0",
+      "fund:159001.SZ:0",
+    ]);
+    expect(model.series.flatMap(({ data }) => data).every(([date]) => date <= "20250109")).toBe(true);
+    expect(model.markPoints).toEqual([
+      expect.objectContaining({
+        instrument: "159001.SZ",
+        intervalIndex: 0,
+        coord: ["20250106", 1.1],
+      }),
+    ]);
+    expect(model.markPoints.some(({ instrument }) => instrument !== "159001.SZ")).toBe(false);
   });
 
   it("keeps the preceding recluster semantics when visible data starts between boundaries", () => {
@@ -372,11 +444,49 @@ describe("buildClusterIntervalChartModel", () => {
       />,
     );
 
-    expect(chartMock.options?.legend.data).toEqual(["组合收益", "沪深300ETF (159001.SZ)"]);
+    expect(chartMock.options?.legend.data).toEqual(["组合收益"]);
     expect(
       (chartMock.options?.series as Array<{ name: string }>)
         .filter((series) => series.name === "沪深300ETF (159001.SZ)"),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
+  });
+
+  it("defaults to the latest interval and switches the accessible interval selector", () => {
+    render(
+      <ClusterIntervalChart
+        equity={equity}
+        candidatePool={candidatePoolWithRepresentatives}
+        charts={{
+          "159001.SZ": chart("159001.SZ", [
+            { trade_date: "20250103", open: 9, high: 11, low: 8, close: 10, vol: 1 },
+            { trade_date: "20250106", open: 10, high: 12, low: 9, close: 11, vol: 1 },
+            { trade_date: "20250110", open: 12, high: 14, low: 11, close: 13, vol: 1 },
+            { trade_date: "20250113", open: 13, high: 15, low: 12, close: 14, vol: 1 },
+          ]),
+          "510300.SH": chart("510300.SH", [
+            { trade_date: "20250110", open: 19, high: 21, low: 18, close: 20, vol: 1 },
+            { trade_date: "20250113", open: 20, high: 23, low: 19, close: 22, vol: 1 },
+          ]),
+        }}
+      />,
+    );
+
+    const selector = screen.getByRole("combobox", { name: "选择聚类区间" });
+    expect(selector).toHaveValue("1");
+    expect(screen.getByRole("option", { name: /重聚类.*2025-01-03/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /重聚类.*2025-01-10/ })).toBeInTheDocument();
+    expect((chartMock.options?.series as Array<{ id: string }>).map(({ id }) => id)).toEqual([
+      "equity:1",
+      "fund:510300.SH:1",
+    ]);
+
+    fireEvent.change(selector, { target: { value: "0" } });
+
+    expect(selector).toHaveValue("0");
+    expect((chartMock.options?.series as Array<{ id: string }>).map(({ id }) => id)).toEqual([
+      "equity:0",
+      "fund:159001.SZ:0",
+    ]);
   });
 
   it("clips chart-only data and trade markers to the explicit backtest period", () => {
@@ -438,7 +548,7 @@ describe("buildClusterIntervalChartModel", () => {
     render(
       <ClusterIntervalChart
         equity={null}
-        candidatePool={{ run_id: "run-1", reclusters: [] }}
+        candidatePool={candidatePoolWithRepresentatives}
         charts={{ "159001.SZ": delayedChart }}
       />,
     );
@@ -474,12 +584,47 @@ describe("buildClusterIntervalChartModel", () => {
     expect(screen.getByText("行情数据可能被截断")).toBeInTheDocument();
   });
 
+  it("renders a clear empty state when no interval exists", () => {
+    render(
+      <ClusterIntervalChart
+        equity={null}
+        candidatePool={{ run_id: "run-1", reclusters: [] }}
+        charts={{}}
+      />,
+    );
+
+    expect(screen.getByText("当前没有可用的聚类区间。")).toBeInTheDocument();
+  });
+
+  it("keeps the portfolio curve visible when the selected interval has no representatives", () => {
+    render(
+      <ClusterIntervalChart
+        equity={equity}
+        candidatePool={{ run_id: "run-1", reclusters: [] }}
+        charts={{}}
+      />,
+    );
+
+    expect(screen.getByText("当前区间没有可用的代表基金，以下仅展示组合收益。")).toBeInTheDocument();
+    expect((chartMock.options?.series as Array<{ id: string }>).map(({ id }) => id)).toEqual([
+      "equity:0",
+    ]);
+  });
+
   it("maps markArea ends to real category dates and keeps marker status colors prioritized", () => {
     const weekendCandidatePool: CandidatePoolResponse = {
       run_id: "run-1",
       reclusters: [
-        { ...candidatePool.reclusters[0], week: "20250103" },
-        { ...candidatePool.reclusters[1], week: "20250113" },
+        {
+          ...candidatePool.reclusters[0],
+          week: "20250103",
+          representatives: [representative("159001.SZ")],
+        },
+        {
+          ...candidatePool.reclusters[1],
+          week: "20250113",
+          representatives: [representative("159001.SZ")],
+        },
       ],
     };
     const instrumentChart = chart("159001.SZ", [
@@ -508,19 +653,23 @@ describe("buildClusterIntervalChartModel", () => {
 
     const options = chartMock.options;
     const xAxisDates = options?.xAxis.data as string[];
-    const equitySeries = (options?.series as Array<Record<string, any>>).find((series) => series.id === "equity:0");
+    const equitySeries = (options?.series as Array<Record<string, any>>).find((series) => series.id === "equity:1");
     const areaData = equitySeries?.markArea.data as Array<Array<{ xAxis: string }>>;
     expect(areaData.flat().every(({ xAxis }) => xAxisDates.includes(xAxis))).toBe(true);
 
-    const fundSeries = (options?.series as Array<Record<string, any>>).find((series) => series.id === "fund:159001.SZ:0");
-    expect(fundSeries?.markPoint.data).toEqual([
-      expect.objectContaining({ value: "B", itemStyle: { color: "#333333" } }),
-      expect.objectContaining({ value: "S", itemStyle: { color: "#44444480" } }),
-    ]);
     const secondFundSeries = (options?.series as Array<Record<string, any>>).find((series) => series.id === "fund:159001.SZ:1");
     expect(secondFundSeries?.markPoint.data).toEqual([
       expect.objectContaining({ value: "B", name: "BUY · PARTIAL", itemStyle: { color: "#222222" } }),
       expect.objectContaining({ value: "S", name: "SELL · REJECTED", itemStyle: { color: "#111111" } }),
+    ]);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "选择聚类区间" }), {
+      target: { value: "0" },
+    });
+    const firstFundSeries = (chartMock.options?.series as Array<Record<string, any>>).find((series) => series.id === "fund:159001.SZ:0");
+    expect(firstFundSeries?.markPoint.data).toEqual([
+      expect.objectContaining({ value: "B", itemStyle: { color: "#333333" } }),
+      expect.objectContaining({ value: "S", itemStyle: { color: "#44444480" } }),
     ]);
   });
 });

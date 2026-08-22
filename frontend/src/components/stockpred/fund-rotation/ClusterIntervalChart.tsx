@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getTradeMarkerVisual } from "@/components/charts/CandlestickChart";
 import { getChartTheme } from "@/lib/chart-theme";
 import { echarts } from "@/lib/echarts";
@@ -22,6 +22,7 @@ export interface ClusterIntervalChartInput {
   candidatePool: CandidatePoolResponse | null;
   charts: Record<string, InstrumentChartResponse>;
   period?: BacktestPeriod;
+  selectedIntervalIndex?: number;
 }
 
 export interface ClusterInterval {
@@ -293,6 +294,21 @@ function buildIntervals(
   }));
 }
 
+function representativeCodesForInterval(
+  candidatePool: CandidatePoolResponse | null,
+  interval: ClusterInterval,
+): Set<string> {
+  if (!candidatePool || !interval.reclusterDate) return new Set();
+  const recluster = candidatePool.reclusters.find(
+    (candidate) => canonicalDate(candidate.week) === interval.reclusterDate,
+  );
+  return new Set(
+    (recluster?.representatives ?? [])
+      .map((representative) => String(representative.selected_code ?? "").trim())
+      .filter(Boolean),
+  );
+}
+
 export function buildClusterIntervalChartModel(
   input: ClusterIntervalChartInput,
 ): ClusterIntervalChartModel {
@@ -305,6 +321,19 @@ export function buildClusterIntervalChartModel(
     ),
   );
   const intervals = buildIntervals(input, equityDates, chartDates);
+  const selectedInterval =
+    input.selectedIntervalIndex === undefined
+      ? null
+      : intervals.find((interval) => interval.index === input.selectedIntervalIndex) ?? null;
+  const visibleIntervals =
+    input.selectedIntervalIndex === undefined
+      ? intervals
+      : selectedInterval
+        ? [selectedInterval]
+        : [];
+  const selectedRepresentativeCodes = selectedInterval
+    ? representativeCodesForInterval(input.candidatePool, selectedInterval)
+    : null;
   const series: ClusterIntervalSeries[] = [];
   const markPoints: ClusterIntervalMarkPoint[] = [];
   const mutedByInstrument = new Map<string, Set<number>>();
@@ -320,7 +349,7 @@ export function buildClusterIntervalChartModel(
     );
   }
 
-  for (const interval of intervals) {
+  for (const interval of visibleIntervals) {
     if (input.equity) {
       const equityPoints = input.equity.dates.flatMap((rawDate, index) => {
         const date = canonicalDate(rawDate);
@@ -345,6 +374,12 @@ export function buildClusterIntervalChartModel(
     }
 
     for (const [instrument, chart] of Object.entries(input.charts)) {
+      if (
+        selectedRepresentativeCodes &&
+        !selectedRepresentativeCodes.has(instrument)
+      ) {
+        continue;
+      }
       const closesByDate = new Map<string, number>();
       for (const bar of chart.ohlcv) {
         const date = canonicalDate(bar.trade_date);
@@ -408,7 +443,7 @@ export function buildClusterIntervalChartModel(
     intervals,
     series,
     markPoints,
-    boundaryLines: intervals.flatMap((interval) =>
+    boundaryLines: visibleIntervals.flatMap((interval) =>
       interval.reclusterDate && interval.reclusterDate >= interval.start
         ? [{
             intervalIndex: interval.index,
@@ -433,10 +468,34 @@ export function ClusterIntervalChart({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const { dark } = useDarkMode();
-  const model = useMemo(
+  const [selectedIntervalIndex, setSelectedIntervalIndex] = useState<number>();
+  const baseModel = useMemo(
     () => buildClusterIntervalChartModel({ equity, candidatePool, charts, period }),
     [equity, candidatePool, charts, period],
   );
+  const latestIntervalIndex = baseModel.intervals[baseModel.intervals.length - 1]?.index;
+  const activeIntervalIndex =
+    selectedIntervalIndex !== undefined &&
+    baseModel.intervals.some((interval) => interval.index === selectedIntervalIndex)
+      ? selectedIntervalIndex
+      : latestIntervalIndex;
+  const model = useMemo(
+    () => buildClusterIntervalChartModel({
+      equity,
+      candidatePool,
+      charts,
+      period,
+      selectedIntervalIndex: activeIntervalIndex,
+    }),
+    [activeIntervalIndex, equity, candidatePool, charts, period],
+  );
+  const selectedInterval = model.intervals.find(
+    (interval) => interval.index === activeIntervalIndex,
+  );
+  const selectedRepresentativeCodes = selectedInterval
+    ? representativeCodesForInterval(candidatePool, selectedInterval)
+    : new Set<string>();
+  const hasNoRepresentatives = Boolean(selectedInterval) && selectedRepresentativeCodes.size === 0;
   const possiblyTruncated = Object.values(charts).some(
     (chart) => chart.ohlcv.length >= CHART_BAR_LIMIT,
   );
@@ -617,13 +676,52 @@ export function ClusterIntervalChart({
           行情数据可能被截断
         </div>
       )}
-      {model.series.length === 0 ? (
-      <div className="rounded border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
-        当前没有可用的聚类区间收益或基金行情数据。
-      </div>
+      {model.intervals.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="cluster-interval-select" className="text-sm font-medium">
+            选择聚类区间
+          </label>
+          <select
+            id="cluster-interval-select"
+            aria-label="选择聚类区间"
+            className="rounded border bg-background px-2 py-1 text-sm"
+            value={activeIntervalIndex === undefined ? "" : String(activeIntervalIndex)}
+            onChange={(event) => setSelectedIntervalIndex(Number(event.target.value))}
+          >
+            {model.intervals.map((interval) => (
+              <option key={interval.index} value={interval.index}>
+                {`重聚类 ${interval.reclusterDate ? formatDisplayDate(interval.reclusterDate) : "未知"} · 区间 ${formatDisplayDate(interval.start)} 至 ${formatDisplayDate(interval.end)}`}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {model.intervals.length === 0 ? (
+        <div className="rounded border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
+          当前没有可用的聚类区间。
+        </div>
       ) : (
-        <div ref={ref} style={{ height }} />
+        <>
+          {hasNoRepresentatives && (
+            <div className="rounded border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+              当前区间没有可用的代表基金，以下仅展示组合收益。
+            </div>
+          )}
+          {model.series.length === 0 ? (
+            <div className="rounded border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
+              当前没有可用的聚类区间收益或基金行情数据。
+            </div>
+          ) : (
+            <div ref={ref} style={{ height }} />
+          )}
+        </>
       )}
     </div>
   );
+}
+
+function formatDisplayDate(date: string): string {
+  return date.length === 8
+    ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`
+    : date;
 }
