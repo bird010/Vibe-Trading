@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BacktestDetailResponse,
   CandidatePoolResponse,
+  ComparisonEquityData,
   InstrumentChartResponse,
 } from "../types";
 
@@ -11,6 +12,28 @@ const useBacktestDetail = vi.hoisted(() => vi.fn());
 vi.mock("../useBacktestDetail", () => ({ useBacktestDetail }));
 vi.mock("../FundRotationEquityChart", () => ({
   FundRotationEquityChart: () => <div data-testid="equity-chart" />,
+}));
+vi.mock("../ClusterIntervalChart", () => ({
+  ClusterIntervalChart: ({
+    equity,
+    candidatePool,
+    charts,
+    period,
+  }: {
+    equity: ComparisonEquityData | null;
+    candidatePool: CandidatePoolResponse | null;
+    charts: Record<string, InstrumentChartResponse>;
+    period?: BacktestDetailResponse["period"];
+  }) => (
+    <div
+      data-testid="cluster-interval-chart"
+      data-equity={equity ? "present" : "empty"}
+      data-candidate-pool={candidatePool ? "present" : "empty"}
+      data-charts={Object.keys(charts).join(",")}
+      data-period-start={period?.evaluation_start_date ?? ""}
+      data-period-end={period?.evaluation_end_date ?? ""}
+    />
+  ),
 }));
 
 import { BacktestDetailPanel } from "../BacktestDetailPanel";
@@ -40,7 +63,7 @@ function state(runDetail: BacktestDetailResponse, loadCharts: ReturnType<typeof 
     selectedVariantKey: "variant-1",
     selectedRunId: "run-1",
     detail: runDetail,
-    equity: null,
+    equity: null as ComparisonEquityData | null,
     candidatePool: null as CandidatePoolResponse | null,
     candidatePoolLoading: false,
     candidatePoolError: null,
@@ -220,5 +243,119 @@ describe("BacktestDetailPanel chart lifecycle", () => {
     render(<BacktestDetailPanel />);
 
     await waitFor(() => expect(loadCandidatePool).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows the cluster interval tab and lazy-loads both data sources", async () => {
+    const loadCharts = vi.fn();
+    const loadCandidatePool = vi.fn();
+    const panelState = state(
+      detail([{ ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true }]),
+      loadCharts,
+    );
+    panelState.activeTab = "cluster_interval";
+    panelState.loadCandidatePool = loadCandidatePool;
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    expect(screen.getByRole("button", { name: "聚类区间" })).toBeInTheDocument();
+    expect(screen.getByTestId("cluster-interval-chart")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(loadCandidatePool).toHaveBeenCalledTimes(1);
+      expect(loadCharts).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("passes cached equity, candidate pool and charts without reloading them", async () => {
+    const loadCharts = vi.fn();
+    const loadCandidatePool = vi.fn();
+    const panelState = state(detail([]), loadCharts);
+    panelState.activeTab = "cluster_interval";
+    panelState.equity = {
+      dates: ["20240102"],
+      series: { strategy: [1] },
+    };
+    panelState.candidatePool = { run_id: "run-1", reclusters: [] };
+    panelState.charts = { "510300.SH": chart("510300.SH", "20240102", "20240103") };
+    panelState.loadCandidatePool = loadCandidatePool;
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-equity", "present");
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-candidate-pool", "present");
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-charts", "510300.SH");
+    await waitFor(() => {
+      expect(loadCandidatePool).not.toHaveBeenCalled();
+      expect(loadCharts).not.toHaveBeenCalled();
+    });
+  });
+
+  it("loads missing charts when the cluster interval cache is partial", async () => {
+    const loadCharts = vi.fn();
+    const loadCandidatePool = vi.fn();
+    const panelState = state(
+      detail([
+        { ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true },
+        { ts_code: "159915.SZ", has_signal: true, has_order: true, has_trade: true, has_position: true },
+      ]),
+      loadCharts,
+    );
+    panelState.activeTab = "cluster_interval";
+    panelState.candidatePool = { run_id: "run-1", reclusters: [] };
+    panelState.charts = { "510300.SH": chart("510300.SH", "20240102", "20240103") };
+    panelState.loadCandidatePool = loadCandidatePool;
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    await waitFor(() => expect(loadCharts).toHaveBeenCalledTimes(1));
+    expect(loadCandidatePool).not.toHaveBeenCalled();
+  });
+
+  it("keeps successful cluster charts visible, lists only failures, and retries missing items", () => {
+    const loadCharts = vi.fn();
+    const runDetail = detail([
+      { ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true },
+      { ts_code: "159915.SZ", has_signal: true, has_order: true, has_trade: true, has_position: true },
+    ]);
+    runDetail.period = {
+      evaluation_start_date: "20240102",
+      evaluation_end_date: "20241231",
+    };
+    const panelState = state(runDetail, loadCharts);
+    panelState.activeTab = "cluster_interval";
+    panelState.candidatePool = { run_id: "run-1", reclusters: [] };
+    panelState.charts = { "510300.SH": chart("510300.SH", "20240102", "20240103") };
+    panelState.chartErrors = { "159915.SZ": "K 线不可用" };
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-charts", "510300.SH");
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-period-start", "20240102");
+    expect(screen.getByTestId("cluster-interval-chart")).toHaveAttribute("data-period-end", "20241231");
+    expect(screen.getByText("159915.SZ：K 线不可用")).toBeInTheDocument();
+    expect(screen.queryByText(/510300\.SH：/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试失败项" }));
+    expect(loadCharts).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps cached cluster charts visible while missing charts are loading", () => {
+    const panelState = state(detail([
+      { ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true },
+      { ts_code: "159915.SZ", has_signal: true, has_order: true, has_trade: true, has_position: true },
+    ]), vi.fn());
+    panelState.activeTab = "cluster_interval";
+    panelState.candidatePool = { run_id: "run-1", reclusters: [] };
+    panelState.charts = { "510300.SH": chart("510300.SH", "20240102", "20240103") };
+    panelState.chartLoading = true;
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    expect(screen.getByTestId("cluster-interval-chart")).toBeInTheDocument();
+    expect(screen.getByText("正在加载其余基金行情…")).toBeInTheDocument();
   });
 });

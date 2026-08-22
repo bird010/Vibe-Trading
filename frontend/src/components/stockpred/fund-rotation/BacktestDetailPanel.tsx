@@ -13,8 +13,15 @@ import {
 import { WeeklyKlineEvidence } from "./WeeklyKlineEvidence";
 import { groupYearlyEvidence, normalizeEvidenceDate } from "./weeklyEvidence";
 import { FundRotationEquityChart } from "./FundRotationEquityChart";
+import { ClusterIntervalChart } from "./ClusterIntervalChart";
 import { useBacktestDetail } from "./useBacktestDetail";
-import type { BacktestDetailTab, CandidatePoolResponse } from "./types";
+import type {
+  BacktestPeriod,
+  BacktestDetailTab,
+  CandidatePoolResponse,
+  ComparisonEquityData,
+  InstrumentChartResponse,
+} from "./types";
 import { RotationAnalysisTab } from "./RotationAnalysisTab";
 import { readFundRotationUrl, syncFundRotationUrl } from "./deepLinks";
 
@@ -28,6 +35,7 @@ const TABS: Array<{
   { id: "rotation_analysis", label: "轮动分析", icon: GitBranch },
   { id: "chart", label: "K 线证据", icon: CandlestickChart },
   { id: "candidate_pool", label: "基金候选池", icon: ListTree },
+  { id: "cluster_interval", label: "聚类区间", icon: BarChart3 },
 ];
 
 const METRIC_LABELS: Record<string, string> = {
@@ -106,20 +114,28 @@ export function BacktestDetailPanel() {
   const singleChartLoader = selectInstrument as ((tsCode: string) => Promise<void>) | undefined;
 
   useEffect(() => {
-    if (activeTab !== "chart" || !detail || detail.instruments.length === 0 || chartLoading) return;
-    if (singleChartLoader) {
+    if (
+      (activeTab !== "chart" && activeTab !== "cluster_interval") ||
+      !detail ||
+      detail.instruments.length === 0 ||
+      chartLoading
+    ) return;
+    if (activeTab === "chart" && singleChartLoader) {
       const tsCode = selectedInstrument ?? detail.instruments[0]?.ts_code;
       if (tsCode && !chart && !chartErrors[tsCode]) void singleChartLoader(tsCode);
       return;
     }
-    if (Object.keys(charts).length === 0 && Object.keys(chartErrors).length === 0) {
+    if (
+      detail.instruments.some((instrument) => !charts[instrument.ts_code]) &&
+      Object.keys(chartErrors).length === 0
+    ) {
       void loadCharts();
     }
   }, [activeTab, chart, chartErrors, charts, chartLoading, detail, loadCharts, selectedInstrument, singleChartLoader]);
 
   useEffect(() => {
     if (
-      activeTab === "candidate_pool" &&
+      (activeTab === "candidate_pool" || activeTab === "cluster_interval") &&
       detail &&
       !candidatePoolLoading &&
       !candidatePool &&
@@ -365,6 +381,20 @@ export function BacktestDetailPanel() {
           />
         )}
 
+        {!loading && !error && detail && activeTab === "cluster_interval" && (
+          <ClusterIntervalContent
+            equity={equity}
+            candidatePool={candidatePool}
+            charts={charts}
+            candidatePoolLoading={candidatePoolLoading}
+            chartLoading={chartLoading}
+            candidatePoolError={candidatePoolError}
+            chartErrors={chartErrors}
+            period={detail.period}
+            onRetryCharts={() => void loadCharts()}
+          />
+        )}
+
         {!loading && !error && detail && activeTab === "chart" && (
           <div className="space-y-4">
             {detail.instruments.length === 0 ? (
@@ -390,6 +420,79 @@ export function BacktestDetailPanel() {
         )}
       </div>
     </section>
+  );
+}
+
+function ClusterIntervalContent({
+  equity,
+  candidatePool,
+  charts,
+  candidatePoolLoading,
+  chartLoading,
+  candidatePoolError,
+  chartErrors,
+  period,
+  onRetryCharts,
+}: {
+  equity: ComparisonEquityData | null;
+  candidatePool: CandidatePoolResponse | null;
+  charts: Record<string, InstrumentChartResponse>;
+  candidatePoolLoading: boolean;
+  chartLoading: boolean;
+  candidatePoolError: string | null;
+  chartErrors: Record<string, string>;
+  period: BacktestPeriod;
+  onRetryCharts: () => void;
+}) {
+  const hasCharts = Object.keys(charts).length > 0;
+  if ((candidatePoolLoading && !candidatePool) || (chartLoading && !hasCharts)) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        加载聚类区间数据…
+      </div>
+    );
+  }
+
+  if (candidatePoolError) {
+    return (
+      <div className="rounded border border-red-300 bg-red-50 px-3 py-3 text-sm text-red-700">
+        聚类区间数据加载失败：{candidatePoolError}
+      </div>
+    );
+  }
+
+  const errors = Object.entries(chartErrors);
+  return (
+    <div className="space-y-3">
+      {errors.length > 0 && (
+        <div className="space-y-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <div>部分基金行情加载失败：</div>
+          {errors.map(([tsCode, message]) => (
+            <div key={tsCode}>{tsCode}：{message}</div>
+          ))}
+          <button
+            type="button"
+            onClick={onRetryCharts}
+            className="rounded border border-amber-500 px-3 py-1"
+          >
+            重试失败项
+          </button>
+        </div>
+      )}
+      {chartLoading && hasCharts && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在加载其余基金行情…
+        </div>
+      )}
+      <ClusterIntervalChart
+        equity={equity}
+        candidatePool={candidatePool}
+        charts={charts}
+        period={period}
+      />
+    </div>
   );
 }
 

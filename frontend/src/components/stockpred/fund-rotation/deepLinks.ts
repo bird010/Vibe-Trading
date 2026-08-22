@@ -15,6 +15,7 @@ const TAB_VALUES = new Set<BacktestDetailTab>([
   "rotation_analysis",
   "chart",
   "candidate_pool",
+  "cluster_interval",
 ]);
 
 function valueOrNull(value: string | null): string | null {

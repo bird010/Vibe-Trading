@@ -228,19 +228,28 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
     const runId = get().selectedRunId;
     const instruments = get().detail?.instruments;
     if (!runId || !instruments || instruments.length === 0) return;
+    if (get().chartLoading) return;
+    const missingInstruments = instruments.filter(
+      (instrument) => !get().charts[instrument.ts_code],
+    );
+    if (missingInstruments.length === 0) {
+      if (Object.keys(get().chartErrors).length > 0) set({ chartErrors: {} });
+      return;
+    }
 
     const requestId = ++chartsRequestId;
     chartsAbortController?.abort();
-    chartsAbortController = new AbortController();
+    const abortController = new AbortController();
+    chartsAbortController = abortController;
     set({ chartLoading: true, chartErrors: {} });
 
     const results = await Promise.allSettled(
-      instruments.map((instrument) =>
+      missingInstruments.map((instrument) =>
         fetchInstrumentChart(
           runId,
           instrument.ts_code,
           CHART_BAR_LIMIT,
-          chartsAbortController!.signal,
+          abortController.signal,
         ),
       ),
     );
@@ -249,7 +258,7 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
     const charts: Record<string, InstrumentChartResponse> = {};
     const chartErrors: Record<string, string> = {};
     results.forEach((result, index) => {
-      const tsCode = instruments[index].ts_code;
+      const tsCode = missingInstruments[index].ts_code;
       if (result.status === "fulfilled") {
         charts[tsCode] = result.value;
       } else if (!isAbortError(result.reason)) {
@@ -257,12 +266,17 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
           result.reason instanceof Error ? result.reason.message : "K 线证据加载失败";
       }
     });
-    set({ charts, chartErrors, chartLoading: false });
+    set((state) => ({
+      charts: { ...state.charts, ...charts },
+      chartErrors,
+      chartLoading: false,
+    }));
   },
 
   loadCandidatePool: async () => {
     const runId = get().selectedRunId;
     if (!runId) return;
+    if (get().candidatePoolLoading || get().candidatePool) return;
 
     const requestId = ++candidatePoolRequestId;
     candidatePoolAbortController?.abort();

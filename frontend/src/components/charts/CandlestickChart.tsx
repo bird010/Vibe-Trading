@@ -31,6 +31,31 @@ function mutedMarkerColor(color: string, fallback: string): string {
   return /^#[0-9a-f]{6}$/i.test(color) ? `${color}80` : fallback;
 }
 
+export function getTradeMarkerVisual(
+  marker: Pick<TradeMarker, "side" | "status" | "muted" | "exit_delay_days">,
+  theme: ReturnType<typeof getChartTheme>,
+) {
+  const status = marker.status?.toUpperCase();
+  const delayed = Number(marker.exit_delay_days || 0) > 0;
+  const value = delayed
+    ? "D"
+    : status === "REJECTED"
+      ? "X"
+      : status === "PARTIAL"
+        ? "P"
+        : marker.side === "BUY" ? "B" : "S";
+  const color = delayed
+    ? "#8b5cf6"
+    : status === "REJECTED"
+      ? theme.textColor
+      : status === "PARTIAL"
+        ? theme.warningColor
+        : marker.side === "BUY"
+          ? marker.muted ? mutedMarkerColor(theme.upColor, "#86efac") : theme.upColor
+          : marker.muted ? mutedMarkerColor(theme.downColor, "#fca5a5") : theme.downColor;
+  return { color, delayed, status, value };
+}
+
 function sharedRangePercent(data: PriceBar[], range: ChartZoomRange): { start: number; end: number } {
   if (data.length < 2) return { start: 0, end: 100 };
   const firstAtOrAfter = data.findIndex((bar) => bar.time >= range.start);
@@ -232,24 +257,7 @@ export function CandlestickChart({ data, markers, indicators, strategyScore, str
 
     // Trade markers
     const marks = (markers || []).map(m => {
-      const status = m.status?.toUpperCase();
-      const delayed = Number(m.exit_delay_days || 0) > 0;
-      const value = delayed
-        ? "D"
-        : status === "REJECTED"
-          ? "X"
-          : status === "PARTIAL"
-            ? "P"
-            : m.side === "BUY" ? "B" : "S";
-      const color = delayed
-        ? "#8b5cf6"
-        : status === "REJECTED"
-          ? t.textColor
-          : status === "PARTIAL"
-            ? t.warningColor
-            : m.side === "BUY"
-              ? m.muted ? mutedMarkerColor(t.upColor, "#86efac") : t.upColor
-              : m.muted ? mutedMarkerColor(t.downColor, "#fca5a5") : t.downColor;
+      const { color, delayed, status, value } = getTradeMarkerVisual(m, t);
       return {
         coord: [m.time, m.price],
         value,

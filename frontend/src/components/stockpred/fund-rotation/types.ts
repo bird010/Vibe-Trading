@@ -574,6 +574,7 @@ export interface InstrumentTrade {
   target_weight?: number;
   reason?: string;
   blocked_reason?: string;
+  exit_delay_days?: number | null;
 }
 
 export interface InstrumentChartResponse {
@@ -603,7 +604,8 @@ export type BacktestDetailTab =
   | "equity"
   | "rotation_analysis"
   | "chart"
-  | "candidate_pool";
+  | "candidate_pool"
+  | "cluster_interval";
 
 export interface FileDetail {
   checksum: string;

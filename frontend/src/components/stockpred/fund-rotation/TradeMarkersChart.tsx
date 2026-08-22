@@ -6,26 +6,17 @@ import type {
   PriceBar,
   TradeMarker as SharedTradeMarker,
 } from "@/lib/api";
-import type { StrategyEvidenceSeries, StrategyScoreEvidence } from "./types";
+import type {
+  InstrumentTrade,
+  StrategyEvidenceSeries,
+  StrategyScoreEvidence,
+} from "./types";
+import {
+  instrumentTradeExitDelayDays,
+  instrumentTradeStatus,
+} from "./instrumentTradeMarkers";
 
-export interface TradeMarker {
-  trade_date: string;
-  ts_code?: string;
-  code?: string;
-  name?: string;
-  action: "BUY" | "SELL";
-  status?: string;
-  filled: number;
-  price: number;
-  amount?: number;
-  commission?: number;
-  fee?: number;
-  signal_date?: string;
-  signal_week?: string;
-  target_weight?: number;
-  reason?: string;
-  blocked_reason?: string;
-}
+export type TradeMarker = InstrumentTrade;
 
 export interface OHLCVBar {
   trade_date: string;
@@ -254,15 +245,9 @@ export function TradeMarkersChart({
     const chartMarkers: SharedTradeMarker[] = filteredTrades
       .filter((trade) => closeByDate.has(trade.trade_date))
       .map((trade) => {
-        const status = String(trade.status ?? "").toUpperCase();
         const filled = finite(trade.filled) ?? 0;
-        const blocked = Boolean(
-          trade.blocked_reason ||
-            status === "BLOCKED" ||
-            status === "REJECTED" ||
-            filled <= 0,
-        );
         const price = finite(trade.price);
+        const exitDelayDays = instrumentTradeExitDelayDays(trade);
         return {
           time: trade.trade_date,
           code: trade.ts_code ?? trade.code ?? tsCode,
@@ -272,12 +257,11 @@ export function TradeMarkersChart({
               ? price
               : closeByDate.get(trade.trade_date) ?? 0,
           qty: Math.abs(filled),
-          status: blocked
-            ? "REJECTED"
-            : status === "PARTIAL"
-              ? "PARTIAL"
-              : "FILLED",
+          status: instrumentTradeStatus(trade),
           reason: markerReason(trade),
+          ...(exitDelayDays !== null
+            ? { exit_delay_days: exitDelayDays }
+            : {}),
           ...(mutedByTrade.get(trade) ? { muted: true } : {}),
         };
       });

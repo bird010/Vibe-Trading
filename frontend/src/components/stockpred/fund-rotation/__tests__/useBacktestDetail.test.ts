@@ -60,11 +60,21 @@ function chart(runId: string, tsCode: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, "", "/funds");
   useBacktestDetail.getState().closeRun();
   api.fetchBacktestEquity.mockResolvedValue(null);
 });
 
 describe("useBacktestDetail", () => {
+  it("restores the cluster interval tab from the URL", async () => {
+    window.history.replaceState({}, "", "/funds?run_id=run-1&detail_tab=cluster_interval");
+    api.fetchBacktestDetail.mockResolvedValue(detail("run-1"));
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+
+    expect(useBacktestDetail.getState().activeTab).toBe("cluster_interval");
+  });
+
   it("loads a selected child run and chooses its first instrument", async () => {
     api.fetchBacktestDetail.mockResolvedValue(detail("run-1"));
     api.fetchBacktestEquity.mockResolvedValue({
@@ -99,6 +109,53 @@ describe("useBacktestDetail", () => {
     api.fetchBacktestDetail.mockResolvedValue(detail("run-2"));
     await useBacktestDetail.getState().openRun("variant-2", "run-2");
     expect(useBacktestDetail.getState().candidatePool).toBeNull();
+  });
+
+  it("does not refetch cached candidate pool or charts", async () => {
+    api.fetchBacktestDetail.mockResolvedValue(detail("run-1"));
+    api.fetchCandidatePool.mockResolvedValue({ run_id: "run-1", reclusters: [] });
+    api.fetchInstrumentChart.mockResolvedValue(chart("run-1", "510300.SH"));
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+    await useBacktestDetail.getState().loadCandidatePool();
+    await useBacktestDetail.getState().loadCandidatePool();
+    await useBacktestDetail.getState().loadCharts();
+    await useBacktestDetail.getState().loadCharts();
+
+    expect(api.fetchCandidatePool).toHaveBeenCalledTimes(1);
+    expect(api.fetchInstrumentChart).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads only missing charts and preserves cached charts", async () => {
+    const runDetail = detail("run-1");
+    runDetail.instruments = [
+      { ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true },
+      { ts_code: "159915.SZ", has_signal: true, has_order: true, has_trade: true, has_position: true },
+    ];
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+    const cachedChart = chart("run-1", "510300.SH");
+    const missingChart = chart("run-1", "159915.SZ");
+    api.fetchInstrumentChart.mockImplementation((_runId: string, tsCode: string) =>
+      tsCode === "159915.SZ"
+        ? Promise.resolve(missingChart)
+        : Promise.reject(new Error("cached chart must not be requested")),
+    );
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+    useBacktestDetail.setState({ charts: { "510300.SH": cachedChart } });
+    await useBacktestDetail.getState().loadCharts();
+
+    expect(api.fetchInstrumentChart).toHaveBeenCalledTimes(1);
+    expect(api.fetchInstrumentChart).toHaveBeenCalledWith(
+      "run-1",
+      "159915.SZ",
+      2000,
+      expect.any(AbortSignal),
+    );
+    expect(useBacktestDetail.getState().charts).toEqual({
+      "510300.SH": cachedChart,
+      "159915.SZ": missingChart,
+    });
   });
 
   it("keeps detail data when candidate pool loading fails", async () => {
@@ -254,6 +311,36 @@ describe("useBacktestDetail", () => {
     expect(useBacktestDetail.getState().chartErrors).toEqual({
       "159915.SZ": "159915.SZ chart unavailable",
     });
+  });
+
+  it("retries only failed charts without dropping the successful cache", async () => {
+    const runDetail = detail("run-1");
+    runDetail.instruments = [
+      { ts_code: "510300.SH", has_signal: true, has_order: true, has_trade: true, has_position: true },
+      { ts_code: "159915.SZ", has_signal: true, has_order: true, has_trade: true, has_position: true },
+    ];
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+    let failedAttempts = 0;
+    api.fetchInstrumentChart.mockImplementation((_runId: string, tsCode: string) => {
+      if (tsCode === "159915.SZ" && failedAttempts++ === 0) {
+        return Promise.reject(new Error("temporary chart failure"));
+      }
+      return Promise.resolve(chart("run-1", tsCode));
+    });
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+    await useBacktestDetail.getState().loadCharts();
+    const successfulChart = useBacktestDetail.getState().charts["510300.SH"];
+    await useBacktestDetail.getState().loadCharts();
+
+    expect(api.fetchInstrumentChart.mock.calls.map(([, tsCode]) => tsCode)).toEqual([
+      "510300.SH",
+      "159915.SZ",
+      "159915.SZ",
+    ]);
+    expect(useBacktestDetail.getState().charts["510300.SH"]).toBe(successfulChart);
+    expect(useBacktestDetail.getState().charts["159915.SZ"]).toEqual(chart("run-1", "159915.SZ"));
+    expect(useBacktestDetail.getState().chartErrors).toEqual({});
   });
 
   it("does not add a previous run's late chart responses to the current run", async () => {

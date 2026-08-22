@@ -40,6 +40,33 @@ describe("TradeMarkersChart", () => {
     expect(chartMock.props?.markers).toBe(firstMarkers);
   });
 
+  it("preserves exit delay metadata for the shared candlestick marker priority", () => {
+    render(
+      <TradeMarkersChart
+        ohlcv={OHLCV}
+        trades={[
+          {
+            trade_date: "20250106",
+            action: "SELL",
+            status: "FILLED",
+            filled: 10,
+            price: 11,
+            exit_delay_days: 2,
+          },
+        ]}
+        tsCode="159712.SZ"
+      />,
+    );
+
+    expect(chartMock.props?.markers).toEqual([
+      expect.objectContaining({
+        time: "20250106",
+        side: "SELL",
+        exit_delay_days: 2,
+      }),
+    ]);
+  });
+
   it("passes backend weekly Strategy Score points to the shared Kline chart", () => {
     render(
       <TradeMarkersChart
