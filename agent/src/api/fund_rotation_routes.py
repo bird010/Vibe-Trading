@@ -1342,6 +1342,8 @@ def register_fund_rotation_routes(
         run_id: str,
         ts_code: str,
         limit: int = Query(default=500, ge=20, le=2000),
+        start_date: str | None = Query(default=None),
+        end_date: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """Return pinned OHLCV, targets, executions, positions and orders."""
         if not _SAFE_TS_CODE.fullmatch(ts_code):
@@ -1450,7 +1452,14 @@ def register_fund_rotation_routes(
                     )
                     frame = table.to_pandas()
                     if not frame.empty:
-                        frame = frame.sort_values("trade_date").tail(limit)
+                        frame = frame.sort_values("trade_date")
+                        trade_dates = frame["trade_date"].astype(str)
+                        if start_date:
+                            frame = frame[trade_dates >= start_date]
+                            trade_dates = trade_dates[frame.index]
+                        if end_date:
+                            frame = frame[trade_dates <= end_date]
+                        frame = frame.tail(limit)
                         ohlcv = frame[
                             [
                                 "trade_date",

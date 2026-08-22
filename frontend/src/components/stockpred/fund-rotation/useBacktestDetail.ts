@@ -206,6 +206,8 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
         tsCode,
         CHART_BAR_LIMIT,
         chartAbortController.signal,
+        get().detail?.period.evaluation_start_date,
+        get().detail?.period.evaluation_end_date,
       );
       if (
         requestId !== chartRequestId ||
@@ -250,6 +252,8 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
           instrument.ts_code,
           CHART_BAR_LIMIT,
           abortController.signal,
+          get().detail?.period.evaluation_start_date,
+          get().detail?.period.evaluation_end_date,
         ),
       ),
     );

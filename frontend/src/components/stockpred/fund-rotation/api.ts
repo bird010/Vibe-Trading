@@ -287,9 +287,14 @@ export function backtestChartUrl(
   runId: string,
   tsCode: string,
   limit = 500,
+  startDate?: string | null,
+  endDate?: string | null,
 ): string {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (startDate) params.set("start_date", startDate);
+  if (endDate) params.set("end_date", endDate);
   return withAuthQuery(
-    `${BASE}/backtests/${encodeURIComponent(runId)}/instruments/${encodeURIComponent(tsCode)}/chart?limit=${encodeURIComponent(String(limit))}`,
+    `${BASE}/backtests/${encodeURIComponent(runId)}/instruments/${encodeURIComponent(tsCode)}/chart?${params.toString()}`,
   );
 }
 
@@ -298,8 +303,10 @@ export async function fetchInstrumentChart(
   tsCode: string,
   limit = 500,
   signal?: AbortSignal,
+  startDate?: string | null,
+  endDate?: string | null,
 ): Promise<InstrumentChartResponse> {
-  const res = await fetch(backtestChartUrl(runId, tsCode, limit), {
+  const res = await fetch(backtestChartUrl(runId, tsCode, limit, startDate, endDate), {
     headers: authHeaders(),
     signal,
   });

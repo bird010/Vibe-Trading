@@ -151,6 +151,8 @@ describe("useBacktestDetail", () => {
       "159915.SZ",
       2000,
       expect.any(AbortSignal),
+      undefined,
+      undefined,
     );
     expect(useBacktestDetail.getState().charts).toEqual({
       "510300.SH": cachedChart,
@@ -264,8 +266,32 @@ describe("useBacktestDetail", () => {
       "510300.SH",
       2000,
       expect.any(AbortSignal),
+      undefined,
+      undefined,
     );
     expect(useBacktestDetail.getState().chart?.ts_code).toBe("510300.SH");
+  });
+
+  it("passes the backtest evaluation window to chart evidence requests", async () => {
+    const runDetail = detail("run-1");
+    runDetail.period = {
+      evaluation_start_date: "20170707",
+      evaluation_end_date: "20220729",
+    };
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+    api.fetchInstrumentChart.mockResolvedValue(chart("run-1", "510300.SH"));
+
+    await useBacktestDetail.getState().openRun("variant-1", "run-1");
+    await useBacktestDetail.getState().selectInstrument("510300.SH");
+
+    expect(api.fetchInstrumentChart).toHaveBeenCalledWith(
+      "run-1",
+      "510300.SH",
+      2000,
+      expect.any(AbortSignal),
+      "20170707",
+      "20220729",
+    );
   });
 
   it("loads chart evidence for every instrument into the chart map", async () => {

@@ -714,6 +714,73 @@ def test_chart_reads_nonempty_ohlcv_from_v2_pinned_fund_version(
     )]
 
 
+def test_chart_date_window_keeps_historical_rows_before_recent_tail(
+    tmp_path, monkeypatch,
+):
+    import pandas as pd
+
+    runs_dir = tmp_path / "runs"
+    stockpred_root = tmp_path / "stockpred"
+    run_id = "chart-date-window"
+    run_dir = runs_dir / "fund_rotation" / run_id
+    run_dir.mkdir(parents=True)
+    state = {
+        "schema_version": "2", "stage": "SUCCEEDED", "run_id": run_id,
+        "params_fingerprint": "params-fp",
+    }
+    snapshot = {
+        "fund_version": 17, "fund_adj_version": 23, "dim_version": 31,
+        "universe_codes": ["E1"], "trading_dates": ["20170707", "20180522"],
+        "fingerprint": "snapshot-fp",
+    }
+    atomic_write_json(run_dir / "state.json", state)
+    atomic_write_json(run_dir / "data_snapshot.json", snapshot)
+    state_checksum = compute_file_checksum(run_dir / "state.json")
+    snapshot_checksum = compute_file_checksum(run_dir / "data_snapshot.json")
+    atomic_write_json(run_dir / "manifest.json", {
+        "status": "SUCCEEDED", "run_id": run_id,
+        "params_fingerprint": "params-fp", "state_checksum": state_checksum,
+        "files": ["state.json", "data_snapshot.json", "manifest.json"],
+        "file_details": {
+            "state.json": {"checksum": state_checksum},
+            "data_snapshot.json": {"checksum": snapshot_checksum},
+        },
+    })
+
+    class FakeDataset:
+        def to_table(self, *, filter=None):
+            assert filter == "ts_code = 'E1'"
+            return types.SimpleNamespace(to_pandas=lambda: pd.DataFrame([
+                {
+                    "ts_code": "E1", "trade_date": "20170707", "open": 1.0,
+                    "high": 1.2, "low": 0.9, "close": 1.1, "vol": 100,
+                },
+                {
+                    "ts_code": "E1", "trade_date": "20180522", "open": 2.0,
+                    "high": 2.2, "low": 1.9, "close": 2.1, "vol": 200,
+                },
+            ]))
+
+    monkeypatch.setitem(sys.modules, "lance", types.SimpleNamespace(
+        dataset=lambda path, version=None: FakeDataset(),
+    ))
+    app = FastAPI()
+    register_fund_rotation_routes(
+        app, runs_dir, lambda: None, lambda: None,
+        stockpred_root=stockpred_root,
+    )
+
+    response = TestClient(app).get(
+        f"/stockpred/fund-rotation/backtests/{run_id}/instruments/E1/chart"
+        "?limit=2000&start_date=20170707&end_date=20180104"
+    )
+
+    assert response.status_code == 200
+    assert [row["trade_date"] for row in response.json()["ohlcv"]] == [
+        "20170707",
+    ]
+
+
 def test_legacy_startup_recovery_does_not_claim_or_mutate_batch_children(tmp_path):
     """The route's legacy recovery runs first but must leave v2 children alone."""
     runs_dir = tmp_path / "runs"
