@@ -77,6 +77,27 @@ export interface ClusterIntervalChartModel {
   boundaryLines: ClusterIntervalBoundaryLine[];
 }
 
+interface ClusterIntervalTooltipData {
+  name?: string;
+  tradePrice?: number;
+  fundName?: string;
+  beforeWeight?: number | null;
+  afterWeight?: number | null;
+}
+
+function formatClusterMarkerTooltip(data?: ClusterIntervalTooltipData): string {
+  const formatWeight = (value: number | null | undefined) =>
+    value === null || value === undefined ? "—" : `${(value * 100).toFixed(2)}%`;
+  const lines = [
+    data?.name ?? "",
+    `基金名称：${data?.fundName ?? "—"}`,
+    `交易前权重：${formatWeight(data?.beforeWeight)}`,
+    `交易后权重：${formatWeight(data?.afterWeight)}`,
+  ];
+  if (data?.tradePrice !== undefined) lines.push(`成交价：${data.tradePrice}`);
+  return lines.join("<br/>");
+}
+
 const CHART_BAR_LIMIT = 2000;
 const EQUITY_COLOR = "#2563eb";
 const FUND_COLORS = [
@@ -600,29 +621,8 @@ export function ClusterIntervalChart({
               symbol: "circle",
               symbolSize: 24,
               tooltip: {
-                formatter: (params: {
-                  data?: {
-                    name?: string;
-                    tradePrice?: number;
-                    fundName?: string;
-                    beforeWeight?: number | null;
-                    afterWeight?: number | null;
-                  };
-                }) => {
-                  const data = params.data;
-                  const formatWeight = (value: number | null | undefined) =>
-                    value === null || value === undefined
-                      ? "—"
-                      : `${(value * 100).toFixed(2)}%`;
-                  const lines = [
-                    data?.name ?? "",
-                    `基金名称：${data?.fundName ?? "—"}`,
-                    `交易前权重：${formatWeight(data?.beforeWeight)}`,
-                    `交易后权重：${formatWeight(data?.afterWeight)}`,
-                  ];
-                  if (data?.tradePrice !== undefined) lines.push(`成交价：${data.tradePrice}`);
-                  return lines.join("<br/>");
-                },
+                formatter: (params: { data?: ClusterIntervalTooltipData }) =>
+                  formatClusterMarkerTooltip(params.data),
               },
             }
           : undefined,
@@ -654,7 +654,12 @@ export function ClusterIntervalChart({
         textStyle: { color: theme.tooltipText, fontSize: 11 },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         formatter: (params: any) => {
-          if (!Array.isArray(params) || params.length === 0) return "";
+          if (!Array.isArray(params)) {
+            return params?.data?.fundName
+              ? formatClusterMarkerTooltip(params.data)
+              : "";
+          }
+          if (params.length === 0) return "";
           const date = String(params[0].axisValue ?? "");
           const interval = model.intervals.find((candidate) => intervalContains(candidate, date));
           let html = `<b>${date}</b>`;

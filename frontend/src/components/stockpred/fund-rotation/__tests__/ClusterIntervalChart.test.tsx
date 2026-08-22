@@ -288,6 +288,8 @@ describe("buildClusterIntervalChartModel", () => {
     expect(tooltip).toContain("基金名称：示例基金 (159001.SZ)");
     expect(tooltip).toContain("交易前权重：—");
     expect(tooltip).toContain("交易后权重：25.00%");
+    const axisTooltip = chartMock.options?.tooltip.formatter({ data: mark });
+    expect(axisTooltip).toContain("基金名称：示例基金 (159001.SZ)");
   });
 
   it("keeps the preceding recluster semantics when visible data starts between boundaries", () => {
