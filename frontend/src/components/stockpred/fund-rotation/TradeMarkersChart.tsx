@@ -21,6 +21,7 @@ export interface TradeMarker {
   commission?: number;
   fee?: number;
   signal_date?: string;
+  signal_week?: string;
   target_weight?: number;
   reason?: string;
   blocked_reason?: string;
@@ -157,6 +158,9 @@ export function TradeMarkersChart({
       signal_date: trade.signal_date
         ? canonicalDate(trade.signal_date)
         : trade.signal_date,
+      signal_week: trade.signal_week
+        ? canonicalDate(trade.signal_week)
+        : trade.signal_week,
     }));
     const filteredSignals = normalizedSignals.filter((signal) =>
       inRange(dateOfSignal(signal)),
@@ -204,6 +208,7 @@ export function TradeMarkersChart({
     for (const { trade } of orderedTrades) {
       const targetWeight = finite(trade.target_weight);
       const currentSignalDate = trade.signal_date ||
+        trade.signal_week ||
         latestSignalBefore(trade.trade_date, false)?.date;
       if (currentSignalDate !== processedSignalDate) {
         processedSignalDate = currentSignalDate;

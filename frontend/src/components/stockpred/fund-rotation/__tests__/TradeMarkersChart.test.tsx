@@ -172,6 +172,32 @@ describe("TradeMarkersChart", () => {
     ]);
   });
 
+  it("uses the production signal_week to avoid treating a changed target as unchanged", () => {
+    render(
+      <TradeMarkersChart
+        ohlcv={[
+          { trade_date: "20250106", open: 10, high: 11, low: 9, close: 10.5, vol: 100 },
+          { trade_date: "20250113", open: 10, high: 11, low: 9, close: 10.5, vol: 100 },
+        ]}
+        trades={[
+          { trade_date: "20250106", signal_week: "20241227", action: "BUY", filled: 10, price: 10.5, target_weight: 0.5 },
+          { trade_date: "20250113", signal_week: "20250103", action: "BUY", filled: 10, price: 10.5, target_weight: 0.6 },
+        ]}
+        signals={[
+          { week_ending: "20241227", weight: 0.5 },
+          { week_ending: "20250103", weight: 0.5 },
+          { week_ending: "20250110", weight: 0.6 },
+        ]}
+        tsCode="159712.SZ"
+      />,
+    );
+
+    expect(chartMock.props?.markers).toEqual([
+      expect.not.objectContaining({ muted: true }),
+      expect.not.objectContaining({ muted: true }),
+    ]);
+  });
+
   it("advances the processed target within the same signal", () => {
     render(
       <TradeMarkersChart

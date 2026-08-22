@@ -570,6 +570,7 @@ export interface InstrumentTrade {
   commission?: number;
   fee?: number;
   signal_date?: string;
+  signal_week?: string;
   target_weight?: number;
   reason?: string;
   blocked_reason?: string;
