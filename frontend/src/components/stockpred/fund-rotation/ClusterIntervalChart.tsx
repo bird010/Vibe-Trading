@@ -59,6 +59,9 @@ export interface ClusterIntervalMarkPoint {
   muted: boolean;
   price: number;
   exitDelayDays: number | null;
+  fundName: string;
+  beforeWeight: number | null;
+  afterWeight: number | null;
 }
 
 export interface ClusterIntervalBoundaryLine {
@@ -187,6 +190,34 @@ function signalTarget(signal: InstrumentSignal): number | null {
   return signal.weight !== undefined
     ? finite(signal.weight)
     : finite(signal.target_weight);
+}
+
+function tradeWeightDetails(
+  trade: InstrumentTrade,
+  signals: InstrumentSignal[],
+): { beforeWeight: number | null; afterWeight: number | null } {
+  const orderedSignals = signals
+    .map((signal, index) => ({
+      date: signalDate(signal),
+      index,
+      targetWeight: signalTarget(signal),
+    }))
+    .filter((signal) => signal.date)
+    .sort(
+      (left, right) =>
+        left.date.localeCompare(right.date) || left.index - right.index,
+    );
+  const tradeDate = canonicalDate(trade.trade_date);
+  const explicitSignalDate = canonicalDate(trade.signal_date || trade.signal_week || "");
+  const currentSignalDate = explicitSignalDate ||
+    [...orderedSignals].reverse().find((signal) => signal.date < tradeDate)?.date;
+  const previousSignal = [...orderedSignals]
+    .reverse()
+    .find((signal) => signal.date < (currentSignalDate || tradeDate) && signal.targetWeight !== null);
+  return {
+    beforeWeight: previousSignal?.targetWeight ?? null,
+    afterWeight: finite(trade.target_weight),
+  };
 }
 
 function mutedTradeIndices(
@@ -421,6 +452,7 @@ export function buildClusterIntervalChartModel(
         if (closeValue === undefined) continue;
         const rawPrice = finite(trade.price);
         const exitDelayDays = instrumentTradeExitDelayDays(trade);
+        const { beforeWeight, afterWeight } = tradeWeightDetails(trade, chart.signals);
         markPoints.push({
           seriesId,
           instrument,
@@ -434,6 +466,9 @@ export function buildClusterIntervalChartModel(
           muted: muted.has(index),
           price: rawPrice !== null && rawPrice > 0 ? rawPrice : closePoints[0].value * closeValue,
           exitDelayDays,
+          fundName: logicalFundName(instrument, chart),
+          beforeWeight,
+          afterWeight,
         });
       }
     }
@@ -540,6 +575,9 @@ export function ClusterIntervalChart({
             value: mark.value,
             name: `${mark.action} · ${state}`,
             tradePrice: mark.price,
+            fundName: mark.fundName,
+            beforeWeight: mark.beforeWeight,
+            afterWeight: mark.afterWeight,
             itemStyle: { color: visual.color },
             label: { color: "#fff", fontSize: 10, fontWeight: "bold" as const },
           };
@@ -563,13 +601,27 @@ export function ClusterIntervalChart({
               symbolSize: 24,
               tooltip: {
                 formatter: (params: {
-                  data?: { name?: string; tradePrice?: number };
+                  data?: {
+                    name?: string;
+                    tradePrice?: number;
+                    fundName?: string;
+                    beforeWeight?: number | null;
+                    afterWeight?: number | null;
+                  };
                 }) => {
-                  const name = params.data?.name ?? "";
-                  const price = params.data?.tradePrice;
-                  return price === undefined
-                    ? name
-                    : `${name}<br/>成交价：${price}`;
+                  const data = params.data;
+                  const formatWeight = (value: number | null | undefined) =>
+                    value === null || value === undefined
+                      ? "—"
+                      : `${(value * 100).toFixed(2)}%`;
+                  const lines = [
+                    data?.name ?? "",
+                    `基金名称：${data?.fundName ?? "—"}`,
+                    `交易前权重：${formatWeight(data?.beforeWeight)}`,
+                    `交易后权重：${formatWeight(data?.afterWeight)}`,
+                  ];
+                  if (data?.tradePrice !== undefined) lines.push(`成交价：${data.tradePrice}`);
+                  return lines.join("<br/>");
                 },
               },
             }

@@ -235,6 +235,61 @@ describe("buildClusterIntervalChartModel", () => {
     expect(model.markPoints.some(({ instrument }) => instrument !== "159001.SZ")).toBe(false);
   });
 
+  it("includes fund name and before/after weights in trade marker tooltips", () => {
+    const instrumentChart = {
+      ...chart("159001.SZ", [
+        { trade_date: "20250103", open: 9, high: 11, low: 8, close: 10, vol: 1 },
+        { trade_date: "20250106", open: 10, high: 12, low: 9, close: 11, vol: 1 },
+        { trade_date: "20250109", open: 11, high: 13, low: 10, close: 12, vol: 1 },
+      ], [
+        { trade_date: "20250106", signal_date: "20250103", action: "BUY", status: "FILLED", filled: 10, price: 11, target_weight: 0.25 },
+        { trade_date: "20250109", signal_date: "", signal_week: "20250103", action: "SELL", status: "FILLED", filled: 2, price: 12, target_weight: 0.5 },
+      ]),
+      name: "示例基金",
+      signals: [
+        { date: "20250103", target_weight: 0.25 },
+        { date: "20250108", target_weight: 0.5 },
+      ],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: null,
+      candidatePool: { run_id: "run-1", reclusters: [] },
+      charts: { "159001.SZ": instrumentChart },
+    });
+
+    expect(model.markPoints).toEqual([
+      expect.objectContaining({
+        fundName: "示例基金 (159001.SZ)",
+        beforeWeight: null,
+        afterWeight: 0.25,
+      }),
+      expect.objectContaining({
+        fundName: "示例基金 (159001.SZ)",
+        beforeWeight: null,
+        afterWeight: 0.5,
+      }),
+    ]);
+
+    render(
+      <ClusterIntervalChart
+        equity={null}
+        candidatePool={{
+          run_id: "run-1",
+          reclusters: [{
+            ...candidatePool.reclusters[0],
+            representatives: [representative("159001.SZ")],
+          }],
+        }}
+        charts={{ "159001.SZ": instrumentChart }}
+      />,
+    );
+    const mark = (chartMock.options?.series as Array<Record<string, any>>)[0]?.markPoint.data[0];
+    const tooltip = (chartMock.options?.series as Array<Record<string, any>>)[0]?.markPoint.tooltip.formatter({ data: mark });
+    expect(tooltip).toContain("基金名称：示例基金 (159001.SZ)");
+    expect(tooltip).toContain("交易前权重：—");
+    expect(tooltip).toContain("交易后权重：25.00%");
+  });
+
   it("keeps the preceding recluster semantics when visible data starts between boundaries", () => {
     const model = buildClusterIntervalChartModel({
       equity: {
