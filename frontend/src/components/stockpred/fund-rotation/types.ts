@@ -572,6 +572,7 @@ export interface InstrumentTrade {
   signal_date?: string;
   signal_week?: string;
   target_weight?: number;
+  post_holding?: number;
   reason?: string;
   blocked_reason?: string;
   exit_delay_days?: number | null;

@@ -7,13 +7,42 @@ import type {
 } from "../types";
 const chartMock = vi.hoisted(() => ({
   options: null as Record<string, any> | null,
+  handlers: {} as Record<string, (params: Record<string, any>) => void>,
 }));
 
 vi.mock("@/lib/echarts", () => ({
   echarts: {
     init: () => ({
       setOption: (options: Record<string, any>) => {
-        chartMock.options = options;
+        if (!chartMock.options) {
+          chartMock.options = options;
+          return;
+        }
+        const existingSeries = Array.isArray(chartMock.options.series)
+          ? chartMock.options.series
+          : [];
+        const nextSeries = Array.isArray(options.series)
+          ? options.series.map((patch: Record<string, any>) => {
+              const existing = existingSeries.find(
+                (entry: Record<string, any>) => entry.id === patch.id,
+              );
+              return existing
+                ? {
+                    ...existing,
+                    ...patch,
+                    lineStyle: { ...existing.lineStyle, ...patch.lineStyle },
+                    areaStyle: { ...existing.areaStyle, ...patch.areaStyle },
+                  }
+                : patch;
+            })
+          : existingSeries;
+        chartMock.options = { ...chartMock.options, ...options, series: nextSeries };
+      },
+      on: (event: string, handler: (params: Record<string, any>) => void) => {
+        chartMock.handlers[event] = handler;
+      },
+      off: (event: string) => {
+        delete chartMock.handlers[event];
       },
       resize: vi.fn(),
       dispose: vi.fn(),
@@ -121,6 +150,7 @@ function chart(
 describe("buildClusterIntervalChartModel", () => {
   beforeEach(() => {
     chartMock.options = null;
+    chartMock.handlers = {};
   });
 
   it("splits at both recluster dates and normalizes each segment independently", () => {
@@ -235,6 +265,544 @@ describe("buildClusterIntervalChartModel", () => {
     expect(model.markPoints.some(({ instrument }) => instrument !== "159001.SZ")).toBe(false);
   });
 
+  it("builds actual fund weights and cash to a 100% stack", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ"), representative("BBB.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103"],
+        series: { strategy: [100, 101] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ]),
+          positions: [
+            { trade_date: "20250102", actual_weight: 0.5 },
+            { trade_date: "20250103", actual_weight: 0.4 },
+          ],
+        },
+        "BBB.SZ": {
+          ...chart("BBB.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ]),
+          positions: [
+            { trade_date: "20250102", actual_weight: 0.3 },
+            { trade_date: "20250103", actual_weight: 0.2 },
+          ],
+        },
+      },
+    });
+
+    expect(model.positionSeries).toEqual([
+      expect.objectContaining({ logicalId: "fund:AAA.SZ", stack: "positions" }),
+      expect.objectContaining({ logicalId: "fund:BBB.SZ", stack: "positions" }),
+      expect.objectContaining({ logicalId: "cash", stack: "positions" }),
+    ]);
+    expect(model.positionSeries.find((series) => series.logicalId === "cash")?.data[0]?.[1]).toBeCloseTo(0.2);
+    expect(model.positionSeries.find((series) => series.logicalId === "cash")?.data[1]?.[1]).toBeCloseTo(0.4);
+  });
+
+  it("forwards actual weights, sets sold funds to zero, and preserves gaps", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ"), representative("BBB.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103", "20250104"],
+        series: { strategy: [100, 101, 102] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ], [
+            { trade_date: "20250103", action: "SELL", status: "FILLED", filled: 1, price: 1, target_weight: 0, post_holding: 0 },
+          ]),
+          positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+        },
+        "BBB.SZ": {
+          ...chart("BBB.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ]),
+          positions: [{ trade_date: "20250103", actual_weight: 0.25 }],
+        },
+      },
+    });
+
+    const positionData = (logicalId: string) =>
+      model.positionSeries.find((series) => series.logicalId === logicalId)?.data;
+    expect(positionData("fund:AAA.SZ")).toEqual([
+      ["20250102", 0.5],
+      ["20250103", 0],
+      ["20250104", 0],
+    ]);
+    expect(positionData("fund:BBB.SZ")).toEqual([
+      ["20250102", null],
+      ["20250103", 0.25],
+      ["20250104", 0.25],
+    ]);
+  });
+
+  it("keeps the actual position and cash after a partial sell targeting zero", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103", "20250104"],
+        series: { strategy: [100, 101, 102] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ], [
+            {
+              trade_date: "20250103",
+              action: "SELL",
+              status: "PARTIAL",
+              filled: 1,
+              price: 1,
+              target_weight: 0,
+              post_holding: 10,
+            },
+          ]),
+          positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+        },
+      },
+    });
+
+    expect(model.positionSeries.find((series) => series.logicalId === "fund:AAA.SZ")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", 0.5],
+      ["20250104", 0.5],
+    ]);
+    expect(model.positionSeries.find((series) => series.logicalId === "cash")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", 0.5],
+      ["20250104", 0.5],
+    ]);
+  });
+
+  it("shows a null gap for an explicit invalid actual weight record", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103", "20250104"],
+        series: { strategy: [100, 101, 102] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ]),
+          positions: [
+            { trade_date: "20250102", actual_weight: 0.5 },
+            { trade_date: "20250103", actual_weight: null },
+            { trade_date: "20250104", actual_weight: 0.25 },
+          ],
+        },
+      },
+    });
+
+    expect(model.positionSeries.find((series) => series.logicalId === "fund:AAA.SZ")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", null],
+      ["20250104", 0.25],
+    ]);
+    expect(model.positionSeries.find((series) => series.logicalId === "cash")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", null],
+      ["20250104", 0.75],
+    ]);
+  });
+
+  it("uses a completed sell after an invalid record as zero weight", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103", "20250104"],
+        series: { strategy: [100, 101, 102] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ], [
+            { trade_date: "20250104", action: "SELL", status: "FILLED", filled: 1, price: 1, post_holding: 0 },
+          ]),
+          positions: [
+            { trade_date: "20250102", actual_weight: 0.5 },
+            { trade_date: "20250103", actual_weight: null },
+          ],
+        },
+      },
+    });
+
+    expect(model.positionSeries.find((series) => series.logicalId === "fund:AAA.SZ")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", null],
+      ["20250104", 0],
+    ]);
+  });
+
+  it("keeps a later nonzero buy with missing actual weight unknown after a sell", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ")],
+      }],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250102", "20250103", "20250104"],
+        series: { strategy: [100, 101, 102] },
+      },
+      candidatePool: pool,
+      selectedIntervalIndex: 0,
+      charts: {
+        "AAA.SZ": {
+          ...chart("AAA.SZ", [
+            { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            { trade_date: "20250104", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+          ], [
+            { trade_date: "20250103", action: "SELL", status: "FILLED", filled: 1, price: 1, post_holding: 0 },
+            { trade_date: "20250104", action: "BUY", status: "FILLED", filled: 1, price: 1, post_holding: 10 },
+          ]),
+          positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+        },
+      },
+    });
+
+    expect(model.positionSeries.find((series) => series.logicalId === "fund:AAA.SZ")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", 0],
+      ["20250104", null],
+    ]);
+    expect(model.positionSeries.find((series) => series.logicalId === "cash")?.data).toEqual([
+      ["20250102", 0.5],
+      ["20250103", 1],
+      ["20250104", null],
+    ]);
+  });
+
+  it("renders a second 100% grid and bidirectionally highlights paired fund series", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ"), representative("BBB.SZ")],
+      }],
+    };
+    render(
+      <ClusterIntervalChart
+        equity={{ dates: ["20250102", "20250103"], series: { strategy: [100, 101] } }}
+        candidatePool={pool}
+        charts={{
+          "AAA.SZ": {
+            ...chart("AAA.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+              { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+          },
+          "BBB.SZ": {
+            ...chart("BBB.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+              { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            positions: [{ trade_date: "20250102", actual_weight: 0.25 }],
+          },
+        }}
+      />,
+    );
+
+    const options = chartMock.options!;
+    expect(options.grid).toHaveLength(2);
+    expect(options.yAxis[1]).toMatchObject({ min: 0, max: 1 });
+    const series = options.series as Array<Record<string, any>>;
+    const positionSeries = series.filter((entry) => entry.stack === "positions");
+    expect(positionSeries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ logicalId: "fund:AAA.SZ", xAxisIndex: 1, yAxisIndex: 1 }),
+      expect.objectContaining({ logicalId: "fund:BBB.SZ", xAxisIndex: 1, yAxisIndex: 1 }),
+      expect.objectContaining({ logicalId: "cash", xAxisIndex: 1, yAxisIndex: 1 }),
+    ]));
+
+    const seriesById = (id: string | undefined) =>
+      (chartMock.options?.series as Array<Record<string, any>>).find((entry) => entry.id === id);
+    const priceAAA = series.find((entry) => entry.id === "fund:AAA.SZ:0");
+    const priceBBB = series.find((entry) => entry.id === "fund:BBB.SZ:0");
+    const equitySeries = series.find((entry) => entry.logicalId === "equity");
+    const positionAAA = positionSeries.find((entry) => entry.logicalId === "fund:AAA.SZ");
+    const positionBBB = positionSeries.find((entry) => entry.logicalId === "fund:BBB.SZ");
+    const cash = positionSeries.find((entry) => entry.logicalId === "cash");
+    expect(priceAAA?.emphasis).toBeUndefined();
+    expect(positionAAA?.emphasis).toBeUndefined();
+    const initialStyles = [priceAAA, positionAAA, cash, equitySeries].map((entry) => ({
+      id: entry?.id,
+      width: entry?.lineStyle.width,
+      opacity: entry?.lineStyle.opacity,
+    }));
+    expect(priceAAA?.lineStyle.color).toBe(positionAAA?.lineStyle.color);
+    expect(priceBBB?.lineStyle.color).toBe(positionBBB?.lineStyle.color);
+
+    chartMock.handlers.mouseover?.({ seriesId: priceAAA?.id });
+    expect(seriesById(priceAAA?.id)?.lineStyle.opacity).toBe(1);
+    expect(seriesById(positionAAA?.id)?.areaStyle.opacity).toBeGreaterThan(seriesById(positionBBB?.id)?.areaStyle.opacity ?? 0);
+    expect(seriesById(priceBBB?.id)?.lineStyle.opacity).toBeLessThan(1);
+    expect(seriesById(equitySeries?.id)?.lineStyle).toMatchObject({
+      width: initialStyles.find((entry) => entry.id === equitySeries?.id)?.width,
+      opacity: initialStyles.find((entry) => entry.id === equitySeries?.id)?.opacity,
+    });
+
+    chartMock.handlers.mouseover?.({ seriesId: positionBBB?.id });
+    expect(seriesById(priceBBB?.id)?.lineStyle.opacity).toBe(1);
+    expect(seriesById(positionBBB?.id)?.areaStyle.opacity).toBeGreaterThan(seriesById(positionAAA?.id)?.areaStyle.opacity ?? 0);
+    expect(seriesById(equitySeries?.id)?.lineStyle).toMatchObject({
+      width: initialStyles.find((entry) => entry.id === equitySeries?.id)?.width,
+      opacity: initialStyles.find((entry) => entry.id === equitySeries?.id)?.opacity,
+    });
+
+    chartMock.handlers.mouseover?.({ seriesId: cash?.id });
+    expect(seriesById(priceAAA?.id)?.lineStyle.opacity).toBeLessThan(1);
+    expect(seriesById(priceBBB?.id)?.lineStyle.opacity).toBeLessThan(1);
+    expect(seriesById(cash?.id)?.areaStyle.opacity).toBeGreaterThan(seriesById(positionAAA?.id)?.areaStyle.opacity ?? 0);
+    expect(seriesById(equitySeries?.id)?.lineStyle).toMatchObject({
+      width: initialStyles.find((entry) => entry.id === equitySeries?.id)?.width,
+      opacity: initialStyles.find((entry) => entry.id === equitySeries?.id)?.opacity,
+    });
+
+    const beforeEquityHover = [priceAAA, priceBBB, cash].map((entry) => ({
+      id: entry?.id,
+      width: seriesById(entry?.id)?.lineStyle.width,
+      opacity: seriesById(entry?.id)?.lineStyle.opacity,
+    }));
+    chartMock.handlers.mouseover?.({ seriesId: equitySeries?.id });
+    for (const beforeStyle of beforeEquityHover) {
+      expect(seriesById(beforeStyle.id)?.lineStyle).toMatchObject({
+        width: beforeStyle.width,
+        opacity: beforeStyle.opacity,
+      });
+    }
+    expect(seriesById(equitySeries?.id)?.lineStyle).toMatchObject({
+      width: initialStyles.find((entry) => entry.id === equitySeries?.id)?.width,
+      opacity: initialStyles.find((entry) => entry.id === equitySeries?.id)?.opacity,
+    });
+
+    chartMock.handlers.mouseout?.({ seriesId: cash?.id });
+    for (const initialStyle of initialStyles) {
+      expect(seriesById(initialStyle.id)?.lineStyle).toMatchObject({
+        width: initialStyle.width,
+        opacity: initialStyle.opacity,
+      });
+    }
+    expect(seriesById(cash?.id)?.areaStyle.opacity).toBeGreaterThan(0);
+  });
+
+  it("formats the lower position tooltip with all funds, cash, interval, and total", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ"), representative("BBB.SZ")],
+      }],
+    };
+    render(
+      <ClusterIntervalChart
+        equity={{ dates: ["20250102"], series: { strategy: [100] } }}
+        candidatePool={pool}
+        charts={{
+          "AAA.SZ": {
+            ...chart("AAA.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            name: "甲基金",
+            positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+          },
+          "BBB.SZ": {
+            ...chart("BBB.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            name: "乙基金",
+            positions: [{ trade_date: "20250102", actual_weight: 0.25 }],
+          },
+        }}
+      />,
+    );
+
+    const positionSeries = (chartMock.options?.series as Array<Record<string, any>>)
+      .filter((entry) => entry.stack === "positions");
+    const tooltip = chartMock.options?.tooltip.formatter(
+      positionSeries.map((entry) => ({
+        axisValue: "20250102",
+        marker: "•",
+        seriesId: entry.id,
+        seriesName: entry.name,
+        value: ["20250102", entry.data[0][1]],
+      })),
+    );
+
+    expect(tooltip).toContain("区间：1");
+    expect(tooltip).toContain("甲基金 (AAA.SZ)");
+    expect(tooltip).toContain("50.00%");
+    expect(tooltip).toContain("乙基金 (BBB.SZ)");
+    expect(tooltip).toContain("现金");
+    expect(tooltip).toContain("25.00%");
+    expect(tooltip).toContain("合计：100.00%");
+  });
+
+  it("marks missing lower position components without claiming a full total", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [{
+        ...candidatePool.reclusters[0],
+        week: "20250102",
+        representatives: [representative("AAA.SZ"), representative("BBB.SZ")],
+      }],
+    };
+    render(
+      <ClusterIntervalChart
+        equity={{ dates: ["20250102", "20250103"], series: { strategy: [100, 101] } }}
+        candidatePool={pool}
+        charts={{
+          "AAA.SZ": {
+            ...chart("AAA.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+              { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            positions: [{ trade_date: "20250102", actual_weight: 0.5 }],
+          },
+          "BBB.SZ": {
+            ...chart("BBB.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+              { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            positions: [{ trade_date: "20250103", actual_weight: 0.25 }],
+          },
+        }}
+      />,
+    );
+
+    const positionSeries = (chartMock.options?.series as Array<Record<string, any>>)
+      .filter((entry) => entry.stack === "positions");
+    const tooltip = chartMock.options?.tooltip.formatter(
+      positionSeries.map((entry) => ({
+        axisValue: "20250102",
+        marker: "•",
+        seriesId: entry.id,
+        seriesName: entry.name,
+        value: ["20250102", entry.data[0][1]],
+      })),
+    );
+
+    expect(tooltip).toContain("缺失");
+    expect(tooltip).not.toContain("合计：100.00%");
+  });
+
+  it("attaches cluster boundaries to the lower grid position series", () => {
+    const pool: CandidatePoolResponse = {
+      run_id: "run-1",
+      reclusters: [
+        {
+          ...candidatePool.reclusters[0],
+          week: "20250102",
+          representatives: [representative("AAA.SZ")],
+        },
+        {
+          ...candidatePool.reclusters[1],
+          week: "20250103",
+          representatives: [representative("AAA.SZ")],
+        },
+      ],
+    };
+    render(
+      <ClusterIntervalChart
+        equity={{ dates: ["20250102", "20250103"], series: { strategy: [100, 101] } }}
+        candidatePool={pool}
+        charts={{
+          "AAA.SZ": {
+            ...chart("AAA.SZ", [
+              { trade_date: "20250102", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+              { trade_date: "20250103", open: 1, high: 1, low: 1, close: 1, vol: 1 },
+            ]),
+            positions: [{ trade_date: "20250103", actual_weight: 0.5 }],
+          },
+        }}
+      />,
+    );
+
+    const lowerSeries = (chartMock.options?.series as Array<Record<string, any>>)
+      .filter((entry) => entry.stack === "positions");
+    expect(lowerSeries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        markLine: expect.objectContaining({
+          data: [expect.objectContaining({ name: expect.stringContaining("重聚类") })],
+        }),
+      }),
+    ]));
+  });
+
   it("includes fund name and before/after weights in trade marker tooltips", () => {
     const instrumentChart = {
       ...chart("159001.SZ", [
@@ -284,12 +852,42 @@ describe("buildClusterIntervalChartModel", () => {
       />,
     );
     const mark = (chartMock.options?.series as Array<Record<string, any>>)[0]?.markPoint.data[0];
+    expect((chartMock.options?.series as Array<Record<string, any>>)[0]?.markPoint.tooltip.trigger).toBe("item");
     const tooltip = (chartMock.options?.series as Array<Record<string, any>>)[0]?.markPoint.tooltip.formatter({ data: mark });
     expect(tooltip).toContain("基金名称：示例基金 (159001.SZ)");
     expect(tooltip).toContain("交易前权重：—");
     expect(tooltip).toContain("交易后权重：25.00%");
     const axisTooltip = chartMock.options?.tooltip.formatter({ data: mark });
     expect(axisTooltip).toContain("基金名称：示例基金 (159001.SZ)");
+  });
+
+  it("uses zero actual weight after a completed sell before a later buy", () => {
+    const instrumentChart = {
+      ...chart("510300.SH", [
+        { trade_date: "20171110", open: 4, high: 4, low: 4, close: 4, vol: 1 },
+        { trade_date: "20171120", open: 4, high: 4, low: 4, close: 4, vol: 1 },
+      ], [
+        { trade_date: "20171113", action: "SELL", status: "FILLED", filled: 84315, price: 4, target_weight: 0, post_holding: 0 },
+        { trade_date: "20171120", action: "BUY", status: "FILLED", filled: 82800, price: 4, target_weight: 1 / 3, post_holding: 82800 },
+      ]),
+      signals: [
+        { date: "20171103", target_weight: 1 / 3 },
+        { date: "20171117", target_weight: 1 / 3 },
+      ],
+      positions: [
+        { trade_date: "20171110", actual_weight: 1 / 3 },
+      ],
+    };
+
+    const model = buildClusterIntervalChartModel({
+      equity: null,
+      candidatePool: { run_id: "run-1", reclusters: [] },
+      charts: { "510300.SH": instrumentChart },
+    });
+
+    expect(model.markPoints).toEqual([
+      expect.objectContaining({ instrument: "510300.SH", beforeWeight: 0, afterWeight: 1 / 3, muted: false }),
+    ]);
   });
 
   it("keeps the preceding recluster semantics when visible data starts between boundaries", () => {
@@ -709,7 +1307,7 @@ describe("buildClusterIntervalChartModel", () => {
     );
 
     const options = chartMock.options;
-    const xAxisDates = options?.xAxis.data as string[];
+    const xAxisDates = options?.xAxis[0].data as string[];
     const equitySeries = (options?.series as Array<Record<string, any>>).find((series) => series.id === "equity:1");
     const areaData = equitySeries?.markArea.data as Array<Array<{ xAxis: string }>>;
     expect(areaData.flat().every(({ xAxis }) => xAxisDates.includes(xAxis))).toBe(true);
