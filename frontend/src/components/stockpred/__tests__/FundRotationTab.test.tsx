@@ -28,6 +28,18 @@ const mockState = vi.hoisted(() => ({
       required_fields: ["close"],
       frequency: "weekly",
     },
+    {
+      strategy_id: "ai_rotation_r11_persist_geom",
+      name: "持续几何动量相关性代表ETF",
+      description: "R11",
+      interface_version: "1.0",
+      implementation_hash: "r11",
+      supported_universe: ["cn_etf"],
+      warmup_trade_days: 260,
+      required_datasets: ["fund"],
+      required_fields: ["close"],
+      frequency: "weekly",
+    },
   ],
   strategyDetails: new Map([
     [
@@ -67,6 +79,27 @@ const mockState = vi.hoisted(() => ({
         config_schema: { type: "object", properties: {} },
         config_schema_version: "v1",
         config_schema_hash: "h2",
+        default_config: {},
+        parameter_descriptions: {},
+        artifact_roles: [],
+      },
+    ],
+    [
+      "ai_rotation_r11_persist_geom",
+      {
+        strategy_id: "ai_rotation_r11_persist_geom",
+        name: "持续几何动量相关性代表ETF",
+        description: "R11",
+        interface_version: "1.0",
+        implementation_hash: "r11",
+        supported_universe: ["cn_etf"],
+        warmup_trade_days: 260,
+        required_datasets: ["fund"],
+        required_fields: ["close"],
+        frequency: "weekly",
+        config_schema: { type: "object", properties: {} },
+        config_schema_version: "v1",
+        config_schema_hash: "h-r11",
         default_config: {},
         parameter_descriptions: {},
         artifact_roles: [],
@@ -122,13 +155,13 @@ describe("FundRotationTab (batch UI)", () => {
     expect(screen.getByText("初始资金")).toBeDefined();
   });
 
-  it("uses the requested default dates and representative strategy", () => {
+  it("uses the requested default dates and r11 strategy", () => {
     render(<FundRotationTab />);
 
     expect(screen.getByLabelText("开始日期")).toHaveValue("2022-08-01");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-08-01");
     expect(screen.getAllByRole("combobox")[0]).toHaveValue(
-      "correlation_representative",
+      "ai_rotation_r11_persist_geom",
     );
   });
 
@@ -151,6 +184,6 @@ describe("FundRotationTab (batch UI)", () => {
   it("renders variant editor with strategy option", () => {
     render(<FundRotationTab />);
     expect(screen.getByText("+ 添加策略变体")).toBeDefined();
-    expect(screen.getAllByText("相关性聚类代表ETF").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("持续几何动量相关性代表ETF").length).toBeGreaterThan(0);
   });
 });

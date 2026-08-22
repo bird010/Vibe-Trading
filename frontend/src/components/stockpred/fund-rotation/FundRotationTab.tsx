@@ -97,7 +97,7 @@ export function FundRotationTab() {
     if (strategies.length > 0 && variants.length === 0) {
       const strategy =
         strategies.find(
-          (item) => item.strategy_id === "correlation_representative",
+          (item) => item.strategy_id === "ai_rotation_r11_persist_geom",
         ) ?? strategies[0];
       setVariants([
         {
