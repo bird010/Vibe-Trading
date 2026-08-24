@@ -95,6 +95,72 @@ from backtest.fund_rotation.strategies.ai_rotation_r33_quality_fallback.strategy
 from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import (
     AiRotationR34StagedReentryStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r35_short_gap_reentry.strategy import (
+    AiRotationR35ShortGapReentryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r36_tail_slot_full_entry.strategy import (
+    AiRotationR36TailSlotFullEntryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r37_decelerating_full_entry.strategy import (
+    AiRotationR37DeceleratingFullEntryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r38_replacement_full_entry.strategy import (
+    AiRotationR38ReplacementFullEntryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r39_incumbent_carry.strategy import (
+    AiRotationR39IncumbentCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r40_single_name_ceiling.strategy import (
+    AiRotationR40SingleNameCeilingStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r41_breadth_gated_carry.strategy import (
+    AiRotationR41BreadthGatedCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r42_single_incumbent_half_carry.strategy import (
+    AiRotationR42SingleIncumbentHalfCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r43_multi_new_breadth_gate.strategy import (
+    AiRotationR43MultiNewBreadthGateStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r44_persistent_incumbent_carry.strategy import (
+    AiRotationR44PersistentIncumbentCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy import (
+    AiRotationR45CashFloorCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r46_cash_floor_tight import (
+    AiRotationR46CashFloorTightCarryStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r47_breadth_tight_floor import (
+    AiRotationR47BreadthTightFloorStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r48_cash_floor_very_tight import (
+    AiRotationR48CashFloorVeryTightStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r49_cash_floor_micro import (
+    AiRotationR49CashFloorMicroStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r50_cash_floor_nano import (
+    AiRotationR50CashFloorNanoStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r51_cash_floor_pico import (
+    AiRotationR51CashFloorPicoStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r52_cash_floor_femto import (
+    AiRotationR52CashFloorFemtoStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r53_cash_floor_atto import (
+    AiRotationR53CashFloorAttoStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r54_cash_floor_zepto import (
+    AiRotationR54CashFloorZeptoStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r55_cash_floor_yotta import (
+    AiRotationR55CashFloorYottaStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r56_cash_floor_ronna import (
+    AiRotationR56CashFloorRonnaStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -129,4 +195,26 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR32MarketRegimeStrategy,
         AiRotationR33QualityFallbackStrategy,
         AiRotationR34StagedReentryStrategy,
+        AiRotationR35ShortGapReentryStrategy,
+        AiRotationR36TailSlotFullEntryStrategy,
+        AiRotationR37DeceleratingFullEntryStrategy,
+        AiRotationR38ReplacementFullEntryStrategy,
+        AiRotationR39IncumbentCarryStrategy,
+        AiRotationR40SingleNameCeilingStrategy,
+        AiRotationR41BreadthGatedCarryStrategy,
+        AiRotationR42SingleIncumbentHalfCarryStrategy,
+        AiRotationR43MultiNewBreadthGateStrategy,
+        AiRotationR44PersistentIncumbentCarryStrategy,
+        AiRotationR45CashFloorCarryStrategy,
+        AiRotationR46CashFloorTightCarryStrategy,
+        AiRotationR47BreadthTightFloorStrategy,
+        AiRotationR48CashFloorVeryTightStrategy,
+        AiRotationR49CashFloorMicroStrategy,
+        AiRotationR50CashFloorNanoStrategy,
+        AiRotationR51CashFloorPicoStrategy,
+        AiRotationR52CashFloorFemtoStrategy,
+        AiRotationR53CashFloorAttoStrategy,
+        AiRotationR54CashFloorZeptoStrategy,
+        AiRotationR55CashFloorYottaStrategy,
+        AiRotationR56CashFloorRonnaStrategy,
     )

@@ -52,6 +52,18 @@ const mockState = vi.hoisted(() => ({
       required_fields: ["close"],
       frequency: "weekly",
     },
+    {
+      strategy_id: "ai_rotation_r39_incumbent_carry",
+      name: "持续目标承接释放资金",
+      description: "R39",
+      interface_version: "1.0",
+      implementation_hash: "r39",
+      supported_universe: ["cn_etf"],
+      warmup_trade_days: 260,
+      required_datasets: ["fund"],
+      required_fields: ["close"],
+      frequency: "weekly",
+    },
   ],
   strategyDetails: new Map([
     [
@@ -138,6 +150,27 @@ const mockState = vi.hoisted(() => ({
         artifact_roles: [],
       },
     ],
+    [
+      "ai_rotation_r39_incumbent_carry",
+      {
+        strategy_id: "ai_rotation_r39_incumbent_carry",
+        name: "持续目标承接释放资金",
+        description: "R39",
+        interface_version: "1.0",
+        implementation_hash: "r39",
+        supported_universe: ["cn_etf"],
+        warmup_trade_days: 260,
+        required_datasets: ["fund"],
+        required_fields: ["close"],
+        frequency: "weekly",
+        config_schema: { type: "object", properties: {} },
+        config_schema_version: "v1",
+        config_schema_hash: "h-r39",
+        default_config: {},
+        parameter_descriptions: {},
+        artifact_roles: [],
+      },
+    ],
   ]),
   catalogLoading: false,
   catalogError: null,
@@ -190,13 +223,13 @@ describe("FundRotationTab (batch UI)", () => {
     expect(screen.getByText("初始资金")).toBeDefined();
   });
 
-  it("uses the requested default dates and r34 strategy", () => {
+  it("uses the requested default dates and r39 strategy", () => {
     render(<FundRotationTab />);
 
     expect(screen.getByLabelText("开始日期")).toHaveValue("2022-08-01");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-08-01");
     expect(screen.getAllByRole("combobox")[0]).toHaveValue(
-      "ai_rotation_r34_staged_reentry",
+      "ai_rotation_r39_incumbent_carry",
     );
   });
 
