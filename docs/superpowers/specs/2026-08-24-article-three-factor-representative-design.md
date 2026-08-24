@@ -102,7 +102,9 @@ PIT Universe
 | 参数 | 值 |
 |---|---:|
 | `k` | 8 |
+| `top_n` | 1（仅 Schema/描述一致性） |
 | `correlation_lookback_weeks` | 52 |
+| `momentum_window_weeks` | 4（仅继承校验，不参与评分） |
 | `recluster_interval_weeks` | 26 |
 | `min_valid_weeks` | 20 |
 | `min_pairwise_weeks` | 20 |
@@ -113,7 +115,7 @@ PIT Universe
 | `max_cluster_share_warn/reject` | 0.50 / 0.80 |
 | `min_effective_cluster_count_warn/reject` | 4.0 / 2.5 |
 
-`top_n` 和原有四周簇动量不参与文章策略最终选择。聚类仍生成最多 8 个当前代表，文章因子从这些代表中选 Top-1。
+父策略的 `top_n` 组合选择和四周簇动量不参与文章策略最终选择。R57 将继承字段 `top_n` 固定为1，仅用于 Catalog Schema 与 pipeline 描述一致性；聚类仍生成最多8个当前代表，文章因子从这些代表中选 Top-1。
 
 ### 5.2 日频与重聚类
 
@@ -335,7 +337,221 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 
 不得使用未来数据、零填充因子、旧分数沿用或跨标的补值来挽救缺失。
 
-## 14. 实现范围
+## 14. 与现有代码的接口
+
+### 14.1 策略插件接口
+
+新策略必须实现现有 `FundRotationStrategy`/`FundRotationStrategySession` 契约，不增加新的公共接口。拟定类与方法如下：
+
+```python
+class AiRotationR57ThreeFactorRepresentativeStrategy:
+    descriptor: FundRotationStrategyDescriptor
+    config_model = ArticleThreeFactorRepresentativeConfig
+    artifact_roles: tuple[str, ...]
+
+    def describe_decision_pipeline(
+        self,
+        config: BaseModel,
+    ) -> dict[str, object]: ...
+
+    def resolve_requirements(
+        self,
+        config: BaseModel,
+    ) -> StrategyDataRequirements: ...
+
+    def create_session(
+        self,
+        initialization: StrategyInitializationContext,
+        config: BaseModel,
+    ) -> AiRotationR57ThreeFactorRepresentativeSession: ...
+```
+
+```python
+class AiRotationR57ThreeFactorRepresentativeSession(
+    CorrelationRepresentativeSession
+):
+    def scheduled_dates(
+        self,
+        calendar: tuple[str, ...],
+        simulation_start_date: str,
+        evaluation_end_date: str,
+    ) -> tuple[str, ...]: ...
+
+    def evaluate(
+        self,
+        context: StrategyDecisionContext,
+    ) -> TargetWeightDecision: ...
+
+    def finalize(self) -> StrategyDiagnostics: ...
+```
+
+接口语义：
+
+- `descriptor.id` 固定为 `ai_rotation_r57_three_factor_representative`，`interface_version="1.0"`，`supported_universe=("etf",)`，`deterministic=True`。
+- `describe_decision_pipeline()` 供现有 batch child runtime 写入策略快照；必须返回普通 `dict`，明确 Universe、相关性去重、流动性代表、三因子模型、Top-1、满仓和日频阈值规则。
+- `resolve_requirements()` 返回第6节声明的数据集、字段、`warmup_trade_days=264`、`frequency="D"`、`needs_benchmark=True`。
+- `create_session()` 只创建每个子运行独享的有状态 Session，不保存跨运行全局状态。
+- `scheduled_dates()` 使用公共 Runner 传入的评价日历，返回区间内全部交易日。
+- `evaluate()` 只通过 `StrategyDecisionContext.data_view` 读取数据，返回 `SET_TARGETS`、`HOLD_TARGETS` 或 `INVALID`；不能访问账户对象。
+- `finalize()` 返回第12节定义的策略诊断产物和逐日 decision trace。
+
+Session 继承 `CorrelationRepresentativeSession` 仅为复用 `_pool_at_signal()`、`_recluster()`、`_maintain_locks()`、聚类/门禁/代表状态和既有 artifact 容器；必须覆盖 `scheduled_dates()`、`evaluate()` 和 `finalize()`。不得调用父类 `evaluate()`，因为它同时执行周频簇动量 Top-3，会把文章信号和父策略信号混合。子类必须维护独立的 `last_processed_iso_week`/`completed_iso_weeks_since_recluster`，不能沿用父类“每次 evaluate 增加 week_index”的日频错误语义。
+
+`describe_decision_pipeline()` 虽未列入最小 `FundRotationStrategy` Protocol，但现有 `batch_child_runtime.py` 会在运行时调用并要求返回 `dict`，因此它是本项目实际必需接口，不能省略。
+
+### 14.2 配置接口
+
+新增：
+
+```python
+class ArticleThreeFactorRepresentativeConfig(
+    CorrelationRepresentativeConfig
+):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+```
+
+该配置继承第5节的现有聚类/代表字段，并新增第10节的文章字段。继承字段 `top_n` 固定为 `1`，只用于 Schema/描述一致性，实际候选 Top-1 由文章评分器产生；继承字段 `momentum_window_weeks` 保留父配置校验所需的默认 `4`，不参与 R57 排名或权重。Catalog 继续通过：
+
+```python
+config_model.model_validate(raw_params)
+config.model_dump(mode="json", exclude_none=False, exclude_unset=False)
+config_model.model_json_schema()
+```
+
+完成参数校验、默认值解析、JSON Schema 暴露和配置 hash。新策略不需要修改 Catalog 的解析方式。
+
+### 14.3 因果数据接口
+
+新策略只能调用现有 `CausalDataView`：
+
+```python
+view.returns("weekly", lookback=52)
+view.daily_bars(
+    ["open", "high", "low", "close", "vol", "amount"],
+    lookback=49,
+)
+view.fund_adjustments(lookback=49)
+view.eligible_universe()
+```
+
+代表选择继续复用现有 helper 所需的周收益、eligible universe 和 ADV 信息。因子层把 `daily_bars()` 与 `fund_adjustments()` 按 `ts_code, trade_date` 一对一合并；重复键、缺失复权或多对多合并必须 fail-closed。现有 `CausalDataView` 已支持这些调用，无需新增数据方法或放宽字段白名单。
+
+### 14.4 策略内部函数边界
+
+首版建议在新策略包内提供以下纯函数，方便手算测试和独立审查；名称和签名在实施计划中必须保持一致：
+
+```python
+def adjust_ohlc(
+    bars: pd.DataFrame,
+    adjustments: pd.DataFrame,
+    signal_date: str,
+) -> pd.DataFrame: ...
+
+def compute_bias_momentum(
+    adjusted_close: pd.Series,
+    ma_days: int = 25,
+    regression_days: int = 25,
+) -> float | None: ...
+
+def compute_slope_momentum(
+    adjusted_close: pd.Series,
+    lookback_days: int = 25,
+) -> float | None: ...
+
+def compute_efficiency_momentum(
+    adjusted_ohlc: pd.DataFrame,
+    lookback_days: int = 25,
+) -> float | None: ...
+
+def score_complete_candidates(
+    raw_scores: Mapping[str, Mapping[str, float | None]],
+    weights: Mapping[str, float],
+    minimum_candidates: int = 2,
+) -> tuple[dict[str, float], dict[str, object]]: ...
+
+def apply_rebalance_threshold(
+    ranked_scores: Mapping[str, float],
+    previous_target: str | None,
+    threshold: float = 1.5,
+) -> tuple[str | None, str, dict[str, object]]: ...
+```
+
+这些函数属于 R57 私有实现，不加入 `backtest.fund_rotation` 公共模块。函数名、参数和返回类型作为 focused tests 与策略 Session 之间的包内接口冻结；若实施发现签名无法满足现有类型契约，必须先修订规格，不能在实现中静默改名或合并。
+
+### 14.5 决策输出接口
+
+正常目标使用现有对象：
+
+```python
+TargetWeightDecision(
+    decision_id=f"{signal_date}-ai_rotation_r57_three_factor_representative",
+    signal_date=signal_date,
+    action=DecisionKind.SET_TARGETS,
+    target_weights={selected_code: 1.0},
+    cash_weight=0.0,
+    reason_code="ARTICLE_TOP1_ENTRY|ARTICLE_THRESHOLD_SWITCH|FORCED_REP_SWITCH",
+    quality_status=QualityStatus.VALID,
+    diagnostics={...},
+)
+```
+
+`HOLD_TARGETS` 必须使用空 `target_weights`，由 Runner 维持既有目标；转现金使用 `SET_TARGETS`、空目标和 `cash_weight=1.0`。所有 decision ID 在子运行内唯一，诊断只包含严格 JSON 值。
+
+## 15. 需要创建或修改的文件
+
+### 15.1 新建策略文件
+
+| 文件 | 责任 |
+|---|---|
+| `agent/backtest/fund_rotation/strategies/ai_rotation_r57_three_factor_representative/__init__.py` | 导出策略、配置及必要的公开策略包符号 |
+| `agent/backtest/fund_rotation/strategies/ai_rotation_r57_three_factor_representative/config.py` | 冻结 Pydantic 配置及交叉字段校验 |
+| `agent/backtest/fund_rotation/strategies/ai_rotation_r57_three_factor_representative/factors.py` | 复权 OHLC、三因子、完整样本 Z-Score 和确定性排名纯函数 |
+| `agent/backtest/fund_rotation/strategies/ai_rotation_r57_three_factor_representative/strategy.py` | descriptor、日频 Session、代表生命周期、阈值状态、决策与产物 |
+
+`factors.py` 单独存在是因为它有完整的数学输入/输出和大量手算测试，能在不构造 Runner/Session 的情况下审查。不得进一步拆出只有单一调用点的抽象文件。
+
+### 15.2 新建测试文件
+
+| 文件 | 责任 |
+|---|---|
+| `agent/tests/fund_rotation/test_ai_rotation_r57_three_factor_representative.py` | 第17节的因子、标准化、阈值、日频、聚类代表、因果性、缺失和守恒 focused tests |
+
+### 15.3 必须修改的既有文件
+
+除新策略及测试文件外，生产代码只需修改一个既有文件：
+
+| 文件 | 最小改动 |
+|---|---|
+| `agent/backtest/fund_rotation/strategies/registry.py` | 导入 `AiRotationR57ThreeFactorRepresentativeStrategy`，并在 `default_fund_rotation_strategies()` 显式白名单尾部追加该类 |
+
+还需修改两个既有测试文件，但只能追加新 ID：
+
+| 文件 | 最小改动 |
+|---|---|
+| `agent/tests/fund_rotation/test_strategy_catalog.py` | 在精确排序 ID 列表中追加 `ai_rotation_r57_three_factor_representative`，保留全部旧 ID 和断言 |
+| `agent/tests/fund_rotation/test_fund_rotation_catalog_api.py` | 在 API 精确策略列表中追加 R57，继续验证 descriptor、snapshot、requirements 和 frequency 来自 Catalog |
+
+### 15.4 明确不需要修改的文件
+
+| 文件/层 | 不修改原因 |
+|---|---|
+| `agent/backtest/fund_rotation/contracts.py` | 现有 Strategy、Session、Decision 和 Requirements 契约足够 |
+| `agent/backtest/fund_rotation/causal_data.py` | 已支持周收益、日 OHLC、复权和 PIT Universe |
+| `agent/backtest/fund_rotation/catalog.py` | 自动读取 registry、配置 Schema、requirements 和策略包 snapshot |
+| `agent/src/api/fund_rotation_routes.py` | 策略列表和详情由 Catalog 动态生成，无策略专用路由 |
+| `agent/src/stockpred/fund_rotation/batch_service.py` | 批次按通用 strategy binding 执行，不硬编码策略 ID |
+| `agent/src/stockpred/fund_rotation/batch_child_runtime.py` | 已支持 `describe_decision_pipeline()` 和通用 Session |
+| 公共 Runner、执行器、费用、滑点、容量、整手和估值模块 | 复用冻结执行合同，不复现 QMT 专用限价 |
+| 前端策略表单和默认策略配置 | Catalog/Schema 动态展示；本任务不把 R57 设为默认，R34 保持不变 |
+| R34、R39 和其他既有策略目录 | 新策略隔离，不能改变历史行为或 hash |
+
+若实施时发现必须修改本表列出的“不需要修改”生产文件，应停止并报告 `DESIGN_SCOPE_BLOCKED`，先更新并重新批准规格，不能把扩大范围作为顺手修复。
+
+### 15.5 研究工件不是源代码修改
+
+实施、审查和回测获单独授权后，会新增 R57 的 analysis/design/implementation/review/test/backtest/decision 工件及 append-only ledger 记录。这些是研究证据，不是运行时接口修改。前端默认、历史 run 和既有实验工件不得改写。
+
+## 16. 实现范围
 
 后续获得实施授权后，只允许：
 
@@ -347,9 +563,9 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 
 不得修改 R34、R39、`correlation_representative` 现有行为或默认值。若无法通过组合/复用现有代表选择组件实现，而必须修改公共 Runner、CausalDataView 或执行合同，应停止并报告 `DESIGN_SCOPE_BLOCKED`，不得静默扩大范围。
 
-## 15. 测试设计
+## 17. 测试设计
 
-### 15.1 因子单元测试
+### 17.1 因子单元测试
 
 - 乖离因子用49日手算数据验证完整25日均线和最近25点 OLS 斜率。
 - 斜率因子验证归一化、含截距斜率、R² 和 `×10000`。
@@ -358,7 +574,7 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 - 非正、NaN、Infinity、观测不足返回明确无效状态。
 - 构造拆分前后价格和复权因子，证明拆分不产生虚假动量。
 
-### 15.2 横截面评分测试
+### 17.2 横截面评分测试
 
 - 三项因子仅在同一完整样本集合上标准化。
 - Z-Score 使用 `ddof=0`。
@@ -367,7 +583,7 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 - 完全并列按代码升序。
 - 少于2只完整候选不产生排名。
 
-### 15.3 阈值和状态测试
+### 17.3 阈值和状态测试
 
 - 首次有效 Top-1 满仓。
 - 旧目标仍为 Top-1 时 HOLD。
@@ -378,7 +594,7 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 - 候选不足时合法旧目标 HOLD，非法旧目标转现金。
 - 不读取实际持仓、订单或成交状态。
 
-### 15.4 聚类、因果和回归测试
+### 17.4 聚类、因果和回归测试
 
 - 日频 scheduled dates 覆盖所有评价交易日。
 - 重聚类只在初次和冻结26周边界发生。
@@ -389,9 +605,9 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 - R34、R39、现有代表策略 focused tests 原样通过。
 - catalog 与 API 精确列表保留全部旧 ID，仅追加 R57。
 
-## 16. 研究验证协议
+## 18. 研究验证协议
 
-### 16.1 忠实度门禁
+### 18.1 忠实度门禁
 
 回测前必须先通过：
 
@@ -403,7 +619,7 @@ Z-Score 综合分可能为负，原文没有定义倍率阈值在负分下的特
 
 任一不通过即停止，不运行正式 paired backtest。
 
-### 16.2 Champion–Challenger
+### 18.2 Champion–Challenger
 
 实现、测试及独立审查无 P0/P1 后，将 R39 与 R57 放入同一个 `StrategyBatchRequest`：
 
@@ -432,7 +648,7 @@ R57 只有同时满足以下条件才晋级 research Champion：
 
 共享 `RESEARCH_ONLY_UNVERIFIED_UNIVERSE` 可用于研究排名，但结果继续保持 research-only。任一门禁失败即保留 R39；不得事后调整权重、阈值、窗口、负分处理或候选最小数量。
 
-## 17. 报告要求与风险
+## 19. 报告要求与风险
 
 正式结果必须同时报告：
 
@@ -455,7 +671,7 @@ R57 只有同时满足以下条件才晋级 research Champion：
 
 这些风险只能通过预注册的 paired validation 和后续 forward shadow 观察，不能通过同区间调参消除。
 
-## 18. 完成定义
+## 20. 完成定义
 
 本设计阶段完成的条件是：
 
