@@ -161,6 +161,9 @@ from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy
 from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy_r56_cash_floor_ronna import (
     AiRotationR56CashFloorRonnaStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r57_three_factor_representative.strategy import (
+    AiRotationR57ThreeFactorRepresentativeStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -217,4 +220,5 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR54CashFloorZeptoStrategy,
         AiRotationR55CashFloorYottaStrategy,
         AiRotationR56CashFloorRonnaStrategy,
+        AiRotationR57ThreeFactorRepresentativeStrategy,
     )

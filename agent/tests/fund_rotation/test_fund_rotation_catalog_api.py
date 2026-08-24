@@ -91,6 +91,7 @@ class TestStrategyList:
             "ai_rotation_r54_cash_floor_zepto",
             "ai_rotation_r55_cash_floor_yotta",
             "ai_rotation_r56_cash_floor_ronna",
+            "ai_rotation_r57_three_factor_representative",
             "correlation_all_members", "correlation_representative",
         ]
 
