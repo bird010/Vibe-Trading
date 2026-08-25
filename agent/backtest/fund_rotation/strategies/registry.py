@@ -164,6 +164,12 @@ from backtest.fund_rotation.strategies.ai_rotation_r45_cash_floor_carry.strategy
 from backtest.fund_rotation.strategies.ai_rotation_r57_three_factor_representative.strategy import (
     AiRotationR57ThreeFactorRepresentativeStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r58_r39_signal_r57.strategy import (
+    AiRotationR58R39SignalR57Strategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import (
+    AiRotationR59R39SignalR57PositiveSlopeStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -221,4 +227,6 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR55CashFloorYottaStrategy,
         AiRotationR56CashFloorRonnaStrategy,
         AiRotationR57ThreeFactorRepresentativeStrategy,
+        AiRotationR58R39SignalR57Strategy,
+        AiRotationR59R39SignalR57PositiveSlopeStrategy,
     )

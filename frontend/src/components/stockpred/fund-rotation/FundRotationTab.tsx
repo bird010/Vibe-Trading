@@ -20,7 +20,7 @@ import { fetchBatchDetail } from "./api";
 import { readFundRotationUrl } from "./deepLinks";
 
 const RESEARCH_WARNING = "RESEARCH_ONLY · 仅供研究，不构成投资建议";
-const DEFAULT_STRATEGY_ID = "ai_rotation_r39_incumbent_carry";
+const DEFAULT_STRATEGY_ID = "ai_rotation_r59_r39_signal_r57_positive_slope";
 const FALLBACK_STRATEGY_ID = "ai_rotation_r11_persist_geom";
 const TERMINAL_STAGES = new Set([
   "SUCCEEDED",

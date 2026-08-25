@@ -84,6 +84,8 @@ class TestCatalogRegistration:
             "ai_rotation_r55_cash_floor_yotta",
             "ai_rotation_r56_cash_floor_ronna",
             "ai_rotation_r57_three_factor_representative",
+            "ai_rotation_r58_r39_signal_r57",
+            "ai_rotation_r59_r39_signal_r57_positive_slope",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:
