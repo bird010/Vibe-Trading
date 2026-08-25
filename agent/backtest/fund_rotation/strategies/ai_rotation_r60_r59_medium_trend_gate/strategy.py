@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pandas as pd
 from pydantic import BaseModel
@@ -97,6 +98,16 @@ class AiRotationR60R59MediumTrendGateSession(
                 }
             )
         return rows
+
+    def evaluate(self, context: StrategyDecisionContext):
+        decision = super().evaluate(context)
+        diagnostics = dict(decision.diagnostics)
+        diagnostics["selection_filter"] = "raw_slope_25d > 0 AND adjusted_return_126d > 0 after R57 composite scoring"
+        patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", diagnostics=diagnostics)
+        if self._decision_log:
+            self._decision_log[-1]["decision_id"] = patched.decision_id
+            self._decision_log[-1]["diagnostics"] = diagnostics
+        return patched
 
     @staticmethod
     def _apply_positive_slope_filter(factor_rows, composite, score_details):

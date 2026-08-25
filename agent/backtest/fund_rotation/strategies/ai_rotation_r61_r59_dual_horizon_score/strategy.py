@@ -1,9 +1,11 @@
 """Round 61: independent short/medium cross-sectional ranking."""
 from __future__ import annotations
 import math
+import math
 from pydantic import BaseModel
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor, StrategyInitializationContext
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeStrategy, AiRotationR59R39SignalR57PositiveSlopeSession
+from backtest.fund_rotation.strategies.ai_rotation_r60_r59_medium_trend_gate.strategy import compute_adjusted_return_126d, _causal
 
 DESCRIPTOR = FundRotationStrategyDescriptor(id="ai_rotation_r61_r59_dual_horizon_score", name="R59 短中期双尺度趋势评分", description="R59 正斜率门禁下，以 50/50 短中期标准化分数排名。", interface_version="1.0", supported_universe=("etf",), deterministic=True)
 
@@ -24,7 +26,29 @@ def dual_horizon_scores(short_scores: dict[str, float], medium_returns: dict[str
     return ranked, {"short_z": short_z, "medium_z": medium_z, "complete_candidates": sorted(ranked)}
 
 class AiRotationR61R59DualHorizonScoreSession(AiRotationR59R39SignalR57PositiveSlopeSession):
-    pass
+    def _factor_rows(self, view, signal_date: str):
+        rows = super()._factor_rows(view, signal_date)
+        bars = _causal(view.daily_bars(["open", "high", "low", "close", "vol", "amount"], lookback=127), signal_date)
+        adjustments = _causal(view.fund_adjustments(lookback=127), signal_date)
+        for code, row in rows.items():
+            result = compute_adjusted_return_126d(bars[bars["ts_code"].eq(str(code))], adjustments[adjustments["ts_code"].eq(str(code))], signal_date)
+            row.update({"medium_return_126d": result["return_126d"], "medium_return_status": result["status"], "medium_return_observations": result["observations"]})
+        return rows
+
+    @staticmethod
+    def _apply_positive_slope_filter(factor_rows, composite, score_details):
+        filtered, details = AiRotationR59R39SignalR57PositiveSlopeSession._apply_positive_slope_filter(factor_rows, composite, score_details)
+        medium = {code: float(factor_rows[code]["medium_return_126d"]) for code in filtered if factor_rows[code].get("medium_return_126d") is not None and math.isfinite(float(factor_rows[code]["medium_return_126d"]))}
+        fused, components = dual_horizon_scores(filtered, medium)
+        details = dict(details)
+        details.update({"dual_horizon_score": components, "score_model": {"id": "r61_dual_horizon_trend", "version": "1", "components": {"short_r57_composite_z": 0.5, "medium_return_126d_z": 0.5}}})
+        details["complete_candidates"] = list(fused)
+        for code, value in fused.items():
+            factor_rows[code]["dual_horizon_score"] = value
+            factor_rows[code]["r57_composite_score"] = filtered[code]
+            factor_rows[code]["medium_return_zscore"] = components["medium_z"].get(code)
+            factor_rows[code]["r57_composite_zscore"] = components["short_z"].get(code)
+        return fused, details
 
 class AiRotationR61R59DualHorizonScoreStrategy(AiRotationR59R39SignalR57PositiveSlopeStrategy):
     descriptor = DESCRIPTOR

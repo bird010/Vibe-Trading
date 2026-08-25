@@ -1,8 +1,12 @@
 """Round 63: deterministic Top3 entry / Top4 exit hysteresis."""
 from __future__ import annotations
+from dataclasses import replace
 from pydantic import BaseModel
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor, StrategyInitializationContext
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeStrategy, AiRotationR59R39SignalR57PositiveSlopeSession
+from backtest.fund_rotation.strategies.correlation_representative.strategy import build_slot_weights
+from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import apply_staged_reentry
+from backtest.fund_rotation.strategies.ai_rotation_r39_incumbent_carry.strategy import apply_incumbent_carry
 
 DESCRIPTOR = FundRotationStrategyDescriptor(id="ai_rotation_r63_r59_rank_buffer", name="R59 Top3 入场 Top4 退出排名缓冲", description="R59 的唯一新增机制是 Top4 rank hysteresis。", interface_version="1.0", supported_universe=("etf",), deterministic=True)
 
@@ -16,6 +20,25 @@ def select_rank_buffer_clusters(ranked_clusters: list[int], previous_selected: s
 class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSession):
     def __init__(self, config):
         super().__init__(config); self._previous_selected_clusters: set[int] = set()
+    def evaluate(self, context):
+        previous_weights = dict(self._previous_weights)
+        decision = super().evaluate(context)
+        diagnostics = dict(decision.diagnostics)
+        rows = diagnostics.get("factor_scores", {})
+        ranked_codes = diagnostics.get("ranked_codes", [])
+        current_rank = {code: index + 1 for index, code in enumerate(ranked_codes)}
+        if diagnostics.get("reclustered"):
+            self._previous_selected_clusters.clear()
+        valid_clusters = {int(row["cluster_id"]) for code, row in rows.items() if row.get("complete_candidate") and row.get("raw_slope_25d") is not None and float(row["raw_slope_25d"]) > 0}
+        ranked_clusters = [int(rows[code]["cluster_id"]) for code in ranked_codes if code in rows]
+        selected_clusters, buffer_diag = select_rank_buffer_clusters(ranked_clusters, self._previous_selected_clusters, valid_clusters, 3, 4)
+        base, _, _, _ = build_slot_weights(selected_clusters, self._representatives, self._config.top_n)
+        staged, _, staged_codes = apply_staged_reentry(previous_weights, base)
+        final, cash, staged_codes, incumbents = apply_incumbent_carry(previous_weights, staged)
+        self._previous_selected_clusters = set(selected_clusters)
+        buffer_diag["epoch_reset"] = bool(diagnostics.get("reclustered"))
+        diagnostics["rank_buffer"] = buffer_diag
+        return replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
 class AiRotationR63R59RankBufferStrategy(AiRotationR59R39SignalR57PositiveSlopeStrategy):
     descriptor = DESCRIPTOR
     def describe_decision_pipeline(self, config: BaseModel):
