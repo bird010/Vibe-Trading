@@ -1,5 +1,5 @@
 import pytest
-from backtest.fund_rotation.strategies.ai_rotation_r64_direct_corr_diversification.strategy import select_direct_correlation_diversified
+from backtest.fund_rotation.strategies.ai_rotation_r64_direct_corr_diversification.strategy import build_r64_score_evidence, select_direct_correlation_diversified
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeSession as AiRotationR59R39SignalR57Session
 from backtest.fund_rotation.strategies.ai_rotation_r64_direct_corr_diversification.strategy import AiRotationR64DirectCorrDiversificationStrategy
 from pydantic import ValidationError
@@ -43,3 +43,8 @@ def test_r64_candidate_trace_uses_common_evidence_schema():
     parsed = CandidateDecisionRow.model_validate(candidate)
     assert parsed.score["model_id"] == "r57_three_factor"
     assert parsed.previous_weight == 0.0
+
+def test_r64_score_evidence_components_reconstruct_composite():
+    details = {"complete_candidates": ["A"], "standardization": {"bias": {"z_scores": {"A": 1.0}}, "slope": {"z_scores": {"A": -0.5}}, "efficiency": {"z_scores": {"A": 0.25}}}}
+    evidence = build_r64_score_evidence("A", {"A": 0.3 * 1.0 + 0.3 * -0.5 + 0.4 * 0.25}, details, {})
+    assert evidence["value"] == pytest.approx(0.3 * evidence["components"]["bias"] + 0.3 * evidence["components"]["slope"] + 0.4 * evidence["components"]["efficiency"])

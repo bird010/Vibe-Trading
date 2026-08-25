@@ -36,6 +36,27 @@ def select_direct_correlation_diversified(ranked_codes: list[str], correlations:
                 rejected[code] = "PAIRWISE_CORRELATION_TOO_HIGH"
     return selected, {"ranked_codes": [str(code) for code in ranked_codes], "selected_codes": selected, "max_pairwise_correlation": threshold, "selection_pairwise_correlations": dict(sorted(used.items())), "correlation_rejected_candidates": dict(sorted(rejected.items()))}
 
+def build_r64_score_evidence(code: str, composite: dict[str, float], details: dict[str, object], row: dict[str, object]) -> dict[str, object]:
+    standardization = details.get("standardization", {})
+    components = {
+        name: standardization.get(name, {}).get("z_scores", {}).get(code)
+        for name in ("bias", "slope", "efficiency")
+    }
+    return {
+        "id": "primary_score",
+        "display_label": "R57 Three-Factor Momentum",
+        "model_label": "R57 Three-Factor Momentum",
+        "value": composite.get(code),
+        "eligible": code in details.get("complete_candidates", []),
+        "direction": "HIGHER_BETTER",
+        "frequency": "WEEKLY",
+        "scope": "INSTRUMENT",
+        "subject_id": code,
+        "model_id": "r57_three_factor",
+        "model_version": "1",
+        "components": components,
+    }
+
 class AiRotationR64DirectCorrelationSession:
     """Independent session: no clustering, representative locks, or cluster gates."""
     def __init__(self, config):
@@ -84,7 +105,8 @@ class AiRotationR64DirectCorrelationSession:
         complete = set(details.get("complete_candidates", []))
         rank_by_code = {code: rank for rank, code in enumerate(ranked, 1)}
         for code, row in rows.items():
-            row.update({"complete_candidate": code in complete, "composite_score": composite.get(code), "rank": rank_by_code.get(code), "top_3": code in selected, "base_slot_weight": float(base.get(code, 0.0)), "staged": code in staged_codes, "incumbent_carry": code in incumbents, "final_weight": float(final.get(code, 0.0)), "cash_weight": float(cash)})
+            evidence = build_r64_score_evidence(code, composite, details, row)
+            row.update({"complete_candidate": code in complete, "composite_score": composite.get(code), "bias_zscore": evidence["components"]["bias"], "slope_zscore": evidence["components"]["slope"], "efficiency_zscore": evidence["components"]["efficiency"], "rank": rank_by_code.get(code), "top_3": code in selected, "base_slot_weight": float(base.get(code, 0.0)), "staged": code in staged_codes, "incumbent_carry": code in incumbents, "final_weight": float(final.get(code, 0.0)), "cash_weight": float(cash)})
         reason = "INSUFFICIENT_COMPLETE_CANDIDATES" if len(details.get("complete_candidates", [])) < 2 else ""
         reason = _append_reason(reason, "STAGED_REENTRY" if staged_codes else "")
         reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
@@ -94,7 +116,7 @@ class AiRotationR64DirectCorrelationSession:
         self._factor_scores.append({"signal_date": signal_date, "rows": rows, "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag})
         self._correlations.append({"signal_date": signal_date, **corr_diag})
         self._decisions.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash, "reason_code": reason, "diagnostics": diagnostics})
-        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "candidates": [{"ts_code": code, "stages": {"universe_eligible": True, "ranking_eligible": code in complete, "rank": rank_by_code.get(code), "portfolio_selected": code in selected}, "primary_metric": {"id": "r57_three_factor", "label": "R57 Three-Factor Momentum", "value": composite.get(code)}, "score": {"id": "primary_score", "display_label": "R57 Three-Factor Momentum", "model_label": "R57 Three-Factor Momentum", "value": composite.get(code), "eligible": code in complete, "direction": "HIGHER_BETTER", "frequency": "WEEKLY", "scope": "INSTRUMENT", "subject_id": code, "model_id": "r57_three_factor", "model_version": "1", "components": {"bias": rows[code].get("bias"), "slope": rows[code].get("slope"), "efficiency": rows[code].get("efficiency")}}, "previous_weight": float(previous_weights.get(code, 0.0)), "before_weight": float(previous_weights.get(code, 0.0)), "target_weight": float(final.get(code, 0.0))} for code in sorted(rows)], "target_weights": dict(final), "cash_weight": cash})
+        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "candidates": [{"ts_code": code, "stages": {"universe_eligible": True, "ranking_eligible": code in complete, "rank": rank_by_code.get(code), "portfolio_selected": code in selected}, "primary_metric": {"id": "r57_three_factor", "label": "R57 Three-Factor Momentum", "value": composite.get(code)}, "score": build_r64_score_evidence(code, composite, details, rows[code]), "previous_weight": float(previous_weights.get(code, 0.0)), "before_weight": float(previous_weights.get(code, 0.0)), "target_weight": float(final.get(code, 0.0))} for code in sorted(rows)], "target_weights": dict(final), "cash_weight": cash})
         self._previous_weights = dict(final)
         return decision
 
