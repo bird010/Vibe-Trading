@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor, StrategyInitializationContext
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeStrategy, AiRotationR59R39SignalR57PositiveSlopeSession
 from backtest.fund_rotation.strategies.correlation_representative.strategy import build_slot_weights
-from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import apply_staged_reentry
+from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import _append_reason, apply_staged_reentry
 from backtest.fund_rotation.strategies.ai_rotation_r39_incumbent_carry.strategy import apply_incumbent_carry
 
 DESCRIPTOR = FundRotationStrategyDescriptor(id="ai_rotation_r63_r59_rank_buffer", name="R59 Top3 入场 Top4 退出排名缓冲", description="R59 的唯一新增机制是 Top4 rank hysteresis。", interface_version="1.0", supported_universe=("etf",), deterministic=True)
@@ -40,20 +40,28 @@ class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSe
         buffer_diag["selected_clusters"] = selected_clusters
         diagnostics["rank_buffer"] = buffer_diag
         patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
-        self._patch_artifacts(patched)
+        self._patch_artifacts(patched, base, staged_codes, incumbents)
         self._previous_weights = dict(final)
         return patched
 
-    def _patch_artifacts(self, decision):
+    def _patch_artifacts(self, decision, base, staged_codes, incumbents):
         rows = decision.diagnostics.get("factor_scores", {})
         selected = set(decision.diagnostics.get("rank_buffer", {}).get("selected_clusters", []))
         for row in rows.values():
             code = row.get("ts_code")
             row["top_3"] = int(row.get("cluster_id", -1)) in selected
+            row["base_slot_weight"] = float(base.get(code, 0.0))
+            row["staged"] = code in staged_codes
+            row["incumbent_carry"] = code in incumbents
             row["final_weight"] = float(decision.target_weights.get(code, 0.0))
             row["cash_weight"] = float(decision.cash_weight)
         if self._decision_log:
-            self._decision_log[-1].update({"decision_id": decision.decision_id, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": dict(decision.diagnostics)})
+            diagnostics = dict(decision.diagnostics)
+            diagnostics["staged_reentry_codes"] = sorted(staged_codes)
+            diagnostics["incumbent_carry_codes"] = sorted(incumbents)
+            reason = _append_reason("", "STAGED_REENTRY" if staged_codes else "")
+            reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
+            self._decision_log[-1].update({"decision_id": decision.decision_id, "reason_code": reason, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": diagnostics})
         if self._decision_trace:
             for candidate in self._decision_trace[-1].get("candidates", []):
                 code = candidate.get("ts_code")

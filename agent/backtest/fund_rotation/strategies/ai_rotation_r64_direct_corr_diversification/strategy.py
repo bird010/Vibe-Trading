@@ -43,6 +43,10 @@ class AiRotationR64DirectCorrelationSession:
         self._previous_weights: dict[str, float] = {}
         self._representatives: dict[int, str] = {}
         self._factor_scores: list[dict[str, object]] = []
+        self._decisions: list[dict[str, object]] = []
+        self._correlations: list[dict[str, object]] = []
+        self._exclusions: list[object] = []
+        self._decision_trace: list[dict[str, object]] = []
 
     def scheduled_dates(self, calendar, simulation_start_date, evaluation_end_date):
         return tuple(date for date in iso_week_endings(calendar) if simulation_start_date <= date <= evaluation_end_date)
@@ -50,14 +54,19 @@ class AiRotationR64DirectCorrelationSession:
     def evaluate(self, context: StrategyDecisionContext) -> TargetWeightDecision:
         signal_date, view = context.signal_date, context.data_view
         pool = ensure_instrument_pool(view, lookback_trade_days=(self._config.correlation_lookback_weeks + 1) * 5 - 1)
-        historical, _ = check_historical_eligibility(pool, signal_date)
-        eligible, _ = signal_date_eligible(view, historical, signal_date)
+        historical, historical_exclusions = check_historical_eligibility(pool, signal_date)
+        eligible, market_exclusions = signal_date_eligible(view, historical, signal_date)
+        self._exclusions.extend(historical_exclusions)
+        self._exclusions.extend(market_exclusions)
         self._representatives = {index + 1: code for index, code in enumerate(sorted(eligible))}
         rows = AiRotationR58R39SignalR57Session._factor_rows(self, view, signal_date)
         raw = {code: {name: row.get(name) for name in ("bias", "slope", "efficiency")} for code, row in rows.items()}
         from backtest.fund_rotation.strategies.ai_rotation_r57_three_factor_representative.factors import score_complete_candidates
         composite, details = score_complete_candidates(raw, {"bias": 0.3, "slope": 0.3, "efficiency": 0.4}, 2)
         composite, details = AiRotationR59R39SignalR57PositiveSlopeSession._apply_positive_slope_filter(rows, composite, details)
+        for row in rows.values():
+            row.pop("cluster_id", None)
+            row.pop("is_representative", None)
         ranked = list(composite)
         returns = view.returns("weekly", self._config.correlation_lookback_weeks)
         correlations, observations = {}, {}
@@ -71,9 +80,16 @@ class AiRotationR64DirectCorrelationSession:
         base = {code: 1.0 / self._config.top_n for code in selected}
         staged, _, staged_codes = apply_staged_reentry(self._previous_weights, base)
         final, cash, staged_codes, incumbents = apply_incumbent_carry(self._previous_weights, staged)
-        diagnostics = {"factor_scores": rows, "score_details": details, "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag, "staged_reentry_codes": sorted(staged_codes), "incumbent_carry_codes": sorted(incumbents), "selection_filter": "R57 positive slope then pairwise correlation < 0.80", "cluster_artifacts": None}
-        decision = TargetWeightDecision(f"{signal_date}-{DESCRIPTOR.id}", signal_date, DecisionKind.SET_TARGETS, final, cash, _append_reason("", "STAGED_REENTRY" if staged_codes else ""), QualityStatus.VALID, diagnostics)
+        reason = "INSUFFICIENT_COMPLETE_CANDIDATES" if len(details.get("complete_candidates", [])) < 2 else ""
+        reason = _append_reason(reason, "STAGED_REENTRY" if staged_codes else "")
+        reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
+        quality = QualityStatus.DEGRADED if reason.startswith("INSUFFICIENT_COMPLETE_CANDIDATES") else QualityStatus.VALID
+        diagnostics = {"factor_scores": rows, "score_details": details, "complete_candidate_count": len(details.get("complete_candidates", [])), "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag, "staged_reentry_codes": sorted(staged_codes), "incumbent_carry_codes": sorted(incumbents), "selection_filter": "R57 positive slope then pairwise correlation < 0.80"}
+        decision = TargetWeightDecision(f"{signal_date}-{DESCRIPTOR.id}", signal_date, DecisionKind.SET_TARGETS, final, cash, reason, quality, diagnostics)
         self._factor_scores.append({"signal_date": signal_date, "rows": rows, "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag})
+        self._correlations.append({"signal_date": signal_date, **corr_diag})
+        self._decisions.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash, "reason_code": reason, "diagnostics": diagnostics})
+        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash})
         self._previous_weights = dict(final)
         return decision
 
@@ -81,8 +97,11 @@ class AiRotationR64DirectCorrelationSession:
         return StrategyDiagnostics(
             artifacts=(
                 StrategyArtifact(role="factor_scores", media_type="application/json", payload=self._factor_scores),
-                StrategyArtifact(role="decisions", media_type="application/json", payload=[item for item in self._factor_scores]),
+                StrategyArtifact(role="correlations", media_type="application/json", payload=self._correlations),
+                StrategyArtifact(role="exclusions", media_type="application/json", payload=self._exclusions),
+                StrategyArtifact(role="decisions", media_type="application/json", payload=self._decisions),
             )
+            , decision_trace=tuple(self._decision_trace)
         )
 class AiRotationR64DirectCorrDiversificationStrategy:
     descriptor = DESCRIPTOR; config_model = DirectCorrelationDiversificationConfig

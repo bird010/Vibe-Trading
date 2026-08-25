@@ -4,6 +4,7 @@ import math
 from dataclasses import replace
 from pydantic import BaseModel
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor, StrategyInitializationContext
+from backtest.fund_rotation.scoring.contracts import StrategyScore
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeStrategy, AiRotationR59R39SignalR57PositiveSlopeSession
 from backtest.fund_rotation.strategies.ai_rotation_r60_r59_medium_trend_gate.strategy import compute_adjusted_return_126d, _causal
 
@@ -26,6 +27,16 @@ def dual_horizon_scores(short_scores: dict[str, float], medium_returns: dict[str
     return ranked, {"short_z": short_z, "medium_z": medium_z, "complete_candidates": sorted(ranked)}
 
 class AiRotationR61R59DualHorizonScoreSession(AiRotationR59R39SignalR57PositiveSlopeSession):
+    @staticmethod
+    def _scores_by_cluster(factor_rows, composite):
+        scores = {}
+        for code, row in factor_rows.items():
+            value = composite.get(code)
+            if value is None:
+                continue
+            scores[int(row["cluster_id"])] = StrategyScore(value=float(value), eligible=True, subject_id=code, display_label="R61短中期双尺度评分", model_label="R61 Dual-Horizon Trend", frequency="WEEKLY", scope="CLUSTER", model_id="r61_dual_horizon_trend", model_version="1", components={"short_r57_composite_z": row.get("r57_composite_zscore"), "medium_return_126d_z": row.get("medium_return_zscore")})
+        return scores
+
     def evaluate(self, context):
         decision = super().evaluate(context)
         diagnostics = dict(decision.diagnostics)

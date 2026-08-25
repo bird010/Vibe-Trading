@@ -41,7 +41,11 @@ class AiRotationR62R59TrueInvvolSession(AiRotationR59R39SignalR57PositiveSlopeSe
         factor_rows = decision.diagnostics.get("factor_scores", {})
         selected = [code for code, row in factor_rows.items() if row.get("top_3")]
         if not selected:
-            return decision
+            diagnostics = dict(decision.diagnostics)
+            diagnostics["portfolio_weighting"] = {"mode": "NO_SELECTED_ASSETS", "fallback_reason": "no_selected_assets"}
+            patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", diagnostics=diagnostics)
+            self._patch_artifacts(patched)
+            return patched
         closes = context.data_view.adjusted_closes(lookback=61)
         volatility = {}
         for code in selected:
@@ -57,7 +61,7 @@ class AiRotationR62R59TrueInvvolSession(AiRotationR59R39SignalR57PositiveSlopeSe
         diagnostics = dict(decision.diagnostics)
         diagnostics["portfolio_weighting"] = weighting
         diagnostics["portfolio_weighting"]["selected_codes"] = selected
-        diagnostics["portfolio_weighting"]["pre_cap_weights"] = base
+        diagnostics["portfolio_weighting"]["base_target_weights"] = base
         diagnostics["portfolio_weighting"]["post_cap_weights"] = final
         patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
         self._patch_artifacts(patched)
