@@ -1,7 +1,7 @@
 """Round 61: independent short/medium cross-sectional ranking."""
 from __future__ import annotations
 import math
-import math
+from dataclasses import replace
 from pydantic import BaseModel
 from backtest.fund_rotation.contracts import FundRotationStrategyDescriptor, StrategyInitializationContext
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeStrategy, AiRotationR59R39SignalR57PositiveSlopeSession
@@ -26,6 +26,18 @@ def dual_horizon_scores(short_scores: dict[str, float], medium_returns: dict[str
     return ranked, {"short_z": short_z, "medium_z": medium_z, "complete_candidates": sorted(ranked)}
 
 class AiRotationR61R59DualHorizonScoreSession(AiRotationR59R39SignalR57PositiveSlopeSession):
+    def evaluate(self, context):
+        decision = super().evaluate(context)
+        diagnostics = dict(decision.diagnostics)
+        diagnostics["score_model"] = {"id": "r61_dual_horizon_trend", "version": "1", "direction": "HIGHER_BETTER", "components": {"short_r57_composite_z": 0.5, "medium_return_126d_z": 0.5}}
+        patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", diagnostics=diagnostics)
+        if self._decision_log:
+            self._decision_log[-1]["decision_id"] = patched.decision_id
+            self._decision_log[-1]["diagnostics"] = diagnostics
+        if self._decision_trace:
+            self._decision_trace[-1]["score_model"] = diagnostics["score_model"]
+        return patched
+
     def _factor_rows(self, view, signal_date: str):
         rows = super()._factor_rows(view, signal_date)
         bars = _causal(view.daily_bars(["open", "high", "low", "close", "vol", "amount"], lookback=127), signal_date)

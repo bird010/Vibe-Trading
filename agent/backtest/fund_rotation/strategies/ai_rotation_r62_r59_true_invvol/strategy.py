@@ -60,8 +60,27 @@ class AiRotationR62R59TrueInvvolSession(AiRotationR59R39SignalR57PositiveSlopeSe
         diagnostics["portfolio_weighting"]["pre_cap_weights"] = base
         diagnostics["portfolio_weighting"]["post_cap_weights"] = final
         patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
+        self._patch_artifacts(patched)
         self._previous_weights = dict(final)
         return patched
+
+    def _patch_artifacts(self, decision):
+        rows = decision.diagnostics.get("factor_scores", {})
+        selected = set(decision.diagnostics.get("portfolio_weighting", {}).get("selected_codes", []))
+        base = decision.diagnostics.get("portfolio_weighting", {}).get("pre_cap_weights", {})
+        for code, row in rows.items():
+            row["base_slot_weight"] = float(base.get(code, 0.0))
+            row["staged"] = code in set(decision.diagnostics.get("staged_reentry_codes", []))
+            row["incumbent_carry"] = code in set(decision.diagnostics.get("incumbent_carry_codes", []))
+            row["final_weight"] = float(decision.target_weights.get(code, 0.0))
+            row["cash_weight"] = float(decision.cash_weight)
+        if self._decision_log:
+            self._decision_log[-1].update({"decision_id": decision.decision_id, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": dict(decision.diagnostics)})
+        if self._decision_trace:
+            for candidate in self._decision_trace[-1].get("candidates", []):
+                code = candidate.get("ts_code")
+                candidate["target_weight"] = float(decision.target_weights.get(code, 0.0))
+                candidate.setdefault("stages", {})["portfolio_selected"] = code in selected
 class AiRotationR62R59TrueInvvolStrategy(AiRotationR59R39SignalR57PositiveSlopeStrategy):
     descriptor = DESCRIPTOR
     def describe_decision_pipeline(self, config: BaseModel):

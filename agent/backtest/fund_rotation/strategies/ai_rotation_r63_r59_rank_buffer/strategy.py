@@ -37,8 +37,28 @@ class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSe
         final, cash, staged_codes, incumbents = apply_incumbent_carry(previous_weights, staged)
         self._previous_selected_clusters = set(selected_clusters)
         buffer_diag["epoch_reset"] = bool(diagnostics.get("reclustered"))
+        buffer_diag["selected_clusters"] = selected_clusters
         diagnostics["rank_buffer"] = buffer_diag
-        return replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
+        patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
+        self._patch_artifacts(patched)
+        self._previous_weights = dict(final)
+        return patched
+
+    def _patch_artifacts(self, decision):
+        rows = decision.diagnostics.get("factor_scores", {})
+        selected = set(decision.diagnostics.get("rank_buffer", {}).get("selected_clusters", []))
+        for row in rows.values():
+            code = row.get("ts_code")
+            row["top_3"] = int(row.get("cluster_id", -1)) in selected
+            row["final_weight"] = float(decision.target_weights.get(code, 0.0))
+            row["cash_weight"] = float(decision.cash_weight)
+        if self._decision_log:
+            self._decision_log[-1].update({"decision_id": decision.decision_id, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": dict(decision.diagnostics)})
+        if self._decision_trace:
+            for candidate in self._decision_trace[-1].get("candidates", []):
+                code = candidate.get("ts_code")
+                candidate["target_weight"] = float(decision.target_weights.get(code, 0.0))
+                candidate.setdefault("stages", {})["portfolio_selected"] = code in decision.target_weights
 class AiRotationR63R59RankBufferStrategy(AiRotationR59R39SignalR57PositiveSlopeStrategy):
     descriptor = DESCRIPTOR
     def describe_decision_pipeline(self, config: BaseModel):
