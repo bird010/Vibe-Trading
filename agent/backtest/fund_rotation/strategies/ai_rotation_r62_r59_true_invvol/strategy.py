@@ -62,7 +62,7 @@ class AiRotationR62R59TrueInvvolSession(AiRotationR59R39SignalR57PositiveSlopeSe
         diagnostics["portfolio_weighting"] = weighting
         diagnostics["portfolio_weighting"]["selected_codes"] = selected
         diagnostics["portfolio_weighting"]["base_target_weights"] = base
-        diagnostics["portfolio_weighting"]["post_cap_weights"] = final
+        diagnostics["portfolio_weighting"]["final_target_weights"] = final
         patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
         self._patch_artifacts(patched)
         self._previous_weights = dict(final)
@@ -71,7 +71,7 @@ class AiRotationR62R59TrueInvvolSession(AiRotationR59R39SignalR57PositiveSlopeSe
     def _patch_artifacts(self, decision):
         rows = decision.diagnostics.get("factor_scores", {})
         selected = set(decision.diagnostics.get("portfolio_weighting", {}).get("selected_codes", []))
-        base = decision.diagnostics.get("portfolio_weighting", {}).get("pre_cap_weights", {})
+        base = decision.diagnostics.get("portfolio_weighting", {}).get("base_target_weights", {})
         for code, row in rows.items():
             row["base_slot_weight"] = float(base.get(code, 0.0))
             row["staged"] = code in set(decision.diagnostics.get("staged_reentry_codes", []))

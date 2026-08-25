@@ -80,6 +80,10 @@ class AiRotationR64DirectCorrelationSession:
         base = {code: 1.0 / self._config.top_n for code in selected}
         staged, _, staged_codes = apply_staged_reentry(self._previous_weights, base)
         final, cash, staged_codes, incumbents = apply_incumbent_carry(self._previous_weights, staged)
+        complete = set(details.get("complete_candidates", []))
+        rank_by_code = {code: rank for rank, code in enumerate(ranked, 1)}
+        for code, row in rows.items():
+            row.update({"complete_candidate": code in complete, "composite_score": composite.get(code), "rank": rank_by_code.get(code), "top_3": code in selected, "base_slot_weight": float(base.get(code, 0.0)), "staged": code in staged_codes, "incumbent_carry": code in incumbents, "final_weight": float(final.get(code, 0.0)), "cash_weight": float(cash)})
         reason = "INSUFFICIENT_COMPLETE_CANDIDATES" if len(details.get("complete_candidates", [])) < 2 else ""
         reason = _append_reason(reason, "STAGED_REENTRY" if staged_codes else "")
         reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
@@ -89,7 +93,7 @@ class AiRotationR64DirectCorrelationSession:
         self._factor_scores.append({"signal_date": signal_date, "rows": rows, "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag})
         self._correlations.append({"signal_date": signal_date, **corr_diag})
         self._decisions.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash, "reason_code": reason, "diagnostics": diagnostics})
-        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash})
+        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "candidates": [{"ts_code": code, "stages": {"universe_eligible": True, "ranking_eligible": code in complete, "rank": rank_by_code.get(code), "portfolio_selected": code in selected}, "target_weight": float(final.get(code, 0.0)), "score": composite.get(code)} for code in sorted(rows)], "target_weights": dict(final), "cash_weight": cash})
         self._previous_weights = dict(final)
         return decision
 

@@ -38,8 +38,14 @@ class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSe
         self._previous_selected_clusters = set(selected_clusters)
         buffer_diag["epoch_reset"] = bool(diagnostics.get("reclustered"))
         buffer_diag["selected_clusters"] = selected_clusters
+        diagnostics["staged_reentry_codes"] = sorted(staged_codes)
+        diagnostics["incumbent_carry_codes"] = sorted(incumbents)
+        base_reasons = [part for part in decision.reason_code.split("|") if part not in {"STAGED_REENTRY", "INCUMBENT_CARRY"}]
+        reason = "|".join(part for part in base_reasons if part)
+        reason = _append_reason(reason, "STAGED_REENTRY" if staged_codes else "")
+        reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
         diagnostics["rank_buffer"] = buffer_diag
-        patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, diagnostics=diagnostics)
+        patched = replace(decision, decision_id=f"{context.signal_date}-{DESCRIPTOR.id}", target_weights=final, cash_weight=cash, reason_code=reason, diagnostics=diagnostics)
         self._patch_artifacts(patched, base, staged_codes, incumbents)
         self._previous_weights = dict(final)
         return patched
@@ -56,12 +62,7 @@ class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSe
             row["final_weight"] = float(decision.target_weights.get(code, 0.0))
             row["cash_weight"] = float(decision.cash_weight)
         if self._decision_log:
-            diagnostics = dict(decision.diagnostics)
-            diagnostics["staged_reentry_codes"] = sorted(staged_codes)
-            diagnostics["incumbent_carry_codes"] = sorted(incumbents)
-            reason = _append_reason("", "STAGED_REENTRY" if staged_codes else "")
-            reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
-            self._decision_log[-1].update({"decision_id": decision.decision_id, "reason_code": reason, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": diagnostics})
+            self._decision_log[-1].update({"decision_id": decision.decision_id, "reason_code": decision.reason_code, "target_weights": dict(decision.target_weights), "cash_weight": decision.cash_weight, "diagnostics": dict(decision.diagnostics)})
         if self._decision_trace:
             for candidate in self._decision_trace[-1].get("candidates", []):
                 code = candidate.get("ts_code")
