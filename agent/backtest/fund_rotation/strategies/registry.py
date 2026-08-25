@@ -170,6 +170,21 @@ from backtest.fund_rotation.strategies.ai_rotation_r58_r39_signal_r57.strategy i
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import (
     AiRotationR59R39SignalR57PositiveSlopeStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r60_r59_medium_trend_gate.strategy import (
+    AiRotationR60R59MediumTrendGateStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r61_r59_dual_horizon_score.strategy import (
+    AiRotationR61R59DualHorizonScoreStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r62_r59_true_invvol.strategy import (
+    AiRotationR62R59TrueInvvolStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r63_r59_rank_buffer.strategy import (
+    AiRotationR63R59RankBufferStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r64_direct_corr_diversification.strategy import (
+    AiRotationR64DirectCorrDiversificationStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -229,4 +244,9 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR57ThreeFactorRepresentativeStrategy,
         AiRotationR58R39SignalR57Strategy,
         AiRotationR59R39SignalR57PositiveSlopeStrategy,
+        AiRotationR60R59MediumTrendGateStrategy,
+        AiRotationR61R59DualHorizonScoreStrategy,
+        AiRotationR62R59TrueInvvolStrategy,
+        AiRotationR63R59RankBufferStrategy,
+        AiRotationR64DirectCorrDiversificationStrategy,
     )
