@@ -53,6 +53,7 @@ class AiRotationR64DirectCorrelationSession:
 
     def evaluate(self, context: StrategyDecisionContext) -> TargetWeightDecision:
         signal_date, view = context.signal_date, context.data_view
+        previous_weights = dict(self._previous_weights)
         pool = ensure_instrument_pool(view, lookback_trade_days=(self._config.correlation_lookback_weeks + 1) * 5 - 1)
         historical, historical_exclusions = check_historical_eligibility(pool, signal_date)
         eligible, market_exclusions = signal_date_eligible(view, historical, signal_date)
@@ -93,7 +94,7 @@ class AiRotationR64DirectCorrelationSession:
         self._factor_scores.append({"signal_date": signal_date, "rows": rows, "ranked_codes": ranked, "selected_codes": selected, "correlation": corr_diag})
         self._correlations.append({"signal_date": signal_date, **corr_diag})
         self._decisions.append({"decision_id": decision.decision_id, "signal_date": signal_date, "target_weights": dict(final), "cash_weight": cash, "reason_code": reason, "diagnostics": diagnostics})
-        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "candidates": [{"ts_code": code, "stages": {"universe_eligible": True, "ranking_eligible": code in complete, "rank": rank_by_code.get(code), "portfolio_selected": code in selected}, "target_weight": float(final.get(code, 0.0)), "score": composite.get(code)} for code in sorted(rows)], "target_weights": dict(final), "cash_weight": cash})
+        self._decision_trace.append({"decision_id": decision.decision_id, "signal_date": signal_date, "candidates": [{"ts_code": code, "stages": {"universe_eligible": True, "ranking_eligible": code in complete, "rank": rank_by_code.get(code), "portfolio_selected": code in selected}, "primary_metric": {"id": "r57_three_factor", "label": "R57 Three-Factor Momentum", "value": composite.get(code)}, "score": {"id": "primary_score", "display_label": "R57 Three-Factor Momentum", "model_label": "R57 Three-Factor Momentum", "value": composite.get(code), "eligible": code in complete, "direction": "HIGHER_BETTER", "frequency": "WEEKLY", "scope": "INSTRUMENT", "subject_id": code, "model_id": "r57_three_factor", "model_version": "1", "components": {"bias": rows[code].get("bias"), "slope": rows[code].get("slope"), "efficiency": rows[code].get("efficiency")}}, "previous_weight": float(previous_weights.get(code, 0.0)), "before_weight": float(previous_weights.get(code, 0.0)), "target_weight": float(final.get(code, 0.0))} for code in sorted(rows)], "target_weights": dict(final), "cash_weight": cash})
         self._previous_weights = dict(final)
         return decision
 
