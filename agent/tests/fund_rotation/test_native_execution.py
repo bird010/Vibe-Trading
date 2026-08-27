@@ -772,6 +772,46 @@ def test_native_corporate_action_replaces_pending_buy_without_position():
         value for key, value in parent_states.items() if key != "P-1"
     )
     assert replacement.original_requested_quantity == 2_000
+    pending_order = order_mgr.get_pending_orders()[0]
+    assert pending_order.requested == replacement.original_requested_quantity
+    assert pending_order.remaining == replacement.remaining_quantity
+
+
+def test_native_corporate_action_retires_buy_residual_below_lot_without_replacement():
+    order_mgr = OrderManager()
+    order_mgr.create_orders({"A": 100}, event_id="D-1")
+    parent = _ParentState(
+        order_id="P-1",
+        decision_id="D-1",
+        signal_week="20240101",
+        ts_code="A",
+        direction="BUY",
+        created_date="20240102",
+        original_requested_quantity=100,
+        quantity_basis=1.0,
+        lot_size=100,
+    )
+    parent_states = {"P-1": parent}
+    active_parent_by_code = {"A": "P-1"}
+
+    _apply_corporate_actions(
+        trade_date="20240103",
+        executor=PortfolioExecutor(100_000.0, ChinaETFExecutionRules()),
+        order_mgr=order_mgr,
+        bar_lookup={},
+        adj_lookup={("20240103", "A"): 0.5},
+        position_adj_factor={"A": 1.0},
+        parent_states=parent_states,
+        active_parent_by_code=active_parent_by_code,
+        replacement_counts={},
+        corporate_actions=[],
+        trade_events=[],
+    )
+
+    assert parent.status is ParentOrderStatus.CANCELED
+    assert list(parent_states) == ["P-1"]
+    assert active_parent_by_code == {}
+    assert order_mgr.get_pending_orders() == []
 
 
 def test_native_engine_fails_closed_on_short_target_even_when_rule_allows_short():

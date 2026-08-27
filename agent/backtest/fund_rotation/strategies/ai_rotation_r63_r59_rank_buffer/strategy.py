@@ -15,7 +15,7 @@ def select_rank_buffer_clusters(ranked_clusters: list[int], previous_selected: s
     retained = sorted((cluster for cluster in previous_selected if cluster in valid_clusters and current_rank.get(cluster, exit_rank + 1) <= exit_rank), key=lambda cluster: (current_rank[cluster], cluster))
     fillers = [cluster for cluster in ranked_clusters if cluster not in retained]
     selected = (retained + fillers)[:top_n]
-    return selected, {"entry_rank": top_n, "exit_rank": exit_rank, "previous_selected_clusters": sorted(previous_selected), "retained_clusters": retained, "current_rank_by_cluster": current_rank, "forced_exit_clusters": sorted(previous_selected - set(retained))}
+    return selected, {"entry_rank": top_n, "exit_rank": exit_rank, "previous_selected_clusters": sorted(previous_selected), "retained_clusters": retained, "current_rank_by_cluster": {str(cluster): rank for cluster, rank in current_rank.items()}, "forced_exit_clusters": sorted(previous_selected - set(retained))}
 
 class AiRotationR63R59RankBufferSession(AiRotationR59R39SignalR57PositiveSlopeSession):
     def __init__(self, config):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from backtest.fund_rotation.catalog import (
@@ -30,6 +32,14 @@ def _catalog() -> FundRotationStrategyCatalog:
 
 
 class TestCatalogRegistration:
+    def test_ai_rotation_names_start_with_their_strategy_code(self):
+        catalog = _catalog()
+
+        for entry in catalog.list():
+            match = re.match(r"^ai_rotation_(r\d+)_", entry.strategy_id)
+            if match:
+                assert entry.name.startswith(match.group(1).upper())
+
     def test_list_sorted_and_immutable(self):
         catalog = _catalog()
         entries = catalog.list()
@@ -91,6 +101,7 @@ class TestCatalogRegistration:
             "ai_rotation_r62_r59_true_invvol",
             "ai_rotation_r63_r59_rank_buffer",
             "ai_rotation_r64_direct_corr_diversification",
+            "ai_rotation_r65_r64_direct_corr_rank_buffer",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:

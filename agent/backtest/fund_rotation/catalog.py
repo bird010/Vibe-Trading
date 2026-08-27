@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Callable, Mapping, Sequence
 
 from pydantic import BaseModel, ValidationError
@@ -27,6 +28,16 @@ FUND_ROTATION_DUPLICATE_STRATEGY_ID = "FUND_ROTATION_DUPLICATE_STRATEGY_ID"
 FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID = "FUND_ROTATION_STRATEGY_SNAPSHOT_INVALID"
 
 SUPPORTED_INTERFACE_VERSION = "1.0"
+
+
+def _display_name(strategy_id: str, name: str) -> str:
+    """Prefix AI rotation names with their canonical public strategy code."""
+    match = re.match(r"^ai_rotation_(r\d+)_", strategy_id)
+    if match is None:
+        return name
+    code = match.group(1).upper()
+    body = re.sub(r"^R\d+\s*", "", name)
+    return f"{code} {body}"
 
 
 class CatalogError(Exception):
@@ -123,7 +134,10 @@ class FundRotationStrategyCatalog:
         self._registry: dict[str, RegisteredFundRotationStrategy] = {}
         for strategy_cls in strategies:
             instance = strategy_cls()
-            descriptor: FundRotationStrategyDescriptor = instance.descriptor
+            descriptor: FundRotationStrategyDescriptor = replace(
+                instance.descriptor,
+                name=_display_name(instance.descriptor.id, instance.descriptor.name),
+            )
             strategy_id = descriptor.id
             if strategy_id in self._registry:
                 raise CatalogError(

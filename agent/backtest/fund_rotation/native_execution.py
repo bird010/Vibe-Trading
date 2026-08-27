@@ -150,6 +150,8 @@ class _ParentState:
     corporate_action_adjustments: tuple[dict, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
+        if self.original_requested_quantity <= 0:
+            raise ValueError("parent original_requested_quantity must be positive")
         self.remaining_quantity = self.original_requested_quantity
 
     @property
@@ -1041,6 +1043,14 @@ def _apply_corporate_actions(
                         scale,
                         lot_size=old_parent.lot_size,
                     )
+                    order_mgr.replace_for_corporate_action(
+                        code,
+                        replacement_requested,
+                        scale=scale,
+                        trade_date=trade_date,
+                        corporate_action_id=corporate_action_id,
+                        expected_remaining=old_parent.remaining_quantity,
+                    )
                     adjustment = {
                         "corporate_action_id": corporate_action_id,
                         "trade_date": trade_date,
@@ -1062,32 +1072,28 @@ def _apply_corporate_actions(
                         *old_parent.corporate_action_adjustments,
                         adjustment,
                     )
-                    parent_states[replacement_id] = _ParentState(
-                        order_id=replacement_id,
-                        decision_id=old_parent.decision_id,
-                        signal_week=old_parent.signal_week,
-                        ts_code=code,
-                        direction=old_parent.direction,
-                        created_date=trade_date,
-                        original_requested_quantity=replacement_requested,
-                        quantity_basis=old_parent.quantity_basis * scale,
-                        lot_size=old_parent.lot_size,
-                        target_weight=old_parent.target_weight,
-                        replacement_of_order_id=old_parent_id,
-                        replacement_chain_id=(
-                            old_parent.replacement_chain_id or old_parent_id
-                        ),
-                        corporate_action_id=corporate_action_id,
-                        corporate_action_adjustments=(adjustment,),
-                    )
-                    active_parent_by_code[code] = replacement_id
-
-            order_mgr.adjust_for_factor(
-                code,
-                scale,
-                trade_date=trade_date,
-                corporate_action_id=corporate_action_id,
-            )
+                    if replacement_requested > 0:
+                        parent_states[replacement_id] = _ParentState(
+                            order_id=replacement_id,
+                            decision_id=old_parent.decision_id,
+                            signal_week=old_parent.signal_week,
+                            ts_code=code,
+                            direction=old_parent.direction,
+                            created_date=trade_date,
+                            original_requested_quantity=replacement_requested,
+                            quantity_basis=old_parent.quantity_basis * scale,
+                            lot_size=old_parent.lot_size,
+                            target_weight=old_parent.target_weight,
+                            replacement_of_order_id=old_parent_id,
+                            replacement_chain_id=(
+                                old_parent.replacement_chain_id or old_parent_id
+                            ),
+                            corporate_action_id=corporate_action_id,
+                            corporate_action_adjustments=(adjustment,),
+                        )
+                        active_parent_by_code[code] = replacement_id
+                    else:
+                        active_parent_by_code.pop(code, None)
 
             executor.cash += cash_in_lieu
             trade_events.append(

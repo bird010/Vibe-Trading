@@ -82,6 +82,8 @@ class AiRotationR64DirectCorrelationSession:
         self._exclusions.extend(market_exclusions)
         self._representatives = {index + 1: code for index, code in enumerate(sorted(eligible))}
         rows = AiRotationR58R39SignalR57Session._factor_rows(self, view, signal_date)
+        for row in rows.values():
+            row["raw_slope_25d"] = row.get("slope")
         raw = {code: {name: row.get(name) for name in ("bias", "slope", "efficiency")} for code, row in rows.items()}
         from backtest.fund_rotation.strategies.ai_rotation_r57_three_factor_representative.factors import score_complete_candidates
         composite, details = score_complete_candidates(raw, {"bias": 0.3, "slope": 0.3, "efficiency": 0.4}, 2)

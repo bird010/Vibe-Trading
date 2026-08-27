@@ -164,3 +164,68 @@ class OrderManager:
         })
         if order.remaining <= 0:
             order.status = OrderStatus.FILLED
+
+    def replace_for_corporate_action(
+        self,
+        ts_code: str,
+        requested_quantity: int,
+        *,
+        scale: float,
+        trade_date: str = "",
+        corporate_action_id: str = "",
+        expected_remaining: int | None = None,
+    ) -> Order | None:
+        """Replace one active residual with a canonical post-action quantity."""
+        if requested_quantity < 0:
+            raise ValueError("requested_quantity must be non-negative")
+        order = self._active.get(ts_code)
+        if order is None:
+            if expected_remaining is not None:
+                raise ValueError(
+                    "corporate action residual mismatch: "
+                    f"code={ts_code}, active order is missing, "
+                    f"expected_remaining={expected_remaining}, scale={scale}"
+                )
+            return None
+        if expected_remaining is not None and order.remaining != expected_remaining:
+            raise ValueError(
+                "corporate action residual mismatch: "
+                f"code={ts_code}, order_remaining={order.remaining}, "
+                f"expected_remaining={expected_remaining}, scale={scale}"
+            )
+
+        before = {
+            "requested": abs(order.requested),
+            "filled": order.filled,
+            "remaining": order.remaining,
+            "quantity_basis": order.quantity_basis,
+        }
+        adjustment = {
+            "corporate_action_id": corporate_action_id,
+            "trade_date": trade_date,
+            "scale": scale,
+            "before": before,
+            "after": {
+                "requested": requested_quantity,
+                "filled": 0,
+                "remaining": requested_quantity,
+                "quantity_basis": order.quantity_basis * scale,
+            },
+        }
+        order.corporate_action_adjustments.append(adjustment)
+        order.status = OrderStatus.CANCELLED
+        self._history.append(order)
+        del self._active[ts_code]
+        if requested_quantity == 0:
+            return None
+
+        sign = 1 if order.requested > 0 else -1
+        replacement = Order(
+            ts_code=ts_code,
+            requested=sign * requested_quantity,
+            event_id=order.event_id,
+            quantity_basis=order.quantity_basis * scale,
+            corporate_action_adjustments=[adjustment],
+        )
+        self._active[ts_code] = replacement
+        return replacement

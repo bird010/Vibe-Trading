@@ -136,6 +136,8 @@ class ParentOrderRecord:
             raise ValueError("quantity_basis_id is required")
         if self.lot_size < 1:
             raise ValueError("lot_size must be positive")
+        if self.original_requested_quantity <= 0:
+            raise ValueError("parent original_requested_quantity must be positive")
         for field_name in (
             "original_requested_quantity",
             "cumulative_filled_quantity",

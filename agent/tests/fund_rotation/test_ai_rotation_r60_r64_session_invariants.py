@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.fund_rotation.contracts import StrategyDecisionContext
+from backtest.fund_rotation.contracts import StrategyDecisionContext, validate_diagnostics
 from stockpred.fund_rotation.api_models import CandidateDecisionRow
 from backtest.fund_rotation.strategies.correlation_representative.config import (
     CorrelationRepresentativeConfig,
@@ -80,6 +80,7 @@ def _prepare_overlay_session(monkeypatch, strategy):
 
 
 def _assert_lifecycle_invariants(session, decision, finalized):
+    validate_diagnostics(decision.diagnostics)
     assert finalized.decision_trace
     trace = finalized.decision_trace[-1]
     assert trace["signal_date"] == decision.signal_date
@@ -136,6 +137,8 @@ def test_r60_r63_evaluate_and_finalize_preserve_cross_strategy_evidence(
 
 def test_r64_evaluate_and_finalize_publish_the_same_score_evidence(monkeypatch):
     rows = _rows()
+    for row in rows.values():
+        row.pop("raw_slope_25d")
     weekly_returns = pd.DataFrame(
         {
             "A": np.random.default_rng(1).normal(size=52),
@@ -156,6 +159,7 @@ def test_r64_evaluate_and_finalize_publish_the_same_score_evidence(monkeypatch):
     decision = session.evaluate(_context(view))
     finalized = session.finalize()
 
+    assert decision.diagnostics["complete_candidate_count"] >= 2
     _assert_lifecycle_invariants(session, decision, finalized)
     factor_artifact = next(item for item in finalized.artifacts if item.role == "factor_scores")
     factor_rows = factor_artifact.payload[-1]["rows"]

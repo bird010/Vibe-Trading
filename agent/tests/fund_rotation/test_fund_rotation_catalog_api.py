@@ -94,6 +94,12 @@ class TestStrategyList:
             "ai_rotation_r57_three_factor_representative",
             "ai_rotation_r58_r39_signal_r57",
             "ai_rotation_r59_r39_signal_r57_positive_slope",
+            "ai_rotation_r60_r59_medium_trend_gate",
+            "ai_rotation_r61_r59_dual_horizon_score",
+            "ai_rotation_r62_r59_true_invvol",
+            "ai_rotation_r63_r59_rank_buffer",
+            "ai_rotation_r64_direct_corr_diversification",
+            "ai_rotation_r65_r64_direct_corr_rank_buffer",
             "correlation_all_members", "correlation_representative",
         ]
 

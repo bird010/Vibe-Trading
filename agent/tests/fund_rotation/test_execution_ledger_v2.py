@@ -93,6 +93,11 @@ def _attempt(
     )
 
 
+def test_parent_original_requested_quantity_must_be_positive():
+    with pytest.raises(ValueError, match="original_requested_quantity must be positive"):
+        _parent(requested=0)
+
+
 def _trade(
     *,
     trade_id: str,
