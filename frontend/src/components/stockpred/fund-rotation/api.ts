@@ -17,6 +17,7 @@ import type {
   RebalanceDecisionResponse,
   RebalanceIndexResponse,
 } from "./types";
+import { normalizeStrategyName } from "./strategyDisplay";
 
 const BASE = "/stockpred/fund-rotation";
 const BATCH_BASE = `${BASE}/strategy-batches`;
@@ -36,7 +37,14 @@ export async function fetchStrategies(): Promise<CatalogListResponse> {
     headers: authHeaders(),
   });
   if (!res.ok) throw await responseError(res, "fetchStrategies");
-  return res.json();
+  const data = (await res.json()) as CatalogListResponse;
+  return {
+    ...data,
+    strategies: data.strategies.map((strategy) => ({
+      ...strategy,
+      name: normalizeStrategyName(strategy.strategy_id, strategy.name),
+    })),
+  };
 }
 
 export async function fetchStrategyDetail(
@@ -50,8 +58,12 @@ export async function fetchStrategyDetail(
   });
   if (res.status === 304) return { data: null, etag: etag ?? null };
   if (!res.ok) throw await responseError(res, "fetchStrategyDetail");
+  const data = (await res.json()) as StrategyDetail;
   return {
-    data: await res.json(),
+    data: {
+      ...data,
+      name: normalizeStrategyName(data.strategy_id, data.name),
+    },
     etag: res.headers.get("ETag"),
   };
 }
