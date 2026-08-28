@@ -5,6 +5,7 @@ from backtest.fund_rotation.factor_basis import (
     classify_position_transition,
     cleanup_native_factor_basis,
     sync_position_factor_basis,
+    validate_factor_basis_ownership,
 )
 
 
@@ -46,4 +47,14 @@ def test_new_basis_requires_current_factor():
             pre_size=0,
             post_size=100,
             current_factor=None,
+        )
+
+
+def test_factor_basis_validation_requires_exact_owner_match():
+    with pytest.raises(ValueError, match="without factor basis"):
+        validate_factor_basis_ownership(
+            {},
+            positions={"A": {"size": 100}},
+            live_order_codes=set(),
+            native=True,
         )

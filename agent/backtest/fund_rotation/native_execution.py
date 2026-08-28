@@ -576,6 +576,12 @@ class FundRotationExecutionEngine:
                 positions=executor._positions,
                 live_order_codes=live_order_codes,
             )
+            validate_factor_basis_ownership(
+                position_adj_factor,
+                positions=executor._positions,
+                live_order_codes=live_order_codes,
+                native=True,
+            )
 
             daily_equity = mark_to_market(executor, trade_date, ctx.close_lookup)
             holdings = _holdings_snapshot(
@@ -926,6 +932,12 @@ def _state_from_execution(
                 ],
             }
         )
+    validate_factor_basis_ownership(
+        position_adj_factor,
+        positions=executor._positions,
+        live_order_codes={str(row["ts_code"]) for row in active_orders},
+        native=True,
+    )
     return NativeExecutionState(
         cash=cash,
         positions={code: dict(pos) for code, pos in executor._positions.items()},

@@ -70,6 +70,7 @@ def validate_factor_basis_ownership(
     positions: Mapping[str, Mapping[str, object]],
     live_order_codes: set[str],
     native: bool,
+    require_complete: bool = True,
 ) -> None:
     positive_position_codes = {
         code
@@ -86,6 +87,12 @@ def validate_factor_basis_ownership(
             "orphan factor basis without valid owner: "
             + ", ".join(orphan_codes)
         )
+    if require_complete:
+        missing_basis_codes = sorted(valid_owner_codes - set(basis))
+        if missing_basis_codes:
+            raise FactorBasisOwnershipError(
+                "owner without factor basis: " + ", ".join(missing_basis_codes)
+            )
 
 
 def migrate_legacy_native_factor_basis(
@@ -103,11 +110,10 @@ def migrate_legacy_native_factor_basis(
     }
     valid_owner_codes = positive_position_codes | set(live_order_codes)
     orphan_codes = sorted(set(migrated) - valid_owner_codes)
-    owned_codes = sorted(set(migrated) & valid_owner_codes)
-    if owned_codes:
+    if valid_owner_codes:
         raise FactorBasisOwnershipError(
-            "legacy factor basis with owned position/order cannot be verified: "
-            + ", ".join(owned_codes)
+            "legacy state with live position/order cannot verify factor basis: "
+            + ", ".join(sorted(valid_owner_codes))
         )
     for code in orphan_codes:
         migrated.pop(code, None)

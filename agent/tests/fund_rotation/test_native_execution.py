@@ -479,6 +479,33 @@ def test_native_legacy_owned_basis_fails_closed_before_normal_resume():
         )
 
 
+def test_native_legacy_owner_without_basis_fails_closed_before_normal_resume():
+    dates = _dates()[:2]
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        positions={"A": {"size": 16_300}},
+        state_schema_version=1,
+    )
+
+    with pytest.raises(FactorBasisOwnershipError, match="legacy"):
+        FundRotationExecutionEngine().execute(
+            _request({}, evaluation_dates=dates, initial_state=initial_state)
+        )
+
+
+def test_native_current_schema_rejects_position_without_basis_on_resume():
+    dates = _dates()[:2]
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        positions={"A": {"size": 16_300}},
+    )
+
+    with pytest.raises(FactorBasisOwnershipError, match="without factor basis"):
+        FundRotationExecutionEngine().execute(
+            _request({}, evaluation_dates=dates, initial_state=initial_state)
+        )
+
+
 def test_native_current_schema_valid_basis_resumes_without_corporate_action():
     dates = _dates()[:2]
     market, adj = _market(codes=("A",), dates=dates)
@@ -702,6 +729,7 @@ def test_native_engine_preserves_existing_odd_lot_when_target_is_unchanged() -> 
             initial_state=NativeExecutionState(
                 cash=99_100.0,
                 positions={"A": {"size": 90}},
+                position_adj_factor={"A": 1.0},
             ),
         )
     )
@@ -722,6 +750,7 @@ def test_native_engine_rounds_buy_delta_without_rounding_away_odd_lot_holdings()
             initial_state=NativeExecutionState(
                 cash=99_500.0,
                 positions={"A": {"size": 50}},
+                position_adj_factor={"A": 1.0},
             ),
         )
     )
