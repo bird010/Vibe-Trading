@@ -145,6 +145,21 @@ class TestQuerySurface:
         assert not actual.empty
         assert calls == 1
 
+    def test_returns_weekly_values_match_direct_weekly_baseline(self):
+        from backtest.fund_rotation.returns import compute_weekly_returns
+
+        view = _view(signal_date="20240110")
+        expected = compute_weekly_returns(
+            view._fund_daily, view._fund_adj, "20240110"
+        )
+        expected = expected[
+            [c for c in expected.columns if str(c) in view._universe_codes]
+        ].iloc[-4:]
+
+        actual = view.returns("weekly", lookback=4)
+
+        pd.testing.assert_frame_equal(actual, expected)
+
     def test_returns_are_limited_to_current_selection_pool(self):
         view = _view(signal_date="20240110", universe=("A",))
         view.historical_candidate_codes = frozenset({"A", "B"})

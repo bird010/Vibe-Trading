@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
+
+import backtest.fund_rotation.strategies.ai_rotation_r66_lazy_correlation.strategy as r66_module
 
 from backtest.fund_rotation.strategies.ai_rotation_r66_lazy_correlation.strategy import (
     PairwiseCorrelationLookup,
@@ -76,6 +79,93 @@ def test_lazy_selector_keeps_unavailable_reason_before_later_high_corr():
     assert diagnostics["correlation_rejected_candidates"]["B"] == (
         "PAIRWISE_CORRELATION_TOO_HIGH"
     )
+
+
+def test_lazy_selector_checks_later_pair_after_high_correlation():
+    values = {
+        ("A", "B"): (0.10, 20),
+        ("A", "C"): (0.90, 20),
+        ("B", "C"): (math.nan, 0),
+    }
+
+    def lookup(left, right):
+        return values[tuple(sorted((left, right)))]
+
+    selected, diagnostics = select_lazy_direct_correlation_diversified(
+        ["A", "B", "C"], lookup, top_n=3
+    )
+
+    assert selected == ["A", "B"]
+    assert diagnostics["correlation_rejected_candidates"]["C"] == (
+        "PAIRWISE_CORRELATION_UNAVAILABLE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({("A", "B"): (0.80, 20)}, "PAIRWISE_CORRELATION_TOO_HIGH"),
+        ({("A", "B"): (0.10, 19)}, "PAIRWISE_CORRELATION_UNAVAILABLE"),
+        ({("A", "B"): (math.nan, 20)}, "PAIRWISE_CORRELATION_UNAVAILABLE"),
+        ({("A", "B"): (-0.90, 20)}, None),
+    ],
+)
+def test_lazy_selector_boundary_and_missing_pair_behavior(values, expected):
+    def lookup(left, right):
+        return values[tuple(sorted((left, right)))]
+
+    selected, diagnostics = select_lazy_direct_correlation_diversified(
+        ["A", "B"], lookup, top_n=2
+    )
+
+    if expected is None:
+        assert selected == ["A", "B"]
+    else:
+        assert selected == ["A"]
+        assert diagnostics["correlation_rejected_candidates"]["B"] == expected
+
+
+def test_r66_uses_independent_grouped_factor_builder():
+    assert hasattr(r66_module, "build_grouped_factor_rows")
+    assert r66_module.build_grouped_factor_rows is not None
+
+
+def test_grouped_factor_rows_match_legacy_factor_rows():
+    import backtest.fund_rotation.strategies.ai_rotation_r58_r39_signal_r57.strategy as r58_module
+
+    dates = pd.date_range("2024-01-01", periods=49, freq="D")
+    bars = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "ts_code": code,
+                    "trade_date": dates.strftime("%Y%m%d"),
+                    "open": np.arange(100.0, 149.0),
+                    "high": np.arange(101.0, 150.0),
+                    "low": np.arange(99.0, 148.0),
+                    "close": np.arange(100.0, 149.0),
+                    "vol": 1.0,
+                    "amount": 1.0,
+                }
+            )
+            for code in ("A", "B", "C")
+        ],
+        ignore_index=True,
+    )
+    adjustments = bars[["ts_code", "trade_date"]].assign(adj_factor=1.0)
+    view = SimpleNamespace(
+        daily_bars=lambda fields, lookback: bars,
+        fund_adjustments=lambda lookback: adjustments,
+    )
+    legacy = SimpleNamespace(_representatives={1: "A", 2: "B", 3: "C"})
+    grouped = SimpleNamespace(_representatives={1: "A", 2: "B", 3: "C"})
+
+    expected = r58_module.AiRotationR58R39SignalR57Session._factor_rows(
+        legacy, view, "20240218"
+    )
+    actual = r66_module.build_grouped_factor_rows(grouped, view, "20240218")
+
+    assert actual == expected
 
 
 def test_r66_descriptor_and_frozen_configuration():
@@ -155,6 +245,11 @@ def test_r66_session_keeps_r64_targets_and_diagnostics(monkeypatch):
         ).AiRotationR58R39SignalR57Session,
         "_factor_rows",
         lambda self, view, date: {code: dict(row) for code, row in rows.items()},
+    )
+    monkeypatch.setattr(
+        r66_module,
+        "build_grouped_factor_rows",
+        lambda session, view, date: {code: dict(row) for code, row in rows.items()},
     )
     view = SimpleNamespace(returns=lambda frequency, lookback: weekly_returns)
     context = StrategyDecisionContext(signal_date="20240105", data_view=view)

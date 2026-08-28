@@ -16,6 +16,23 @@ from backtest.fund_rotation.evaluation import iso_week_endings
 from backtest.fund_rotation.strategies.ai_rotation_r34_staged_reentry.strategy import _append_reason, apply_staged_reentry
 from backtest.fund_rotation.strategies.ai_rotation_r39_incumbent_carry.strategy import apply_incumbent_carry
 from backtest.fund_rotation.strategies.ai_rotation_r58_r39_signal_r57.strategy import AiRotationR58R39SignalR57Session
+from backtest.fund_rotation.strategies.ai_rotation_r58_r39_signal_r57.strategy import (
+    _BIAS_MA_DAYS,
+    _BIAS_REGRESSION_DAYS,
+    _EFFICIENCY_DAYS,
+    _FACTOR_LOOKBACK_DAYS,
+    _SLOPE_DAYS,
+    _causal_frame,
+    _close_factor_status,
+    _json_number,
+    _ohlc_factor_status,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r57_three_factor_representative.factors import (
+    adjust_ohlc,
+    compute_bias_momentum,
+    compute_efficiency_momentum,
+    compute_slope_momentum,
+)
 from backtest.fund_rotation.strategies.ai_rotation_r59_r39_signal_r57_positive_slope.strategy import AiRotationR59R39SignalR57PositiveSlopeSession
 from backtest.fund_rotation.strategies.correlation_all_members.signals import ensure_instrument_pool, signal_date_eligible
 from backtest.fund_rotation.universe import check_historical_eligibility
@@ -29,6 +46,128 @@ DESCRIPTOR = FundRotationStrategyDescriptor(
     description="保持 R64 选择语义，仅按贪心选择实际需要的 pairwise correlation。",
     interface_version="1.0", supported_universe=("etf",), deterministic=True,
 )
+
+
+def build_grouped_factor_rows(session, view, signal_date: str) -> dict[str, dict[str, object]]:
+    bars = _causal_frame(
+        view.daily_bars(
+            ["open", "high", "low", "close", "vol", "amount"],
+            lookback=_FACTOR_LOOKBACK_DAYS,
+        ),
+        signal_date,
+    )
+    adjustments = _causal_frame(
+        view.fund_adjustments(lookback=_FACTOR_LOOKBACK_DAYS), signal_date
+    )
+    bars_by_code = {
+        str(code): frame for code, frame in bars.groupby("ts_code", sort=False)
+    }
+    adjustments_by_code = {
+        str(code): frame
+        for code, frame in adjustments.groupby("ts_code", sort=False)
+    }
+    rows: dict[str, dict[str, object]] = {}
+    for cluster_id, representative in sorted(
+        (cluster_id, code)
+        for cluster_id, code in session._representatives.items()
+        if code
+    ):
+        code = str(representative)
+        code_bars = bars_by_code.get(code, bars.iloc[0:0]).tail(_FACTOR_LOOKBACK_DAYS)
+        code_adjustments = adjustments_by_code.get(code, adjustments.iloc[0:0])
+        row: dict[str, object] = {
+            "ts_code": code,
+            "cluster_id": int(cluster_id),
+            "is_representative": True,
+            "observations": int(len(code_bars)),
+            "adjusted_observations": 0,
+            "bias_observations": 0,
+            "slope_observations": 0,
+            "efficiency_observations": 0,
+            "bias_required_observations": _BIAS_MA_DAYS + _BIAS_REGRESSION_DAYS - 1,
+            "slope_required_observations": _SLOPE_DAYS,
+            "efficiency_required_observations": _EFFICIENCY_DAYS,
+            "bias": None,
+            "slope": None,
+            "efficiency": None,
+            "bias_status": "NOT_EVALUATED",
+            "slope_status": "NOT_EVALUATED",
+            "efficiency_status": "NOT_EVALUATED",
+        }
+        try:
+            adjusted = adjust_ohlc(
+                code_bars,
+                code_adjustments,
+                pd.Timestamp(signal_date).strftime("%Y%m%d"),
+            )
+            adjusted = (
+                adjusted.sort_values("trade_date")
+                .tail(_FACTOR_LOOKBACK_DAYS)
+                .reset_index(drop=True)
+            )
+            row["adjusted_observations"] = int(len(adjusted))
+            full_ohlc_count, full_ohlc_status = _ohlc_factor_status(
+                adjusted[["open", "high", "low", "close"]], _FACTOR_LOOKBACK_DAYS
+            )
+            if full_ohlc_status != "VALID":
+                row.update(
+                    {
+                        "bias_observations": full_ohlc_count,
+                        "slope_observations": full_ohlc_count,
+                        "efficiency_observations": full_ohlc_count,
+                        "bias_status": full_ohlc_status,
+                        "slope_status": full_ohlc_status,
+                        "efficiency_status": full_ohlc_status,
+                        "status_code": "INVALID_FULL_OHLC_WINDOW",
+                    }
+                )
+                rows[code] = row
+                continue
+            bias_count, bias_status = _close_factor_status(
+                adjusted["close"], _BIAS_MA_DAYS + _BIAS_REGRESSION_DAYS - 1
+            )
+            slope_count, slope_status = _close_factor_status(
+                adjusted["close"].tail(_SLOPE_DAYS), _SLOPE_DAYS
+            )
+            efficiency_count, efficiency_status = _ohlc_factor_status(
+                adjusted[["open", "high", "low", "close"]].tail(_EFFICIENCY_DAYS),
+                _EFFICIENCY_DAYS,
+            )
+            row.update(
+                {
+                    "bias": _json_number(
+                        compute_bias_momentum(
+                            adjusted["close"], _BIAS_MA_DAYS, _BIAS_REGRESSION_DAYS
+                        )
+                    ),
+                    "slope": _json_number(
+                        compute_slope_momentum(adjusted["close"], _SLOPE_DAYS)
+                    ),
+                    "efficiency": _json_number(
+                        compute_efficiency_momentum(adjusted, _EFFICIENCY_DAYS)
+                    ),
+                    "bias_observations": bias_count,
+                    "slope_observations": slope_count,
+                    "efficiency_observations": efficiency_count,
+                    "bias_status": bias_status,
+                    "slope_status": slope_status,
+                    "efficiency_status": efficiency_status,
+                }
+            )
+            for factor_name in ("bias", "slope", "efficiency"):
+                if row[f"{factor_name}_status"] == "VALID" and row[factor_name] is None:
+                    row[f"{factor_name}_status"] = "INVALID_RESULT"
+        except (KeyError, TypeError, ValueError):
+            row.update(
+                {
+                    "status_code": "INVALID_OHLC_OR_ADJUSTMENT",
+                    "bias_status": "ADJUSTMENT_DATA_INVALID",
+                    "slope_status": "ADJUSTMENT_DATA_INVALID",
+                    "efficiency_status": "ADJUSTMENT_DATA_INVALID",
+                }
+            )
+        rows[code] = row
+    return rows
 
 
 class PairwiseCorrelationLookup:
@@ -123,7 +262,7 @@ class AiRotationR66LazyCorrelationSession:
         self._exclusions.extend(historical_exclusions)
         self._exclusions.extend(market_exclusions)
         self._representatives = {index + 1: code for index, code in enumerate(sorted(eligible))}
-        rows = AiRotationR58R39SignalR57Session._factor_rows(self, view, signal_date)
+        rows = build_grouped_factor_rows(self, view, signal_date)
         for row in rows.values():
             row["raw_slope_25d"] = row.get("slope")
         raw = {code: {name: row.get(name) for name in ("bias", "slope", "efficiency")} for code, row in rows.items()}
