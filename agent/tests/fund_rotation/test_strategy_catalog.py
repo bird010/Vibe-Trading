@@ -102,6 +102,7 @@ class TestCatalogRegistration:
             "ai_rotation_r63_r59_rank_buffer",
             "ai_rotation_r64_direct_corr_diversification",
             "ai_rotation_r65_r64_direct_corr_rank_buffer",
+            "ai_rotation_r66_lazy_correlation",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:

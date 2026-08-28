@@ -127,6 +127,24 @@ class TestQuerySurface:
         rets = view.returns("weekly", lookback=4)
         assert not rets.empty
 
+    def test_returns_weekly_does_not_repeat_adjusted_close(self, monkeypatch):
+        import backtest.fund_rotation.returns as returns_module
+
+        calls = 0
+        original = returns_module.compute_adjusted_close
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(returns_module, "compute_adjusted_close", counted)
+        view = _view(signal_date="20240110")
+        actual = view.returns("weekly", lookback=4)
+
+        assert not actual.empty
+        assert calls == 1
+
     def test_returns_are_limited_to_current_selection_pool(self):
         view = _view(signal_date="20240110", universe=("A",))
         view.historical_candidate_codes = frozenset({"A", "B"})

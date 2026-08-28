@@ -160,6 +160,14 @@ class AiRotationR58R39SignalR57Session(CorrelationRepresentativeSession):
             view.fund_adjustments(lookback=_FACTOR_LOOKBACK_DAYS),
             signal_date,
         )
+        bars_by_code = {
+            str(code): frame
+            for code, frame in bars.groupby("ts_code", sort=False)
+        }
+        adjustments_by_code = {
+            str(code): frame
+            for code, frame in adjustments.groupby("ts_code", sort=False)
+        }
         rows: dict[str, dict[str, object]] = {}
         for cluster_id, representative in sorted(
             (cluster_id, code)
@@ -167,12 +175,12 @@ class AiRotationR58R39SignalR57Session(CorrelationRepresentativeSession):
             if code
         ):
             code = str(representative)
-            code_bars = bars[bars["ts_code"].eq(code)].sort_values(
-                "trade_date"
-            ).tail(_FACTOR_LOOKBACK_DAYS)
-            code_adjustments = adjustments[
-                adjustments["ts_code"].eq(code)
-            ].sort_values("trade_date")
+            code_bars = bars_by_code.get(code, bars.iloc[0:0]).tail(
+                _FACTOR_LOOKBACK_DAYS
+            )
+            code_adjustments = adjustments_by_code.get(
+                code, adjustments.iloc[0:0]
+            )
             row: dict[str, object] = {
                 "ts_code": code,
                 "cluster_id": int(cluster_id),
