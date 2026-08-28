@@ -25,6 +25,7 @@ from backtest.fund_rotation.config import FundRotationConfig
 from backtest.fund_rotation.etf_rules import ChinaETFExecutionRules
 from backtest.fund_rotation.evaluation import TargetSnapshot, schedule_targets
 from backtest.fund_rotation.executor import PortfolioExecutor, RebalanceResult
+from backtest.fund_rotation.factor_basis import sync_position_factor_basis
 from backtest.fund_rotation.orders import AttemptStatus, OrderManager
 from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_change
 from backtest.fund_rotation.universe import ExclusionRecord
@@ -405,6 +406,12 @@ def run_execution_loop(
                 executor._last_close_source[code] = "close"
 
         if pending:
+            pre_sizes = {
+                order.ts_code: int(
+                    executor._positions.get(order.ts_code, {}).get("size", 0)
+                )
+                for order in pending
+            }
             _t_exec = _time.perf_counter()
             rebalance_result = execute_with_capacity(
                 executor=executor,
@@ -434,10 +441,15 @@ def run_execution_loop(
                 evt["attempt_id"] = f"{evt['order_id']}-A{len(order.attempts) if order else 0}"
                 result.trade_events.append(evt)
 
-        for code in executor._positions:
-            factor = adj_lookup.get((trade_date, code))
-            if factor is not None:
-                position_adj_factor.setdefault(code, factor)
+            for code, pre_size in pre_sizes.items():
+                post_size = int(executor._positions.get(code, {}).get("size", 0))
+                sync_position_factor_basis(
+                    position_adj_factor,
+                    code=code,
+                    pre_size=pre_size,
+                    post_size=post_size,
+                    current_factor=adj_lookup.get((trade_date, code)),
+                )
 
         # Holdings snapshots are daily so adjustment and retry effects are auditable.
         _t_snap = _time.perf_counter()

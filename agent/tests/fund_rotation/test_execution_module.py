@@ -188,6 +188,47 @@ def test_filled_order_is_not_retried_on_later_trading_days():
     ]
 
 
+def test_factor_basis_is_reset_after_full_exit_before_reentry():
+    """A factor change while flat must not adjust a later re-entry."""
+    dates = pd.bdate_range("2024-01-02", "2024-01-19").strftime("%Y%m%d").tolist()
+    market = pd.DataFrame([
+        {
+            "ts_code": "A", "trade_date": date,
+            "open": 10.0, "close": 10.0, "high": 10.1, "low": 9.9,
+            "pre_close": 10.0, "vol": 1_000_000, "amount": 10_000_000.0,
+        }
+        for date in dates
+    ])
+    adj = pd.DataFrame([
+        {"ts_code": "A", "trade_date": date,
+         "adj_factor": 1.0 if date <= "20240108" else 2.0}
+        for date in dates
+    ])
+    result = PipelineResult(weekly_targets={
+        "20240101": {"A": 0.5},
+        "20240105": {},
+        "20240112": {"A": 0.5},
+    })
+    config = FundRotationConfig(
+        k=1, top_n=1, initial_capital=100_000,
+        commission_rate=0.0, commission_min=0.0, other_fee_rate=0.0,
+        adv_min_observations=1, max_participation_rate=1.0,
+        start_date="20240102", end_date="20240119",
+    )
+
+    run_execution_loop(result, config, build_execution_context(market, adj, config))
+
+    corporate_actions = [
+        event for event in result.trade_events
+        if event.get("event_type") == "CORPORATE_ACTION"
+    ]
+    assert corporate_actions == []
+    by_date = {snapshot["trade_date"]: snapshot for snapshot in result.positions_history}
+    reentry_size = by_date["20240115"]["positions"]["A"]
+    assert reentry_size > 0
+    assert by_date["20240116"]["positions"]["A"] == reentry_size
+
+
 def test_should_cancel_stops_execution_loop_at_daily_checkpoint():
     """§26.1 — the execution loop honors the cancellation checkpoint and
     preserves events/equity collected before the stop."""

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 import pandas as pd
 
@@ -41,6 +41,7 @@ from backtest.fund_rotation.market_rules import (
     UnknownExecutionRule,
 )
 from backtest.fund_rotation.executor import PortfolioExecutor
+from backtest.fund_rotation.factor_basis import cleanup_native_factor_basis
 from backtest.fund_rotation.orders import Order, OrderManager, OrderStatus
 from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_change
@@ -413,6 +414,18 @@ class FundRotationExecutionEngine:
                     if delta:
                         deltas[code] = delta
 
+                basis_factors: dict[str, float] = {}
+                for code in deltas:
+                    current_size = int(executor._positions.get(code, {}).get("size", 0))
+                    if current_size > 0 and code in position_adj_factor:
+                        continue
+                    current_factor = ctx.adj_lookup.get((trade_date, code))
+                    if current_factor is None or current_factor <= 0:
+                        raise ValueError(
+                            f"adj_factor is required to initialize basis: {code} {trade_date}"
+                        )
+                    basis_factors[code] = float(current_factor)
+
                 _cancel_active_parents(
                     trade_date,
                     parent_states,
@@ -444,10 +457,8 @@ class FundRotationExecutionEngine:
                         rule_knowledge_cutoff=provenance.knowledge_cutoff,
                     )
                     active_parent_by_code[code] = order_id
-                    position_adj_factor.setdefault(
-                        code,
-                        ctx.adj_lookup.get((trade_date, code), 1.0),
-                    )
+                    if code in basis_factors:
+                        position_adj_factor[code] = basis_factors[code]
 
             pending = order_mgr.get_pending_orders()
             all_codes = (
@@ -504,10 +515,14 @@ class FundRotationExecutionEngine:
                         provenance_by_code=provenance_by_code,
                     )
 
-            for code in executor._positions:
-                factor = ctx.adj_lookup.get((trade_date, code))
-                if factor is not None:
-                    position_adj_factor.setdefault(code, factor)
+            live_order_codes = {
+                order.ts_code for order in order_mgr.get_pending_orders()
+            } | set(active_parent_by_code)
+            cleanup_native_factor_basis(
+                position_adj_factor,
+                positions=executor._positions,
+                live_order_codes=live_order_codes,
+            )
 
             daily_equity = mark_to_market(executor, trade_date, ctx.close_lookup)
             holdings = _holdings_snapshot(
@@ -613,6 +628,20 @@ def _state_hold_result(
 ) -> NativeExecutionResult:
     if initial_state is None:
         return _cash_hold_result(evaluation_dates, request.initial_capital)
+    normalized_basis = dict(initial_state.position_adj_factor)
+    cleanup_native_factor_basis(
+        normalized_basis,
+        positions=initial_state.positions,
+        live_order_codes={
+            str(order["ts_code"])
+            for order in initial_state.active_orders
+            if order.get("ts_code")
+        },
+    )
+    normalized_state = replace(
+        initial_state,
+        position_adj_factor=normalized_basis,
+    )
     parent_states = _restore_parent_states(initial_state)
     ledger = ExecutionLedger(
         parent_orders=tuple(parent.to_record() for parent in parent_states.values()),
@@ -644,7 +673,7 @@ def _state_hold_result(
         positions_history=positions_history,
         ending_cash=float(initial_state.cash),
         ending_positions={code: dict(pos) for code, pos in initial_state.positions.items()},
-        state=initial_state,
+        state=normalized_state,
     )
 
 

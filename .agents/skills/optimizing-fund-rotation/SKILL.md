@@ -21,7 +21,7 @@ Before acting, read:
 3. Maintain an append-only ledger containing every success, failure, review, run ID, fold result, and Champion decision.
 4. Execute exactly the authorized experiment budget. For the default campaign this is rounds `01..30`; a failed or non-improving round still consumes one round.
 5. In each round:
-   - dispatch one `gpt-5.6-sol` analyst for one primary hypothesis and a design;
+   - dispatch one `gpt-5.6-luna` analyst for one primary hypothesis and a design;
    - dispatch one `gpt-5.6-luna` implementer to add a new strategy with tests;
    - dispatch a fresh `gpt-5.6-luna` reviewer;
    - return P0/P1 findings to the same implementer, then use a fresh reviewer, for at most five review cycles;

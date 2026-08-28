@@ -403,6 +403,62 @@ def test_native_engine_empty_targets_continue_existing_holdings_without_active_o
     )
 
 
+def test_native_new_order_overwrites_stale_basis_with_current_factor():
+    dates = _dates()
+    market, adj = _market(
+        codes=("A",),
+        dates=dates,
+        amount=1_000_000.0,
+        adj_change=("A", dates[0], 2.0),
+    )
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        position_adj_factor={"A": 1.0},
+    )
+
+    result = FundRotationExecutionEngine().execute(
+        _request(
+            {"20240101": {"A": 0.5}},
+            evaluation_dates=dates[:2],
+            market=market,
+            adj=adj,
+            initial_state=initial_state,
+        )
+    )
+
+    assert result.state.position_adj_factor["A"] == pytest.approx(2.0)
+
+
+def test_native_hold_return_cleans_basis_without_position_or_live_order():
+    dates = _dates()[:2]
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        position_adj_factor={"A": 7.0},
+    )
+
+    result = FundRotationExecutionEngine().execute(
+        _request({}, evaluation_dates=dates, initial_state=initial_state)
+    )
+
+    assert result.state.position_adj_factor == {}
+
+
+def test_native_new_owner_requires_current_factor_without_implicit_fallback():
+    dates = _dates()[:2]
+    market, adj = _market(codes=("A",), dates=dates)
+    adj = adj[adj["trade_date"] != dates[0]].reset_index(drop=True)
+
+    with pytest.raises(ValueError, match="adj_factor is required to initialize basis"):
+        FundRotationExecutionEngine().execute(
+            _request(
+                {"20240101": {"A": 0.5}},
+                evaluation_dates=dates,
+                market=market,
+                adj=adj,
+            )
+        )
+
+
 def test_native_engine_records_corporate_action_replacement_lineage():
     dates = _dates()
     market, adj = _market(
