@@ -6,6 +6,10 @@ from enum import Enum
 from typing import Mapping
 
 
+class FactorBasisOwnershipError(ValueError):
+    """Raised when persisted factor basis has no valid lifecycle owner."""
+
+
 class PositionTransition(str, Enum):
     OPEN = "OPEN"
     CLOSE = "CLOSE"
@@ -58,3 +62,54 @@ def cleanup_native_factor_basis(
     for code in list(basis):
         if code not in valid_owner_codes:
             basis.pop(code, None)
+
+
+def validate_factor_basis_ownership(
+    basis: Mapping[str, float],
+    *,
+    positions: Mapping[str, Mapping[str, object]],
+    live_order_codes: set[str],
+    native: bool,
+) -> None:
+    positive_position_codes = {
+        code
+        for code, position in positions.items()
+        if int(position.get("size", 0) or 0) > 0
+    }
+    valid_owner_codes = (
+        positive_position_codes | set(live_order_codes)
+        if native else positive_position_codes
+    )
+    orphan_codes = sorted(set(basis) - valid_owner_codes)
+    if orphan_codes:
+        raise FactorBasisOwnershipError(
+            "orphan factor basis without valid owner: "
+            + ", ".join(orphan_codes)
+        )
+
+
+def migrate_legacy_native_factor_basis(
+    basis: Mapping[str, float],
+    *,
+    positions: Mapping[str, Mapping[str, object]],
+    live_order_codes: set[str],
+) -> tuple[dict[str, float], tuple[str, ...]]:
+    """Migrate only legacy orphan basis; reject owned basis without evidence."""
+    migrated = dict(basis)
+    positive_position_codes = {
+        code
+        for code, position in positions.items()
+        if int(position.get("size", 0) or 0) > 0
+    }
+    valid_owner_codes = positive_position_codes | set(live_order_codes)
+    orphan_codes = sorted(set(migrated) - valid_owner_codes)
+    owned_codes = sorted(set(migrated) & valid_owner_codes)
+    if owned_codes:
+        raise FactorBasisOwnershipError(
+            "legacy factor basis with owned position/order cannot be verified: "
+            + ", ".join(owned_codes)
+        )
+    for code in orphan_codes:
+        migrated.pop(code, None)
+    diagnostics = tuple(f"removed legacy orphan factor basis: {code}" for code in orphan_codes)
+    return migrated, diagnostics

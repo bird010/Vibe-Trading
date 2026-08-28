@@ -41,7 +41,12 @@ from backtest.fund_rotation.market_rules import (
     UnknownExecutionRule,
 )
 from backtest.fund_rotation.executor import PortfolioExecutor
-from backtest.fund_rotation.factor_basis import cleanup_native_factor_basis
+from backtest.fund_rotation.factor_basis import (
+    FactorBasisOwnershipError,
+    cleanup_native_factor_basis,
+    migrate_legacy_native_factor_basis,
+    validate_factor_basis_ownership,
+)
 from backtest.fund_rotation.orders import Order, OrderManager, OrderStatus
 from backtest.fund_rotation.pit_universe import PITQueryMode
 from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_change
@@ -49,6 +54,8 @@ from backtest.fund_rotation.share_adjustment import adjust_shares_for_factor_cha
 
 @dataclass(frozen=True)
 class NativeExecutionState:
+    CURRENT_SCHEMA_VERSION = 2
+
     cash: float
     positions: dict[str, dict] = field(default_factory=dict)
     last_close: dict[str, float] = field(default_factory=dict)
@@ -62,6 +69,8 @@ class NativeExecutionState:
     trades: tuple[dict, ...] = field(default_factory=tuple)
     corporate_actions: tuple[dict, ...] = field(default_factory=tuple)
     event_counter: int = 0
+    state_schema_version: int = CURRENT_SCHEMA_VERSION
+    migration_diagnostics: tuple[str, ...] = field(default_factory=tuple)
 
     def to_snapshot(self) -> dict:
         """Return a JSON-safe checkpoint for cross-process Shadow recovery."""
@@ -73,9 +82,13 @@ class NativeExecutionState:
             raise TypeError("native execution snapshot must be a mapping")
         values = dict(snapshot)
         for name in (
-            "active_orders", "parent_orders", "attempts", "trades", "corporate_actions"
+            "active_orders", "parent_orders", "attempts", "trades", "corporate_actions",
+            "migration_diagnostics",
         ):
             values[name] = tuple(values.get(name) or ())
+        schema_version = int(values.get("state_schema_version", 1))
+        if schema_version < 1 or schema_version > cls.CURRENT_SCHEMA_VERSION:
+            raise ValueError(f"unsupported native execution state schema: {schema_version}")
         return cls(
             cash=float(values.get("cash", 0.0)),
             positions=dict(values.get("positions") or {}),
@@ -90,6 +103,8 @@ class NativeExecutionState:
             trades=values["trades"],
             corporate_actions=values["corporate_actions"],
             event_counter=int(values.get("event_counter", 0)),
+            state_schema_version=schema_version,
+            migration_diagnostics=values["migration_diagnostics"],
         )
 
 
@@ -111,6 +126,44 @@ class NativeExecutionRequest:
     initial_state: NativeExecutionState | None = None
     decision_ids: dict[str, str] = field(default_factory=dict)
     order_ids: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+def _state_live_order_codes(state: NativeExecutionState) -> set[str]:
+    return {
+        str(order["ts_code"])
+        for order in state.active_orders
+        if order.get("ts_code")
+    }
+
+
+def _prepare_resume_state(
+    initial_state: NativeExecutionState | None,
+) -> NativeExecutionState | None:
+    if initial_state is None:
+        return None
+    live_order_codes = _state_live_order_codes(initial_state)
+    if initial_state.state_schema_version < NativeExecutionState.CURRENT_SCHEMA_VERSION:
+        migrated_basis, diagnostics = migrate_legacy_native_factor_basis(
+            initial_state.position_adj_factor,
+            positions=initial_state.positions,
+            live_order_codes=live_order_codes,
+        )
+        return replace(
+            initial_state,
+            position_adj_factor=migrated_basis,
+            state_schema_version=NativeExecutionState.CURRENT_SCHEMA_VERSION,
+            migration_diagnostics=(
+                *initial_state.migration_diagnostics,
+                *diagnostics,
+            ),
+        )
+    validate_factor_basis_ownership(
+        initial_state.position_adj_factor,
+        positions=initial_state.positions,
+        live_order_codes=live_order_codes,
+        native=True,
+    )
+    return initial_state
 
 
 @dataclass(frozen=True)
@@ -276,7 +329,7 @@ class FundRotationExecutionEngine:
         evaluation_dates = list(request.evaluation_dates)
         ctx = build_execution_context(request.fund_daily, request.fund_adj, config)
 
-        initial_state = request.initial_state
+        initial_state = _prepare_resume_state(request.initial_state)
         has_initial_state = initial_state is not None
         if not request.targets and not has_initial_state:
             return _cash_hold_result(evaluation_dates, request.initial_capital)
@@ -589,6 +642,7 @@ class FundRotationExecutionEngine:
                 position_adj_factor=position_adj_factor,
                 active_targets=active_targets,
                 event_counter=event_counter,
+                migration_diagnostics=initial_state.migration_diagnostics if initial_state else (),
             ),
         )
 
@@ -628,20 +682,6 @@ def _state_hold_result(
 ) -> NativeExecutionResult:
     if initial_state is None:
         return _cash_hold_result(evaluation_dates, request.initial_capital)
-    normalized_basis = dict(initial_state.position_adj_factor)
-    cleanup_native_factor_basis(
-        normalized_basis,
-        positions=initial_state.positions,
-        live_order_codes={
-            str(order["ts_code"])
-            for order in initial_state.active_orders
-            if order.get("ts_code")
-        },
-    )
-    normalized_state = replace(
-        initial_state,
-        position_adj_factor=normalized_basis,
-    )
     parent_states = _restore_parent_states(initial_state)
     ledger = ExecutionLedger(
         parent_orders=tuple(parent.to_record() for parent in parent_states.values()),
@@ -673,7 +713,7 @@ def _state_hold_result(
         positions_history=positions_history,
         ending_cash=float(initial_state.cash),
         ending_positions={code: dict(pos) for code, pos in initial_state.positions.items()},
-        state=normalized_state,
+        state=initial_state,
     )
 
 
@@ -863,6 +903,7 @@ def _state_from_execution(
     position_adj_factor: dict[str, float],
     active_targets: dict[str, float],
     event_counter: int,
+    migration_diagnostics: tuple[str, ...] = (),
 ) -> NativeExecutionState:
     active_orders: list[dict] = []
     for code, order in sorted(order_mgr._active.items()):
@@ -902,6 +943,8 @@ def _state_from_execution(
             for action in ledger.corporate_actions
         ),
         event_counter=event_counter,
+        state_schema_version=NativeExecutionState.CURRENT_SCHEMA_VERSION,
+        migration_diagnostics=tuple(migration_diagnostics),
     )
 
 

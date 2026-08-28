@@ -20,6 +20,7 @@ from backtest.fund_rotation.etf_rules import ChinaETFExecutionRules
 from backtest.fund_rotation.executor import PortfolioExecutor
 from backtest.fund_rotation.orders import OrderManager
 from backtest.fund_rotation.native_execution import (
+    FactorBasisOwnershipError,
     FundRotationExecutionEngine,
     NativeExecutionRequest,
     NativeExecutionState,
@@ -81,6 +82,10 @@ def test_native_execution_state_snapshot_round_trips_for_shadow_recovery() -> No
     restored = NativeExecutionState.from_snapshot(state.to_snapshot())
 
     assert restored == state
+    assert restored.state_schema_version == NativeExecutionState.CURRENT_SCHEMA_VERSION
+
+    legacy = NativeExecutionState.from_snapshot({"cash": 123.45})
+    assert legacy.state_schema_version == 1
 
 
 def _rule_record(
@@ -414,6 +419,7 @@ def test_native_new_order_overwrites_stale_basis_with_current_factor():
     initial_state = NativeExecutionState(
         cash=100_000.0,
         position_adj_factor={"A": 1.0},
+        state_schema_version=1,
     )
 
     result = FundRotationExecutionEngine().execute(
@@ -427,6 +433,7 @@ def test_native_new_order_overwrites_stale_basis_with_current_factor():
     )
 
     assert result.state.position_adj_factor["A"] == pytest.approx(2.0)
+    assert result.state.migration_diagnostics == ("removed legacy orphan factor basis: A",)
 
 
 def test_native_hold_return_cleans_basis_without_position_or_live_order():
@@ -434,6 +441,7 @@ def test_native_hold_return_cleans_basis_without_position_or_live_order():
     initial_state = NativeExecutionState(
         cash=100_000.0,
         position_adj_factor={"A": 7.0},
+        state_schema_version=1,
     )
 
     result = FundRotationExecutionEngine().execute(
@@ -441,6 +449,54 @@ def test_native_hold_return_cleans_basis_without_position_or_live_order():
     )
 
     assert result.state.position_adj_factor == {}
+    assert result.state.migration_diagnostics == ("removed legacy orphan factor basis: A",)
+
+
+def test_native_current_schema_rejects_orphan_basis_on_hold_return():
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        position_adj_factor={"A": 7.0},
+    )
+
+    with pytest.raises(FactorBasisOwnershipError, match="orphan"):
+        FundRotationExecutionEngine().execute(
+            _request({}, initial_state=initial_state)
+        )
+
+
+def test_native_legacy_owned_basis_fails_closed_before_normal_resume():
+    dates = _dates()[:2]
+    initial_state = NativeExecutionState(
+        cash=100_000.0,
+        positions={"A": {"size": 16_300}},
+        position_adj_factor={"A": 1.4357},
+        state_schema_version=1,
+    )
+
+    with pytest.raises(FactorBasisOwnershipError, match="legacy"):
+        FundRotationExecutionEngine().execute(
+            _request({}, evaluation_dates=dates, initial_state=initial_state)
+        )
+
+
+def test_native_current_schema_valid_basis_resumes_without_corporate_action():
+    dates = _dates()[:2]
+    market, adj = _market(codes=("A",), dates=dates)
+    initial_state = NativeExecutionState(
+        cash=99_000.0,
+        positions={"A": {"size": 100}},
+        position_adj_factor={"A": 1.0},
+    )
+
+    result = FundRotationExecutionEngine().execute(
+        _request({}, evaluation_dates=dates, market=market, adj=adj, initial_state=initial_state)
+    )
+
+    assert result.ending_positions["A"]["size"] == 100
+    assert not [
+        event for event in result.trade_events
+        if event.get("event_type") == "CORPORATE_ACTION"
+    ]
 
 
 def test_native_new_owner_requires_current_factor_without_implicit_fallback():
