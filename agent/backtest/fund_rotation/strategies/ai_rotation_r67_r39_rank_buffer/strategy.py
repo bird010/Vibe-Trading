@@ -47,6 +47,10 @@ from backtest.fund_rotation.universe import check_historical_eligibility
 _ENTRY_RANK = 3
 _EXIT_RANK = 4
 
+
+def _quality_reason_code(gate: str) -> str:
+    return "CLUSTER_QUALITY_REJECTED" if gate == "REJECT" else ""
+
 DESCRIPTOR = FundRotationStrategyDescriptor(
     id="ai_rotation_r67_r39_rank_buffer",
     name="R39 Top3入场Top4退出排名迟滞",
@@ -121,6 +125,7 @@ class AiRotationR67R39RankBufferSession(AiRotationR39IncumbentCarrySession):
             self._exclusions.extend(historical_excluded)
             decision = self._recluster(view, window, kept, eligible_set, signal_date)
             if decision is not None:
+                self._log_decision(decision)
                 return self._apply_r39_overlays(decision, previous_weights)
         else:
             self._maintain_locks(view, window, eligible_set, signal_date)
@@ -166,7 +171,7 @@ class AiRotationR67R39RankBufferSession(AiRotationR39IncumbentCarrySession):
             if self._last_gate_overall.value == "PASS"
             else QualityStatus.DEGRADED
         )
-        reason = "CLUSTER_QUALITY_REJECTED" if quality is QualityStatus.DEGRADED else ""
+        reason = _quality_reason_code(self._last_gate_overall.value)
         if staged:
             reason = _append_reason(reason, "STAGED_REENTRY")
         if incumbents:

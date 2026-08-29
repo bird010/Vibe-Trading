@@ -1,10 +1,11 @@
 from backtest.fund_rotation.strategies.ai_rotation_r67_r39_rank_buffer.strategy import (
     AiRotationR67R39RankBufferStrategy,
+    _quality_reason_code,
     select_rank_buffer_clusters,
 )
 
 
-def test_rank_four_prior_cluster_is_retained_and_rank_three_candidate_fills_slot():
+def test_rank_four_incumbent_is_retained_and_displaces_rank_three_challenger():
     selected, retained = select_rank_buffer_clusters(
         [10, 20, 30, 40, 50],
         previous_selected=[40, 90],
@@ -14,6 +15,12 @@ def test_rank_four_prior_cluster_is_retained_and_rank_three_candidate_fills_slot
 
     assert selected == [40, 10, 20]
     assert retained == [40]
+
+
+def test_rank_buffer_uses_cluster_rejection_reason_only_for_rejected_gate():
+    assert _quality_reason_code("PASS") == ""
+    assert _quality_reason_code("WARN") == ""
+    assert _quality_reason_code("REJECT") == "CLUSTER_QUALITY_REJECTED"
 
 
 def test_rank_five_prior_cluster_is_forced_out_and_current_candidate_fills_slot():
