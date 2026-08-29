@@ -191,6 +191,13 @@ from backtest.fund_rotation.strategies.ai_rotation_r65_r64_direct_corr_rank_buff
 from backtest.fund_rotation.strategies.ai_rotation_r66_lazy_correlation.strategy import (
     AiRotationR66LazyCorrelationStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r67_r39_rank_buffer.strategy import (
+    AiRotationR67R39RankBufferStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r69_r39_transition_cap.strategy import (
+    AiRotationR69R39TransitionCap50Strategy,
+    AiRotationR70R39TransitionCap25Strategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -257,4 +264,7 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR64DirectCorrDiversificationStrategy,
         AiRotationR65R64DirectCorrRankBufferStrategy,
         AiRotationR66LazyCorrelationStrategy,
+        AiRotationR67R39RankBufferStrategy,
+        AiRotationR69R39TransitionCap50Strategy,
+        AiRotationR70R39TransitionCap25Strategy,
     )
