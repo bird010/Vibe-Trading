@@ -4,7 +4,7 @@
 |---|---|---|---|
 | Batch 0 v2 summary 合同 | Batch 0 report/repair manifest | 已完成边界修复 | v2 与 legacy 分离，legacy 不参与新排名 |
 | Batch 0 原始订单/持仓/净值不变 | Batch 0 consistency tests | 已验证 | 只改 summary/report 产物 |
-| PIT U0/U1 与 identity 去重 | Batch 1 manifest、Batch 4/5 adapter 测试 | 已实现 | 新组合仍要求固定 U1，不按原始基金重复计数 |
+| PIT U0/U1 身份证据与同集合派生 | Batch 1 manifest、Batch 4/5 adapter 测试 | 已实现（研究-only 可运行） | 可选 identity/PIT 字段缺失、部分或冲突时保留 U1 同集合并允许研究；promotion/deployment 仍禁止，verified evidence 才能进入 Shadow/promotion |
 | R71 容量、回退与 blocked attempts | Batch 2 manifest、R71 tests | 已实现边界 | 容量不足回退/现金和 lot-size 规则有测试 |
 | R39/R40 执行与成本语义 | R39/R40 既有回归、Shadow A 账本 | 已保留 | 本计划未修改公共 Runner 或 execution ledger |
 | Batch 3A 绝对动量单变量 | Batch 3A manifest/report | 未晋级 | 只增加 R126d 门；输入/前瞻证据不可用 |
@@ -22,7 +22,7 @@
 | 多重检验记录 | 研究设计文档与 Batch 6 manifest | 已记录停止边界 | 当前因无晋级 survivor 未执行组合检验；不以统计修正替代前瞻验证 |
 | Shadow 冻结配置/版本/哈希 | `shadow_a_cycles6_v2/frozen_strategy_manifest.json` | 已冻结 | R40 50% cap，不调整为其他上限；旧 `shadow_a`/`shadow_a_cycles6` 作为历史证据保留 |
 | Shadow 事件账本与双净值 | `shadow_a_cycles6_v2/shadow_manifest.json` 与账本产物 | 未完成 | 需未来价格后写入 execution/ledger 事件 |
-| Shadow 26 周和 6 次完整调仓门槛 | Shadow qualification artifacts | 未完成 | 当前未满足资格门槛 |
+| Shadow 26 周和 6 次完整调仓门槛 | Shadow qualification artifacts | 未完成 | 当前未满足资格门槛；未验证 research-only U1 envelope 不得通过 Shadow/promotion validator |
 | Shadow 104 周建议观察 | `shadow_a_cycles6_v2/shadow_manifest.json` | 未解决 | 26 周 + 6 次是硬门槛；104 周为建议观察长度，当前仍是 active append-only 过程 |
 | 结果晋级/生产切换 | Batch 6 manifest | 禁止 | 无 winner、无 promotion、无生产切换 |
 | 每步独立 Luna high review | 各 Task report 与 review ledger | 已通过 | Task 10 final whole-branch reviewer Jason：P0/P1/P2/P3=`0/0/1/0`；P2 已记录，P0/P1 已清零 |

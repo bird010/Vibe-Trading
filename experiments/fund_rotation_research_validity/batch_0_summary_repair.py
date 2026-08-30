@@ -5,9 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+
+AGENT_ROOT = Path(__file__).resolve().parents[2] / "agent"
+if str(AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(AGENT_ROOT))
 
 from src.stockpred.fund_rotation.batch_child_runtime import (
     project_execution_summary_metrics,

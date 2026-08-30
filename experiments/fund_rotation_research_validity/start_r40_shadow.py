@@ -261,16 +261,18 @@ def _valid_u1_envelope(snapshot: object) -> bool:
         and u0.get("identity_mapping") == u1.get("identity_mapping")
     ):
         return False
-    representatives = {
-        identity: min(
-            code
-            for code in u0["eligible_codes"]
-            if u0["identity_mapping"].get(code) == identity
-        )
-        for identity in set(u0["identity_mapping"].values())
-        if identity is not None
-    }
-    if set(u1["eligible_codes"]) != set(representatives.values()):
+    if set(u1["eligible_codes"]) != set(u0["eligible_codes"]):
+        return False
+    coverage_diagnostics = u1["coverage_diagnostics"]
+    if coverage_diagnostics.get("u1_equals_u0") is not True:
+        return False
+    if (
+        coverage_diagnostics.get("identity_validation_status") != "VERIFIED"
+        or coverage_diagnostics.get("pit_evidence_status") != "VERIFIED"
+        or coverage_diagnostics.get("research_execution_allowed") is not True
+        or coverage_diagnostics.get("promotion_allowed") is not True
+        or coverage_diagnostics.get("deployment_allowed") is not True
+    ):
         return False
     expected_membership = []
     u0_eligible = set(u0["eligible_codes"])
@@ -279,10 +281,8 @@ def _valid_u1_envelope(snapshot: object) -> bool:
         identity = item["identity_key"]
         if code not in u0_eligible:
             expected = (False, item["reason_code"], identity)
-        elif representatives[identity] == code:
-            expected = (True, "U1_REPRESENTATIVE", identity)
         else:
-            expected = (False, "DUPLICATE_IDENTITY", identity)
+            expected = (True, "U1_DERIVED_FROM_U0", identity)
         expected_membership.append(
             {
                 "ts_code": code,

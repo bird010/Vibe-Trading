@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -173,11 +174,44 @@ def test_start_shadow_a_rejects_tampered_report_via_integrity_sidecar(tmp_path: 
         start_shadow_a(output_dir=tmp_path, report_path=report_path)
 
 
-def test_start_shadow_a_accepts_canonical_u0_to_u1_derivation(tmp_path: Path) -> None:
-    identity_mapping = {"A": "same", "B": "same"}
+def _reseal_pit_snapshot(snapshot: dict) -> None:
+    identity_mapping = snapshot["identity_mapping"]
+    identity_payload: dict[str, object] = {
+        "layer": snapshot["layer"],
+        "identity_mapping": sorted(identity_mapping.items()),
+    }
+    if snapshot["layer"] == "U1":
+        representatives = {
+            identity: min(
+                code
+                for code in snapshot["eligible_codes"]
+                if identity_mapping.get(code) == identity
+            )
+            for identity in {identity_mapping.get(code) for code in snapshot["eligible_codes"]}
+            if identity is not None
+        }
+        identity_payload["representatives"] = sorted(representatives.items())
+    snapshot["identity_hash"] = _pit_stable_hash(identity_payload)
+    snapshot["snapshot_fingerprint"] = _pit_stable_hash(
+        {
+            "layer": snapshot["layer"],
+            "signal_date": snapshot["signal_date"],
+            "knowledge_cutoff": snapshot["knowledge_cutoff"],
+            "source_snapshot_version": snapshot["source_snapshot_version"],
+            "eligible_codes": sorted(snapshot["eligible_codes"]),
+            "membership": snapshot["membership"],
+            "identity_hash": snapshot["identity_hash"],
+            "quality_status": snapshot["quality_status"],
+            "coverage_diagnostics": dict(sorted(snapshot["coverage_diagnostics"].items())),
+        }
+    )
+
+
+def _canonical_u1_manifest() -> dict:
+    identity_mapping = {"A": "same-a", "B": "same-b"}
     u0_membership = [
-        {"ts_code": "A", "included": True, "reason_code": "U0_ELIGIBLE", "identity_key": "same", "layer": "U0"},
-        {"ts_code": "B", "included": True, "reason_code": "U0_ELIGIBLE", "identity_key": "same", "layer": "U0"},
+        {"ts_code": "A", "included": True, "reason_code": "U0_ELIGIBLE", "identity_key": "same-a", "layer": "U0"},
+        {"ts_code": "B", "included": True, "reason_code": "U0_ELIGIBLE", "identity_key": "same-b", "layer": "U0"},
     ]
     u0 = {
         "layer": "U0",
@@ -189,64 +223,177 @@ def test_start_shadow_a_accepts_canonical_u0_to_u1_derivation(tmp_path: Path) ->
         "identity_mapping": identity_mapping,
         "identity_hash": _pit_stable_hash({"layer": "U0", "identity_mapping": sorted(identity_mapping.items())}),
         "snapshot_fingerprint": "0" * 64,
-        "coverage_diagnostics": {},
+        "coverage_diagnostics": {
+            "identity_validation_status": "VERIFIED",
+            "pit_evidence_status": "VERIFIED",
+            "research_execution_allowed": True,
+            "promotion_allowed": True,
+            "deployment_allowed": True,
+        },
         "quality_status": "VERIFIED",
     }
-    u0["snapshot_fingerprint"] = _pit_stable_hash(
-        {
-            "layer": "U0",
-            "signal_date": u0["signal_date"],
-            "knowledge_cutoff": u0["knowledge_cutoff"],
-            "source_snapshot_version": 1,
-            "eligible_codes": ["A", "B"],
-            "membership": u0_membership,
-            "identity_hash": u0["identity_hash"],
-            "quality_status": "VERIFIED",
-            "coverage_diagnostics": {},
-        }
-    )
     u1_membership = [
-        {"ts_code": "A", "included": True, "reason_code": "U1_REPRESENTATIVE", "identity_key": "same", "layer": "U1"},
-        {"ts_code": "B", "included": False, "reason_code": "DUPLICATE_IDENTITY", "identity_key": "same", "layer": "U1"},
+        {"ts_code": "A", "included": True, "reason_code": "U1_DERIVED_FROM_U0", "identity_key": "same-a", "layer": "U1"},
+        {"ts_code": "B", "included": True, "reason_code": "U1_DERIVED_FROM_U0", "identity_key": "same-b", "layer": "U1"},
     ]
-    u1_identity_hash = _pit_stable_hash(
-        {
-            "layer": "U1",
-            "identity_mapping": sorted(identity_mapping.items()),
-            "representatives": [("same", "A")],
-        }
-    )
-    u1 = {**u0, "layer": "U1", "eligible_codes": ["A"], "membership": u1_membership, "identity_hash": u1_identity_hash}
-    u1["snapshot_fingerprint"] = _pit_stable_hash(
-        {
-            "layer": "U1",
-            "signal_date": u1["signal_date"],
-            "knowledge_cutoff": u1["knowledge_cutoff"],
-            "source_snapshot_version": 1,
-            "eligible_codes": ["A"],
-            "membership": u1_membership,
-            "identity_hash": u1_identity_hash,
-            "quality_status": "VERIFIED",
-            "coverage_diagnostics": {},
-        }
-    )
-    manifest = tmp_path / "u1.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": "fund_rotation_pit_identity_v1",
-                "snapshot_status": {"status": "available", "date_count": 1, "invalid_dates": []},
-                "snapshots": [{"signal_date": "2020-01-03", "u0": u0, "u1": u1}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    u1 = {
+        **u0,
+        "layer": "U1",
+        "eligible_codes": ["A", "B"],
+        "membership": u1_membership,
+        "identity_hash": "0" * 64,
+        "coverage_diagnostics": {
+            "u1_equals_u0": True,
+            "identity_validation_status": "VERIFIED",
+            "pit_evidence_status": "VERIFIED",
+            "research_execution_allowed": True,
+            "promotion_allowed": True,
+            "deployment_allowed": True,
+        },
+    }
+    _reseal_pit_snapshot(u0)
+    _reseal_pit_snapshot(u1)
+    return {
+        "schema_version": "fund_rotation_pit_identity_v1",
+        "snapshot_status": {"status": "available", "date_count": 1, "invalid_dates": []},
+        "snapshots": [{"signal_date": "2020-01-03", "u0": u0, "u1": u1}],
+    }
+
+
+def _write_u1_manifest(path: Path, payload: dict) -> Path:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_start_shadow_a_accepts_canonical_u0_to_u1_derivation(tmp_path: Path) -> None:
+    manifest = _write_u1_manifest(tmp_path / "u1.json", _canonical_u1_manifest())
     result = start_shadow_a(
         output_dir=tmp_path / "shadow",
         frozen_u1_manifest=manifest,
         report_path=tmp_path / "shadow_report.md",
     )
     assert result["qualification_status"] == "INSUFFICIENT_FORWARD_EVIDENCE"
+
+
+def test_start_shadow_a_rejects_research_only_same_set_envelope(tmp_path: Path) -> None:
+    payload = deepcopy(_canonical_u1_manifest())
+    u0 = payload["snapshots"][0]["u0"]
+    u1 = payload["snapshots"][0]["u1"]
+    u0["quality_status"] = "RESEARCH_ONLY_UNVERIFIED_UNIVERSE"
+    u1["quality_status"] = "RESEARCH_ONLY_UNVERIFIED_UNIVERSE"
+    u1["coverage_diagnostics"].update(
+        {
+            "pit_evidence_status": "PARTIAL",
+            "research_execution_allowed": True,
+            "promotion_allowed": False,
+            "deployment_allowed": False,
+        }
+    )
+    _reseal_pit_snapshot(u0)
+    _reseal_pit_snapshot(u1)
+    manifest = _write_u1_manifest(tmp_path / "research_only.json", payload)
+
+    with pytest.raises(ValueError, match="fail-closed"):
+        start_shadow_a(
+            output_dir=tmp_path / "research_only",
+            frozen_u1_manifest=manifest,
+            report_path=tmp_path / "research_only_report.md",
+        )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "representative_only",
+        "u1_equals_u0_false",
+        "missing_eligible_code",
+        "added_eligible_code",
+        "identity_key_replaced",
+        "wrong_membership_reason",
+        "duplicate_identity",
+        "missing_identity",
+        "identity_hash_tampered",
+        "snapshot_fingerprint_tampered",
+    ],
+)
+def test_start_shadow_a_rejects_noncanonical_u1_variants(
+    tmp_path: Path, variant: str
+) -> None:
+    payload = deepcopy(_canonical_u1_manifest())
+    u0 = payload["snapshots"][0]["u0"]
+    u1 = payload["snapshots"][0]["u1"]
+
+    if variant == "representative_only":
+        u0["eligible_codes"].append("C")
+        u0["identity_mapping"]["C"] = "same-a"
+        u0["membership"].append(
+            {
+                "ts_code": "C",
+                "included": True,
+                "reason_code": "U0_ELIGIBLE",
+                "identity_key": "same-a",
+                "layer": "U0",
+            }
+        )
+        for item in u1["membership"]:
+            if item["ts_code"] in {"A", "B"}:
+                item["reason_code"] = "U1_REPRESENTATIVE"
+        u1["identity_mapping"]["C"] = "same-a"
+        u1["membership"].append(
+            {
+                "ts_code": "C",
+                "included": False,
+                "reason_code": "DUPLICATE_IDENTITY",
+                "identity_key": "same-a",
+                "layer": "U1",
+            }
+        )
+    elif variant == "u1_equals_u0_false":
+        u1["coverage_diagnostics"]["u1_equals_u0"] = False
+    elif variant == "missing_eligible_code":
+        u1["eligible_codes"] = ["A"]
+        u1["membership"][1]["included"] = False
+    elif variant == "added_eligible_code":
+        u1["eligible_codes"].append("C")
+        u1["identity_mapping"]["C"] = "same-c"
+        u1["membership"].append(
+            {
+                "ts_code": "C",
+                "included": True,
+                "reason_code": "U1_DERIVED_FROM_U0",
+                "identity_key": "same-c",
+                "layer": "U1",
+            }
+        )
+    elif variant == "identity_key_replaced":
+        u1["identity_mapping"]["B"] = "replacement-b"
+        u1["membership"][1]["identity_key"] = "replacement-b"
+    elif variant == "wrong_membership_reason":
+        u1["membership"][0]["reason_code"] = "WRONG_REASON"
+    elif variant == "duplicate_identity":
+        u1["identity_mapping"]["B"] = "same-a"
+        u1["membership"][1]["identity_key"] = "same-a"
+    elif variant == "missing_identity":
+        u1["identity_mapping"]["B"] = None
+        u1["membership"][1]["identity_key"] = None
+    elif variant == "identity_hash_tampered":
+        u1["identity_hash"] = "f" * 64
+    elif variant == "snapshot_fingerprint_tampered":
+        u1["snapshot_fingerprint"] = "e" * 64
+    else:
+        raise AssertionError(f"unknown variant: {variant}")
+
+    if variant not in {"identity_hash_tampered", "snapshot_fingerprint_tampered"}:
+        _reseal_pit_snapshot(u0)
+        _reseal_pit_snapshot(u1)
+    manifest = _write_u1_manifest(tmp_path / f"{variant}.json", payload)
+
+    with pytest.raises(ValueError, match="fail-closed"):
+        start_shadow_a(
+            output_dir=tmp_path / variant,
+            frozen_u1_manifest=manifest,
+            report_path=tmp_path / f"{variant}_report.md",
+        )
 
 
 def test_start_shadow_a_manifest_keeps_started_separate_from_qualified(

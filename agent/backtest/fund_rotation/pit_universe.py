@@ -76,7 +76,7 @@ class FundInstrumentVersion:
     """One selected fund master version visible to the requested query."""
 
     ts_code: str
-    valid_from: str
+    valid_from: str | None
     valid_to: str | None
     known_from: str | None
     revision_id: str | None
@@ -196,9 +196,7 @@ class PITIdentityLayers:
 
     @property
     def quality_status(self) -> PITQualityStatus:
-        if self.u1.quality_status == PITQualityStatus.PIT_INVALID:
-            return self.u1.quality_status
-        return self.resolution.quality_status
+        return self.u1.quality_status
 
 
 class CausalDataView(Protocol):
@@ -320,14 +318,20 @@ class PITFundMaster:
 
             if mode == PITQueryMode.AS_WAS_KNOWN:
                 known_mask = valid_rows.apply(
-                    lambda row: _known_from(row) is not None and _known_from(row) <= cutoff_ts,
+                    lambda row: _known_from(row) is None
+                    or _known_from(row) <= cutoff_ts,
                     axis=1,
                 )
                 candidate_rows = valid_rows[known_mask]
                 if candidate_rows.empty:
+                    known_values = (
+                        valid_rows["known_from"]
+                        if "known_from" in valid_rows.columns
+                        else pd.Series(index=valid_rows.index, dtype=object)
+                    )
                     reason = (
                         ExclusionReasonCode.KNOWN_AFTER_CUTOFF
-                        if valid_rows["known_from"].apply(_has_value).any()
+                        if known_values.apply(_has_value).any()
                         else ExclusionReasonCode.MISSING_KNOWN_FROM
                     )
                     exclusions.append(
@@ -641,6 +645,7 @@ def _snapshot_from_resolution(
                 if identity_mapping
                 else 0.0
             ),
+            "pit_evidence_status": _classify_pit_evidence(resolution.eligible),
             "future_known_excluded_count": sum(
                 exclusion.reason_code == ExclusionReasonCode.KNOWN_AFTER_CUTOFF
                 for exclusion in resolution.master_exclusions
@@ -689,6 +694,53 @@ def _snapshot_from_resolution(
     )
 
 
+def _classify_identity_validation(
+    eligible_codes: tuple[str, ...],
+    identity_mapping: Mapping[str, str | None],
+    duplicate_count: int,
+) -> str:
+    identity_count = sum(
+        identity_mapping.get(code) is not None for code in eligible_codes
+    )
+    if identity_count == 0:
+        return "UNAVAILABLE"
+    if identity_count < len(eligible_codes):
+        return "PARTIAL"
+    if duplicate_count > 0:
+        return "CONFLICT"
+    return "VERIFIED"
+
+
+def _classify_pit_evidence(
+    instruments: tuple[FundInstrumentVersion, ...],
+) -> str:
+    if not instruments:
+        return "UNAVAILABLE"
+    evidence_fields = (
+        "known_from",
+        "valid_from",
+        "revision_id",
+        "source_record_id",
+        "source_published_at",
+        "ingested_at",
+    )
+    present_count = sum(
+        _has_value(getattr(instrument, field))
+        for instrument in instruments
+        for field in evidence_fields
+    )
+    if present_count == 0:
+        return "UNAVAILABLE"
+    complete = present_count == len(instruments) * len(evidence_fields)
+    quality_verified = all(
+        instrument.quality_status is PITQualityStatus.VERIFIED
+        for instrument in instruments
+    )
+    if complete and quality_verified:
+        return "VERIFIED"
+    return "PARTIAL"
+
+
 def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
     grouped: dict[str, list[str]] = {}
     missing_identity: set[str] = set()
@@ -719,20 +771,11 @@ def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
             )
             continue
         identity = u0.identity_mapping.get(code)
-        if identity is None:
-            reason = ExclusionReasonCode.MISSING_IDENTITY.value
-            included = False
-        elif representatives[identity] == code:
-            reason = "U1_REPRESENTATIVE"
-            included = True
-        else:
-            reason = ExclusionReasonCode.DUPLICATE_IDENTITY.value
-            included = False
         membership.append(
             UniverseMembership(
                 ts_code=code,
-                included=included,
-                reason_code=reason,
+                included=True,
+                reason_code="U1_DERIVED_FROM_U0",
                 identity_key=identity,
                 layer="U1",
             )
@@ -742,9 +785,9 @@ def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
     coverage = dict(u0.coverage_diagnostics)
     coverage.update(
         {
-            "available_count": len(representatives) if not missing_identity else 0,
+            "available_count": len(u0.eligible_codes),
             "u0_available_count": len(u0.eligible_codes),
-            "u1_available_count": len(representatives) if not missing_identity else 0,
+            "u1_available_count": len(u0.eligible_codes),
             "duplicate_identity_count": duplicate_count,
             "duplicate_identity_ratio": (
                 duplicate_count / len(u0.eligible_codes)
@@ -752,6 +795,35 @@ def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
                 else 0.0
             ),
             "missing_identity_count": len(missing_identity),
+            "u1_equals_u0": True,
+        }
+    )
+    identity_validation_status = _classify_identity_validation(
+        u0.eligible_codes,
+        u0.identity_mapping,
+        duplicate_count,
+    )
+    pit_evidence_status = str(
+        u0.coverage_diagnostics.get("pit_evidence_status", "UNAVAILABLE")
+    )
+    core_invalid = u0.quality_status is PITQualityStatus.PIT_INVALID
+    optional_evidence_verified = (
+        identity_validation_status == "VERIFIED"
+        and pit_evidence_status == "VERIFIED"
+    )
+    research_execution_allowed = not core_invalid
+    promotion_allowed = (
+        research_execution_allowed
+        and optional_evidence_verified
+        and u0.quality_status is PITQualityStatus.VERIFIED
+    )
+    coverage.update(
+        {
+            "identity_validation_status": identity_validation_status,
+            "pit_evidence_status": pit_evidence_status,
+            "research_execution_allowed": research_execution_allowed,
+            "promotion_allowed": promotion_allowed,
+            "deployment_allowed": promotion_allowed,
         }
     )
     identity_mapping = dict(sorted(u0.identity_mapping.items()))
@@ -762,31 +834,18 @@ def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
             "representatives": sorted(representatives.items()),
         }
     )
-    quality = (
-        PITQualityStatus.PIT_INVALID
-        if missing_identity
-        else u0.quality_status
+    quality = PITQualityStatus.PIT_INVALID if core_invalid else (
+        u0.quality_status
+        if optional_evidence_verified
+        else PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
     )
-    if missing_identity:
-        membership = [
-            replace(
-                item,
-                included=False,
-                reason_code=(
-                    "U1_DISABLED_MISSING_IDENTITY"
-                    if item.included
-                    else item.reason_code
-                ),
-            )
-            for item in membership
-        ]
     fingerprint = _stable_hash(
         {
             "layer": "U1",
             "signal_date": u0.signal_date,
             "knowledge_cutoff": u0.knowledge_cutoff,
             "source_snapshot_version": u0.source_snapshot_version,
-            "eligible_codes": sorted(representatives.values()),
+            "eligible_codes": sorted(u0.eligible_codes),
             "membership": [_membership_payload(item) for item in membership],
             "identity_hash": identity_hash,
             "quality_status": quality.value,
@@ -798,11 +857,7 @@ def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
         signal_date=u0.signal_date,
         knowledge_cutoff=u0.knowledge_cutoff,
         source_snapshot_version=u0.source_snapshot_version,
-        eligible_codes=(
-            ()
-            if missing_identity
-            else tuple(sorted(representatives.values()))
-        ),
+        eligible_codes=tuple(u0.eligible_codes),
         membership=tuple(membership),
         identity_mapping=MappingProxyType(identity_mapping),
         identity_hash=identity_hash,
@@ -817,7 +872,11 @@ def _project_resolution_to_snapshot(
 ) -> UniverseResolution:
     """Project the base resolution onto U1 while retaining legacy exclusions."""
 
-    selected = set(layers.u1.eligible_codes)
+    selected = (
+        set()
+        if layers.u1.quality_status is PITQualityStatus.PIT_INVALID
+        else {item.ts_code for item in layers.u1.membership if item.included}
+    )
     eligible = tuple(
         instrument
         for instrument in layers.resolution.eligible
@@ -1003,7 +1062,12 @@ def _select_latest_known(rows: pd.DataFrame) -> tuple[pd.Series | None, bool]:
         return None, False
 
     sortable = rows.copy()
-    sortable["_known_sort"] = sortable["known_from"].apply(
+    known_values = (
+        sortable["known_from"]
+        if "known_from" in sortable.columns
+        else pd.Series(index=sortable.index, dtype=object)
+    )
+    sortable["_known_sort"] = known_values.apply(
         lambda value: _optional_timestamp(value) or pd.Timestamp.min
     )
     latest_known = sortable["_known_sort"].max()
@@ -1021,7 +1085,7 @@ def _instrument_from_row(row: pd.Series) -> FundInstrumentVersion:
     )
     return FundInstrumentVersion(
         ts_code=str(row.get("ts_code")),
-        valid_from=_format_date(row.get("valid_from")),
+        valid_from=_optional_format_date(row.get("valid_from")),
         valid_to=_optional_format_date(row.get("valid_to")),
         known_from=_optional_format_datetime(row.get("known_from")),
         revision_id=_optional_string(row.get("revision_id")),
@@ -1094,13 +1158,9 @@ def _snapshot_integrity_exclusions(
         invalid_date_fields = []
         for field in ("valid_from", "valid_to", "known_from", "list_date", "delist_date"):
             if field not in code_rows.columns:
-                if field == "valid_from":
-                    invalid_date_fields.append(field)
                 continue
             values = code_rows[field]
             if any(_invalid_timestamp(value) for value in values):
-                invalid_date_fields.append(field)
-            elif field == "valid_from" and any(not _has_value(value) for value in values):
                 invalid_date_fields.append(field)
         if {"valid_from", "valid_to"}.issubset(code_rows.columns):
             for _, row in code_rows.iterrows():
@@ -1159,12 +1219,30 @@ def _snapshot_integrity_exclusions(
 
 
 def _has_unsortable_same_knowledge_tie(rows: pd.DataFrame) -> bool:
-    if not {"known_from", "revision_id"}.issubset(rows.columns):
+    if "ts_code" not in rows.columns:
         return False
-    for _, group in rows.groupby(rows["known_from"].apply(_optional_format_datetime)):
+    known_values = (
+        rows["known_from"]
+        if "known_from" in rows.columns
+        else pd.Series([None] * len(rows), index=rows.index, dtype=object)
+    )
+    knowledge_keys = known_values.apply(
+        lambda value: (
+            _optional_format_datetime(value)
+            if _has_value(value)
+            else "__MISSING_KNOWN_FROM__"
+        )
+    )
+    for _, group in rows.groupby(knowledge_keys):
         if len(group) <= 1:
             continue
-        revision_values = [_optional_string(value) for value in group["revision_id"]]
+        revision_values = [
+            _optional_string(value)
+            for value in group.get(
+                "revision_id",
+                pd.Series([None] * len(group), index=group.index, dtype=object),
+            )
+        ]
         if any(value is None for value in revision_values):
             return True
         if len(set(revision_values)) != len(revision_values):
@@ -1173,7 +1251,7 @@ def _has_unsortable_same_knowledge_tie(rows: pd.DataFrame) -> bool:
 
 
 def _has_valid_range_overlap(rows: pd.DataFrame) -> bool:
-    if not {"valid_from", "valid_to"}.issubset(rows.columns):
+    if rows.empty:
         return False
     intervals = []
     for _, row in rows.iterrows():
@@ -1428,7 +1506,7 @@ def _exclusion_sort_key(exclusion: UniverseExclusion) -> tuple[str, str, str]:
 
 
 def _count_overlapping_ranges(rows: pd.DataFrame, start_col: str, end_col: str) -> int:
-    if start_col not in rows.columns or end_col not in rows.columns or "ts_code" not in rows.columns:
+    if "ts_code" not in rows.columns:
         return 0
     overlaps = 0
     for _, group in rows.groupby("ts_code"):
@@ -1445,11 +1523,22 @@ def _count_overlapping_ranges(rows: pd.DataFrame, start_col: str, end_col: str) 
 
 
 def _count_same_knowledge_ties(rows: pd.DataFrame) -> int:
-    if "known_from" not in rows.columns or "ts_code" not in rows.columns:
+    if "ts_code" not in rows.columns:
         return 0
     count = 0
     for _, group in rows.groupby("ts_code"):
-        known_counts = group["known_from"].apply(_optional_format_datetime).value_counts()
+        known_values = (
+            group["known_from"]
+            if "known_from" in group.columns
+            else pd.Series([None] * len(group), index=group.index, dtype=object)
+        )
+        known_counts = known_values.apply(
+            lambda value: (
+                _optional_format_datetime(value)
+                if not _invalid_timestamp(value)
+                else None
+            )
+        ).value_counts(dropna=False)
         count += int(known_counts[known_counts > 1].sum())
     return count
 

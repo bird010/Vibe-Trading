@@ -1,5 +1,7 @@
 # 基金轮动研究有效性路线设计
 
+> **契约增补说明：** U1 的可选 identity/PIT 字段及 research-only 语义由 `docs/superpowers/specs/2026-08-30-research-permissive-u1-design.md` 增补并取代本文件中的旧版冲突表述。当前执行以该增补为准；本文件仍作为 Batch 0–6 与 Shadow A 的总体路线记录。
+
 **目标：** 按研究有效性优先的顺序，修复证据口径、建立 PIT 基金池和资产身份层、补齐容量感知执行，再以独立策略 ID 完成 R40 前瞻影子验证、单变量趋势实验、机制归因、风险层和幸存机制组合。
 
 ## 1. 范围与不可变约束
@@ -70,9 +72,9 @@ price_volume_availability
 event_time / available_time / revision_policy
 ```
 
-U0 只筛选决策日已上市、可交易、历史价格和成交量可用的基金；U1 在 U0 上按底层资产身份去重。代表基金只能使用决策日前已知的成交额、上市时长、跟踪误差和历史可靠费率选择。每个调仓日写入 membership reason、identity hash 和 snapshot fingerprint，U0/U1 不可覆盖。
+U0 只筛选决策日已上市、可交易、历史价格和成交量可用的基金；U1 的语义仍然是 U0 的身份层，但当前最小实现明确采用“U1 由 U0 派生、结果集合相同”：每个调仓日先冻结 U0，再从该 U0 做身份校验并原样派生 U1。`u1_equals_u0=true` 仅表示本次快照的 U1 成员代码集合与 U0 相同，不取消 U1 层，也不跳过身份校验。可选身份/PIT 字段缺失、部分缺失或冲突时，U1 保持相同集合并标记 research-only，同时禁止晋级和部署；核心行情、快照完整性、日期和可交易性错误仍 fail-closed。代表基金只能使用决策日前已知的成交额、上市时长、跟踪误差和历史可靠费率选择。每个调仓日写入 membership reason、identity hash、snapshot fingerprint 和 U0/U1 集合相等性证据，U0/U1 不可覆盖。
 
-U0/U1 先扩展现有 `pit_universe.py`、`universe.py` 和 snapshot/manifest 接口，不复制一套新的 universe 解析器；只有现有字段无法表达身份版本时才增加兼容字段。
+U0/U1 先扩展现有 `pit_universe.py`、`universe.py` 和 snapshot/manifest 接口，不复制一套新的 universe 解析器；只有现有字段无法表达身份版本时才增加兼容字段。实现只增加 U0→U1 的显式派生适配和集合相等性证据，复用现有身份键、哈希和核心 fail-closed 规则；不修改聚类算法，聚类继续只消费 U1。
 
 ### 3.3 容量感知代表基金回退
 
@@ -131,6 +133,6 @@ Batch 0 → Luna review → Batch 1 → Luna review → Batch 2 → Luna review
 
 ## 5. 验收与失败处理
 
-数据门、策略门和前瞻门分开判断。数据门失败时只能输出不可晋级报告，不得用收益弥补。历史实验失败仍保留其 manifest、结果和失败原因。缺失数据、未知规则、哈希不一致、未来字段可见、账本不平和冻结配置改变均 fail-closed；需要改变机制时开启新策略 ID、新实验和新版本。
+数据门、策略门和前瞻门分开判断。数据门失败时只能输出不可晋级报告，不得用收益弥补。历史实验失败仍保留其 manifest、结果和失败原因。核心数据缺失、未知规则、哈希不一致、未来字段可见、账本不平和冻结配置改变均 fail-closed；可选 identity/PIT 字段缺失或冲突只允许 research-only，并阻止晋级/部署。需要改变机制时开启新策略 ID、新实验和新版本。
 
 最终交付必须包括：Batch 0–6 的代码、测试、运行 manifest、中文报告和晋级/停止结论；R40 Shadow 的冻结 manifest、持续账户产物、事件账本和当前观察状态；以及 requirement-by-requirement 验收矩阵。未达到真实前瞻观察长度的项目必须明确标记未完成，不能以历史回测结论冒充完成。

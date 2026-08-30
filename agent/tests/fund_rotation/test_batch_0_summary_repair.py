@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -9,6 +13,36 @@ from experiments.fund_rotation_research_validity.batch_0_summary_repair import (
     build_repaired_summary,
     repair_summary,
 )
+
+
+def test_batch_0_cli_runs_from_repository_root_without_pythonpath(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "experiments/fund_rotation_research_validity/batch_0_summary_repair.py"
+    source_run = tmp_path / "source"
+    _write_source_run(source_run)
+    output_dir = tmp_path / "batch0-cli"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--run-dir", str(source_run), "--output-dir", str(output_dir)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["turnover"] == 2.0
+    assert summary["metric_contract_version"] == "execution_diagnostics_v2"
+    manifest = json.loads((output_dir / "repair_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_artifact_sha256"] == {
+        name: hashlib.sha256((source_run / name).read_bytes()).hexdigest()
+        for name in ("orders.csv", "positions.csv", "equity.csv", "trade_events.csv")
+    }
+    assert (output_dir / "batch_0_report.md").is_file()
 
 
 def test_build_repaired_summary_projects_v2_metrics_without_zero_defaults() -> None:

@@ -188,7 +188,7 @@ def test_formal_pit_adapter_forwards_universe_resolver_context():
     assert resolver.calls[0]["mode"] is PITQueryMode.AS_WAS_KNOWN
 
 
-def test_formal_pit_adapter_can_explicitly_project_u1_without_changing_default_u0():
+def test_formal_pit_adapter_projects_u1_with_the_u0_eligible_set():
     rows = [
         {
             "ts_code": "A",
@@ -249,8 +249,13 @@ def test_formal_pit_adapter_can_explicitly_project_u1_without_changing_default_u
         fallback_universe=frozenset({"A", "B"}),
     )
 
-    assert [instrument.ts_code for instrument in result.eligible] == ["A"]
+    assert [instrument.ts_code for instrument in result.eligible] == ["A", "B"]
     assert result.coverage_diagnostics["duplicate_identity_count"] == 1
+    assert result.coverage_diagnostics["u1_equals_u0"] is True
+    assert result.coverage_diagnostics["identity_validation_status"] == "CONFLICT"
+    assert result.coverage_diagnostics["research_execution_allowed"] is True
+    assert result.coverage_diagnostics["promotion_allowed"] is False
+    assert result.coverage_diagnostics["deployment_allowed"] is False
     assert result.snapshot_fingerprint
 
 

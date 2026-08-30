@@ -214,6 +214,7 @@ def generate(
         tradability = StrictTradabilityView(_read_records(tradability_path))
         resolver = UniverseResolver(PITFundMaster(master_records))
         invalid_dates: list[str] = []
+        research_only_dates: list[str] = []
         for signal_date in dates:
             layers = resolver.resolve_identity_layers(
                 signal_date=signal_date,
@@ -239,14 +240,23 @@ def generate(
                 for payload in (u0, u1)
             ):
                 invalid_dates.append(signal_date)
+            elif u1["quality_status"] == "RESEARCH_ONLY_UNVERIFIED_UNIVERSE":
+                research_only_dates.append(signal_date)
             manifest["snapshots"].append({"signal_date": signal_date, "u0": u0, "u1": u1})
         if not dates:
             manifest["snapshot_status"] = _unavailable("rebalance date list is empty")
         else:
             manifest["snapshot_status"] = {
-                "status": "invalid" if invalid_dates else "available",
+                "status": (
+                    "invalid"
+                    if invalid_dates
+                    else "available_research_only"
+                    if research_only_dates
+                    else "available"
+                ),
                 "date_count": len(dates),
                 "invalid_dates": invalid_dates,
+                "research_only_dates": research_only_dates,
             }
 
     manifest_path = output_dir / "manifest.json"
@@ -267,9 +277,11 @@ def generate(
         f"- manifest SHA-256：`{manifest_hash}`\n\n"
         "## 证据边界\n\n"
         "U0 复用既有 `UniverseResolver` 的 AS_WAS_KNOWN、上市/退市边界、三层 exclusion "
-        "和旧 diagnostics；U1 仅在 U0 上按 underlying index、asset class、region、currency、"
-        "leveraged/inverse、share-class/feeder 关系确定性去重。未来已知、边界不确定和身份不完整"
-        "均不进入 U1。\n\n"
+        "和旧 diagnostics；U1 从冻结 U0 派生并保持相同 eligible 集合；身份完整且无冲突时记录 "
+        "`u1_equals_u0=true`；身份缺失或冲突时仍保留相同 `eligible_codes` 作为研究对照，相关成员"
+        "保持 `included`，U1 标记为 `RESEARCH_ONLY_UNVERIFIED_UNIVERSE`，允许研究运行但禁止 "
+        "promotion/deployment。PIT 可选证据缺失或部分时同样允许研究运行但禁止 promotion/deployment。"
+        "未来已知和边界不确定的成员不作为 U1 有效成员。\n\n"
         "## 研究诊断\n\n"
         "available count、duplicate identity ratio、identity hash 和 snapshot fingerprint 在可用"
         "输入时逐日期写入 manifest。momentum coverage、max cluster share、effective cluster count "

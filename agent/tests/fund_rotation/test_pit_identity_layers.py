@@ -60,8 +60,13 @@ def _resolver(rows: list[dict[str, object]]) -> UniverseResolver:
 def test_identity_layers_include_known_before_cutoff_and_exclude_future_known() -> None:
     resolver = _resolver(
         [
-            _identity_row("known.SH"),
-            _identity_row("boundary.SH", known_from="2020-03-01T15:00:00"),
+            _identity_row("known.SH", underlying_index="000301.SH", tracking_index="000301.SH"),
+            _identity_row(
+                "boundary.SH",
+                known_from="2020-03-01T15:00:00",
+                underlying_index="000300.SH",
+                tracking_index="000300.SH",
+            ),
             _identity_row("future.SH", known_from="2020-03-01T15:00:01"),
             _identity_row("not_yet.SH", list_date="2020-03-02"),
             _identity_row("delisted.SH", delist_date="2020-03-01"),
@@ -78,7 +83,17 @@ def test_identity_layers_include_known_before_cutoff_and_exclude_future_known() 
     )
 
     assert layers.u0.eligible_codes == ("boundary.SH", "known.SH")
-    assert layers.u1.eligible_codes == ("boundary.SH",)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    u1_eligible_membership = [
+        item for item in layers.u1.membership if item.ts_code in layers.u0.eligible_codes
+    ]
+    assert {item.ts_code for item in u1_eligible_membership} == set(layers.u0.eligible_codes)
+    assert all(
+        item.included and item.reason_code == "U1_DERIVED_FROM_U0"
+        for item in layers.u1.membership
+        if item.ts_code in layers.u0.eligible_codes
+    )
     reasons = {item.ts_code: item.reason_code for item in layers.u0.membership}
     assert reasons["future.SH"] == ExclusionReasonCode.KNOWN_AFTER_CUTOFF.value
     assert reasons["not_yet.SH"] == ExclusionReasonCode.NOT_YET_LISTED.value
@@ -105,7 +120,7 @@ def test_u1_membership_preserves_u0_exclusion_reasons() -> None:
     assert reasons["future.SH"] == ExclusionReasonCode.KNOWN_AFTER_CUTOFF.value
 
 
-def test_u1_deduplicates_same_identity_deterministically_and_exposes_duplicate() -> None:
+def test_u1_preserves_duplicate_identity_members_and_exposes_duplicate() -> None:
     rows = [
         _identity_row("510300.SH"),
         _identity_row("510301.SH"),
@@ -120,15 +135,20 @@ def test_u1_deduplicates_same_identity_deterministically_and_exposes_duplicate()
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert layers.u1.eligible_codes == ("510300.SH",)
-    duplicate = {item.ts_code: item for item in layers.u1.membership}["510301.SH"]
-    assert duplicate.reason_code == "DUPLICATE_IDENTITY"
-    assert duplicate.identity_key == layers.u1.identity_mapping["510300.SH"]
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert layers.u1.coverage_diagnostics["identity_validation_status"] == "CONFLICT"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert {
+        item.ts_code for item in layers.u1.membership if item.included
+    } == set(layers.u0.eligible_codes)
     assert layers.u1.coverage_diagnostics["duplicate_identity_count"] == 1
     assert layers.u1.coverage_diagnostics["duplicate_identity_ratio"] == 0.5
 
 
-def test_u1_missing_identity_is_fail_closed() -> None:
+def test_u1_missing_identity_allows_research_only_execution() -> None:
     layers = _resolver(
         [_identity_row("missing.SH", underlying_index=None, tracking_index=None)]
     ).resolve_identity_layers(
@@ -141,11 +161,17 @@ def test_u1_missing_identity_is_fail_closed() -> None:
     )
 
     assert layers.u0.eligible_codes == ("missing.SH",)
-    assert layers.u1.eligible_codes == ()
-    assert layers.u1.quality_status is PITQualityStatus.PIT_INVALID
-    assert all(not item.included for item in layers.u1.membership)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert layers.u1.coverage_diagnostics["identity_validation_status"] == "UNAVAILABLE"
+    assert layers.u1.coverage_diagnostics["pit_evidence_status"] in {"UNAVAILABLE", "PARTIAL"}
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+    assert layers.u1.membership[0].included is True
+    assert layers.u1.identity_mapping["missing.SH"] is None
     assert layers.u1.coverage_diagnostics["missing_identity_count"] == 1
-    assert layers.u1.membership[0].reason_code == "MISSING_IDENTITY"
 
 
 def test_identity_and_snapshot_hashes_are_stable_under_input_order() -> None:
@@ -206,10 +232,10 @@ def test_missing_decision_date_tradability_is_fail_closed() -> None:
     assert resolution.tradable_exclusions[0].details == "TRADABILITY_UNAVAILABLE"
 
 
-def test_mixed_timezone_query_is_fail_closed() -> None:
-    resolution = _resolver(
+def test_invalid_query_keeps_u1_fail_closed() -> None:
+    layers = _resolver(
         [_identity_row("mixed-timezone.SH", known_from="2020-03-01T15:00:00Z")]
-    ).resolve(
+    ).resolve_identity_layers(
         signal_date="2020-03-01",
         knowledge_cutoff="2020-03-01T15:00:00",
         strategy_policy=UniversePolicy(),
@@ -218,8 +244,10 @@ def test_mixed_timezone_query_is_fail_closed() -> None:
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert resolution.eligible == ()
-    assert resolution.quality_status is PITQualityStatus.PIT_INVALID
+    assert layers.resolution.eligible == ()
+    assert layers.resolution.quality_status is PITQualityStatus.PIT_INVALID
+    assert layers.u1.quality_status is PITQualityStatus.PIT_INVALID
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is False
 
 
 def test_distinct_revisions_at_same_knowledge_time_are_ambiguous() -> None:
@@ -242,7 +270,7 @@ def test_distinct_revisions_at_same_knowledge_time_are_ambiguous() -> None:
     assert resolution.master_exclusions[0].reason_code is ExclusionReasonCode.OVERLAPPING_VALID_RANGE
 
 
-def test_mixed_missing_identity_makes_u1_empty() -> None:
+def test_mixed_missing_identity_keeps_u0_set_for_research_only() -> None:
     layers = _resolver(
         [
             _identity_row("valid.SH"),
@@ -257,9 +285,17 @@ def test_mixed_missing_identity_makes_u1_empty() -> None:
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert layers.u1.eligible_codes == ()
-    assert layers.u1.quality_status is PITQualityStatus.PIT_INVALID
-    assert all(not item.included for item in layers.u1.membership)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert layers.u1.coverage_diagnostics["identity_validation_status"] == "PARTIAL"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+    assert {
+        item.ts_code for item in layers.u1.membership if item.included
+    } == set(layers.u0.eligible_codes)
+    assert layers.u1.identity_mapping["missing.SH"] is None
 
 
 def test_tradability_conflict_is_order_independent_and_fail_closed() -> None:
@@ -339,8 +375,10 @@ def test_malformed_tradability_tuples_are_fail_closed(value: object) -> None:
     assert resolution.tradable_exclusions[0].details == "TRADABILITY_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("field", ["valid_from", "valid_to", "list_date", "delist_date"])
-def test_malformed_lifecycle_dates_fail_closed_with_stable_reason(field: str) -> None:
+@pytest.mark.parametrize(
+    "field", ["valid_from", "valid_to", "known_from", "list_date", "delist_date"]
+)
+def test_malformed_pit_dates_fail_closed_with_stable_reason(field: str) -> None:
     resolution = _resolver(
         [_identity_row("malformed-date.SH", **{field: "not-a-date"})]
     ).resolve(
@@ -357,11 +395,11 @@ def test_malformed_lifecycle_dates_fail_closed_with_stable_reason(field: str) ->
     assert resolution.master_exclusions[0].reason_code is ExclusionReasonCode.INVALID_LIFECYCLE_DATES
 
 
-def test_missing_valid_from_fails_closed_with_stable_reason() -> None:
+def test_missing_valid_from_is_open_lower_bound_and_research_only() -> None:
     row = _identity_row("missing-valid-from.SH")
     row["valid_from"] = None
 
-    resolution = _resolver([row]).resolve(
+    layers = _resolver([row]).resolve_identity_layers(
         signal_date="2020-03-01",
         knowledge_cutoff="2020-03-01T15:00:00",
         strategy_policy=UniversePolicy(),
@@ -370,9 +408,87 @@ def test_missing_valid_from_fails_closed_with_stable_reason() -> None:
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert resolution.eligible == ()
-    assert resolution.quality_status is PITQualityStatus.PIT_INVALID
-    assert resolution.master_exclusions[0].reason_code is ExclusionReasonCode.INVALID_LIFECYCLE_DATES
+    assert layers.u0.eligible_codes == ("missing-valid-from.SH",)
+    assert layers.u0.identity_mapping == layers.u1.identity_mapping
+    assert layers.resolution.eligible[0].valid_from is None
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["pit_evidence_status"] == "PARTIAL"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+
+
+def test_absent_valid_from_column_is_open_lower_bound_and_research_only() -> None:
+    row = _identity_row("absent-valid-from.SH")
+    row.pop("valid_from")
+
+    layers = _resolver([row]).resolve_identity_layers(
+        signal_date="2020-03-01",
+        knowledge_cutoff="2020-03-01T15:00:00",
+        strategy_policy=UniversePolicy(),
+        causal_view=DictCausalView(),
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    assert layers.u0.eligible_codes == ("absent-valid-from.SH",)
+    assert layers.resolution.eligible[0].valid_from is None
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.identity_mapping == layers.u0.identity_mapping
+    assert layers.u1.coverage_diagnostics["pit_evidence_status"] != "VERIFIED"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+
+
+def test_missing_known_from_remains_research_eligible_without_fabrication() -> None:
+    row = _identity_row("missing-known-from.SH")
+    row["known_from"] = None
+
+    layers = _resolver([row]).resolve_identity_layers(
+        signal_date="2020-03-01",
+        knowledge_cutoff="2020-03-01T15:00:00",
+        strategy_policy=UniversePolicy(),
+        causal_view=DictCausalView(),
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    assert layers.resolution.eligible[0].known_from is None
+    assert layers.u0.eligible_codes == ("missing-known-from.SH",)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["pit_evidence_status"] != "VERIFIED"
+    assert layers.u1.coverage_diagnostics["future_known_excluded_count"] == 0
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+
+
+def test_absent_known_from_column_remains_research_eligible_without_fabrication() -> None:
+    row = _identity_row("absent-known-from.SH")
+    row.pop("known_from")
+
+    layers = _resolver([row]).resolve_identity_layers(
+        signal_date="2020-03-01",
+        knowledge_cutoff="2020-03-01T15:00:00",
+        strategy_policy=UniversePolicy(),
+        causal_view=DictCausalView(),
+        snapshot_version=7,
+        mode=PITQueryMode.AS_WAS_KNOWN,
+    )
+
+    assert layers.resolution.eligible[0].known_from is None
+    assert layers.u0.eligible_codes == ("absent-known-from.SH",)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["pit_evidence_status"] != "VERIFIED"
+    assert layers.u1.coverage_diagnostics["future_known_excluded_count"] == 0
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
 
 
 def test_missing_list_date_cannot_be_reported_as_verified() -> None:
@@ -430,7 +546,16 @@ def test_boolean_and_numeric_leverage_values_share_identity() -> None:
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert layers.u1.eligible_codes == ("leverage-bool.SH",)
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert layers.u1.coverage_diagnostics["identity_validation_status"] == "CONFLICT"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+    assert {
+        item.ts_code for item in layers.u1.membership if item.included
+    } == set(layers.u0.eligible_codes)
 
 
 def test_string_boolean_leverage_values_share_identity_and_invalid_numbers_do_not() -> None:
@@ -458,9 +583,26 @@ def test_string_boolean_leverage_values_share_identity_and_invalid_numbers_do_no
         mode=PITQueryMode.AS_WAS_KNOWN,
     )
 
-    assert layers.u1.eligible_codes == ("leverage-string-false.SH",)
-    assert invalid.u1.eligible_codes == ()
-    assert invalid.u1.quality_status is PITQualityStatus.PIT_INVALID
+    assert layers.u1.eligible_codes == layers.u0.eligible_codes
+    assert layers.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert layers.u1.coverage_diagnostics["identity_validation_status"] == "CONFLICT"
+    assert layers.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert layers.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert layers.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert layers.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+    assert {
+        item.ts_code for item in layers.u1.membership if item.included
+    } == set(layers.u0.eligible_codes)
+    assert invalid.u1.eligible_codes == invalid.u0.eligible_codes
+    assert invalid.u1.coverage_diagnostics["u1_equals_u0"] is True
+    assert invalid.u1.coverage_diagnostics["identity_validation_status"] == "UNAVAILABLE"
+    assert invalid.u1.coverage_diagnostics["research_execution_allowed"] is True
+    assert invalid.u1.coverage_diagnostics["promotion_allowed"] is False
+    assert invalid.u1.coverage_diagnostics["deployment_allowed"] is False
+    assert invalid.u1.quality_status is PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
+    assert {
+        item.ts_code for item in invalid.u1.membership if item.included
+    } == set(invalid.u0.eligible_codes)
 
 
 def test_snapshot_fingerprint_covers_final_research_diagnostics() -> None:
@@ -542,6 +684,62 @@ def test_experiment_outputs_are_immutable_after_first_write(tmp_path) -> None:
     bad_kwargs["cutoff_time"] = "09:30:00"
     with pytest.raises(ValueError, match="15:00:00"):
         generate(snapshot_version=3, **bad_kwargs)
+
+
+def test_generated_snapshot_serializes_u1_same_set_evidence(tmp_path) -> None:
+    master_path = tmp_path / "master.json"
+    dates_path = tmp_path / "dates.json"
+    tradability_path = tmp_path / "tradability.json"
+    output_dir = tmp_path / "batch_1"
+    report_path = tmp_path / "report.md"
+    master_path.write_text(
+        json.dumps([_identity_row("valid.SH")]),
+        encoding="utf-8",
+    )
+    dates_path.write_text(json.dumps(["2020-03-01"]), encoding="utf-8")
+    tradability_path.write_text(
+        json.dumps([{"signal_date": "2020-03-01", "ts_code": "valid.SH", "tradable": True}]),
+        encoding="utf-8",
+    )
+
+    generate(
+        master_path=master_path,
+        dates_path=dates_path,
+        tradability_path=tradability_path,
+        output_dir=output_dir,
+        report_path=report_path,
+        snapshot_version=7,
+        cutoff_time="15:00:00",
+    )
+
+    persisted_manifest = json.loads(
+        (output_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert persisted_manifest["snapshot_status"]["status"] == "available_research_only"
+    assert persisted_manifest["snapshot_status"]["date_count"] == 1
+    assert persisted_manifest["snapshots"]
+    for snapshot in persisted_manifest["snapshots"]:
+        diagnostics = snapshot["u1"]["coverage_diagnostics"]
+        assert diagnostics["u1_equals_u0"] is True
+        assert diagnostics["identity_validation_status"] == "VERIFIED"
+        assert diagnostics["pit_evidence_status"] == "PARTIAL"
+        assert diagnostics["research_execution_allowed"] is True
+        assert diagnostics["promotion_allowed"] is False
+        assert diagnostics["deployment_allowed"] is False
+        assert set(snapshot["u1"]["eligible_codes"]) == set(
+            snapshot["u0"]["eligible_codes"]
+        )
+        assert snapshot["u0"]["quality_status"] != "PIT_INVALID"
+        assert snapshot["u1"]["quality_status"] == "RESEARCH_ONLY_UNVERIFIED_UNIVERSE"
+        assert snapshot["u1"]["membership"][0]["included"] is True
+    assert "U1 从冻结 U0 派生并保持相同 eligible 集合" in report_path.read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "身份缺失或冲突时仍保留相同 `eligible_codes` 作为研究对照，相关成员保持 `included`，"
+        "U1 标记为 `RESEARCH_ONLY_UNVERIFIED_UNIVERSE`，允许研究运行但禁止 promotion/deployment。"
+        "PIT 可选证据缺失或部分时同样允许研究运行但禁止 promotion/deployment。"
+    ) in report_path.read_text(encoding="utf-8")
 
 
 def test_manifest_top_level_status_reflects_invalid_snapshot_date(tmp_path) -> None:
