@@ -1,0 +1,41 @@
+{
+  "frozen_at": "2026-08-30T02:06:15.142553+00:00",
+  "hard_gates": [
+    {
+      "comparison_operator": ">=",
+      "evaluation_scope": "shadow_deployment",
+      "evidence_artifact": "shadow_metrics.json",
+      "formula": "calendar_weeks(first_shadow_decision, assessment_time)",
+      "gate_id": "min-forward-observation-weeks",
+      "metric_name": "forward_observation_weeks",
+      "missing_data_policy": "FAIL_CLOSED",
+      "threshold": 26
+    },
+    {
+      "comparison_operator": ">=",
+      "evaluation_scope": "shadow_deployment",
+      "evidence_artifact": "shadow_account_state.json",
+      "formula": "count(sealed_and_executed_shadow_rebalance_cycles)",
+      "gate_id": "min-completed-rebalance-cycles",
+      "metric_name": "completed_rebalance_cycles",
+      "missing_data_policy": "FAIL_CLOSED",
+      "threshold": 6
+    }
+  ],
+  "policy_hash": "6620e588c64ff5aeaf3f175ce918052f1dfef664d27fb7794d2b1202921222b5",
+  "policy_id": "r40-shadow-a-forward-qualification-v1",
+  "schema_version": "qualification-policy/v1",
+  "target_transition": "CAN_GRANT_DECISION_ELIGIBILITY",
+  "warning_gates": [
+    {
+      "comparison_operator": ">=",
+      "evaluation_scope": "shadow_deployment",
+      "evidence_artifact": "shadow_metrics.json",
+      "formula": "count(pre_registered_regimes_observed)",
+      "gate_id": "regime-coverage",
+      "metric_name": "regime_exposure_coverage",
+      "missing_data_policy": "WARN",
+      "threshold": 3
+    }
+  ]
+}

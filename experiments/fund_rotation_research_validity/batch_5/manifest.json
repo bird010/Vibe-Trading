@@ -1,0 +1,93 @@
+{
+  "architecture_decision": "pending_u1_paired_risk_evidence",
+  "arms": [
+    {
+      "defense": "cash",
+      "id": "R75_VOL_TARGET",
+      "strategy_id": "ai_rotation_r75_r39_vol_target"
+    },
+    {
+      "defense": "cash",
+      "id": "R76_CASH",
+      "strategy_id": "ai_rotation_r76_cash_defense_baseline"
+    },
+    {
+      "defense": "fixed_short_bond",
+      "id": "FIXED_SHORT_BOND",
+      "strategy_id": "ai_rotation_r76_fixed_short_bond"
+    },
+    {
+      "defense": "relative_momentum",
+      "id": "R77_DEFENSE_RELATIVE_MOMENTUM",
+      "strategy_id": "ai_rotation_r77_defense_relative_momentum"
+    }
+  ],
+  "defense_pool": [
+    "511010.SH",
+    "511880.SH",
+    "518880.SH"
+  ],
+  "experiment_id": "batch_5_risk_layers",
+  "fixed_short_bond": "511010.SH",
+  "folds": {
+    "completed": 0,
+    "required": 3,
+    "status": "unavailable"
+  },
+  "generated_at": "2026-08-30T00:00:00+08:00",
+  "identity_breadth": "independent U1 identities only",
+  "inputs": {
+    "causal_defense_history": {
+      "reason": "no verified defense-pool history supplied",
+      "status": "unavailable"
+    },
+    "paired_backtest": {
+      "reason": "no verified four-arm paired input supplied",
+      "status": "unavailable"
+    },
+    "u1_manifest": {
+      "reason": "no verified frozen U1 input supplied",
+      "status": "unavailable"
+    }
+  },
+  "metrics": {
+    "cagr": "unavailable",
+    "calmar": "unavailable",
+    "cash_occupancy": "unavailable",
+    "defense_turnover": "unavailable",
+    "fold_contribution": "unavailable",
+    "max_drawdown": "unavailable",
+    "sharpe": "unavailable"
+  },
+  "promotion_allowed": false,
+  "reason": "缺少冻结 U1、相同快照下的四臂 paired backtest、三折和防御资产因果历史",
+  "schema_version": "fund-rotation-risk-layer-experiment/v1",
+  "source_identity": {
+    "experiment_script_path": "E:\\code\\stock\\Vibe-Trading\\experiments\\fund_rotation_research_validity\\batch_5_risk_layers.py",
+    "experiment_script_sha256": "2074b34db60adac10fef466a46a854067b6e80b685104b3d3a4c51e22b9c7e40",
+    "r75_strategy_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\ai_rotation_r75_r39_vol_target\\strategy.py",
+    "r75_strategy_sha256": "cad18674983f5bc0cc2be2ac5b13444a70f03c52ea9f47e93b7a833ac6829778",
+    "r76_strategy_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\ai_rotation_r76_cash_defense_baseline\\strategy.py",
+    "r76_strategy_sha256": "3a5900bb2c2f2cc32c90b84e064c3c8d8a66197a8e9f977e3d378882c8884b33",
+    "r77_strategy_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\ai_rotation_r77_defense_relative_momentum\\strategy.py",
+    "r77_strategy_sha256": "410b858e88d3fa149a85cf28eff7a3960d68b8fd31530f3c945dabadeb56f388",
+    "registry_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\registry.py",
+    "registry_sha256": "8963c501ef9f20c738afb85fc531a13aaf948bbde6eed42e914a970fdf46c364",
+    "risk_layers_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\risk_layers.py",
+    "risk_layers_sha256": "2b854b43504472e98373456389bcacb00f1e0e9d5713d2d3fc908e268d088b4a",
+    "test_path": "E:\\code\\stock\\Vibe-Trading\\agent\\tests\\fund_rotation\\test_risk_layers.py",
+    "test_sha256": "b1e07392f7925a060c2857cbbeb3599d0901663765eb47040b26eda511b46c8a"
+  },
+  "status": "UNAVAILABLE_INPUTS",
+  "stress_scenarios": {
+    "2x_cost": "unavailable",
+    "normal_cost": "unavailable",
+    "t_plus_1": "unavailable",
+    "t_plus_2": "unavailable"
+  },
+  "volatility_target": {
+    "formula": "min(1, target_volatility / portfolio_volatility)",
+    "leverage": false,
+    "target": 0.15
+  }
+}

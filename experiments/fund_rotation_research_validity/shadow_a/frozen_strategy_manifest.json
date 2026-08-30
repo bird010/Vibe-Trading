@@ -1,0 +1,33 @@
+{
+  "accounting_contract_version": "daily_accounting_v1",
+  "config": {
+    "control_strategy_id": "ai_rotation_r39_incumbent_carry",
+    "r39_control_source_sha256": "9f9bcc49494adeb5e54f169b85605a078027098b9db3281fa895f18bf1c5d72c",
+    "r40_source_sha256": "12ec4e737be6438260b0b0f9c7ce74525d5514c7fdd895cf9e7f65edf61a2655",
+    "single_name_ceiling": 0.5,
+    "threshold_policy": "FROZEN_NO_RETUNING"
+  },
+  "config_hash": "2bed29550685cd758e40fa9f8680f21edd0d8fb066463c1b5f06f707ceb52675",
+  "data_contract_version": "pit-data/v1",
+  "effective_from": "2026-08-29T14:25:36.411869+00:00",
+  "execution_contract_version": "shadow-execution/v1",
+  "framework_hash": "44ca086aaee9bc324bfc3e45e5f2819f16f4a7f215f9a227c594954b581f1456",
+  "frozen_at": "2026-08-29T14:25:36.411869+00:00",
+  "identity_inputs": {
+    "frozen_u1_manifest": {
+      "path": null,
+      "status": "missing"
+    },
+    "r39_control_manifest": {
+      "path": null,
+      "status": "missing"
+    }
+  },
+  "implementation_hash": "a99f324dceebd2203060d3894f4810aa8dc35395133b6bee6e4b569e96e91faf",
+  "lifecycle": "FROZEN",
+  "parent_research_experiment_id": "shadow_a_r40_frozen_from_u1_and_r39_control",
+  "qualification_policy_hash": "9714822f5da10c6e0aeefd9bc9560f591bdea67aa77ba73c9786d04a2c5f4358",
+  "schema_version": "frozen-strategy-manifest/v1",
+  "strategy_id": "ai_rotation_r40_single_name_ceiling",
+  "strategy_version_id": "sv-9525ec8754d100c0"
+}

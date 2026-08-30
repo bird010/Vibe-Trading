@@ -309,7 +309,7 @@ class FundRotationBacktestRunner:
             benchmark_equity: dict[str, pd.Series] | None = None,
             benchmark_metrics: dict[str, dict[str, float]] | None = None,
             execution_diagnostics: dict[str, Any] | None = None,
-            quality_status: str = "VALID",
+            quality_status: str | None = None,
         ) -> FundRotationRunResult:
             return FundRotationRunResult(
                 status=SubRunStatus.FAILED,
@@ -332,7 +332,9 @@ class FundRotationBacktestRunner:
                 benchmark_equity=benchmark_equity or {},
                 benchmark_metrics=benchmark_metrics or {},
                 execution_diagnostics=execution_diagnostics or {},
-                quality_status=quality_status,
+                quality_status=(
+                    pit_quality_status if quality_status is None else quality_status
+                ),
             )
 
         for signal_date in scheduled:
@@ -345,6 +347,7 @@ class FundRotationBacktestRunner:
                         date: dict(weights)
                         for date, weights in targets_map.items()
                     },
+                    quality_status=pit_quality_status,
                 )
             pit_evidence = _resolve_pit_universe_for_signal(
                 self._pit_universe_resolver,
@@ -360,6 +363,23 @@ class FundRotationBacktestRunner:
                 pit_evidence.quality_status,
             )
 
+            def historical_pit_universe(historical_date: str) -> frozenset[str]:
+                nonlocal pit_quality_status
+                evidence = _resolve_pit_universe_for_signal(
+                    self._pit_universe_resolver,
+                    snapshot=snapshot,
+                    signal_date=str(historical_date),
+                    fallback_universe=fallback_universe,
+                )
+                pit_quality_status = _combine_pit_quality_status(
+                    pit_quality_status,
+                    evidence.quality_status,
+                )
+                universe_diagnostics_by_date[str(historical_date)] = dict(
+                    evidence.diagnostics
+                )
+                return evidence.universe
+
             view = CausalDataView(
                 self._fund_daily,
                 self._fund_adj,
@@ -368,14 +388,9 @@ class FundRotationBacktestRunner:
                 pd.Timestamp(signal_date),
                 universe,
                 pit_universe_lookup=(
-                    lambda historical_date: _resolve_pit_universe_for_signal(
-                        self._pit_universe_resolver,
-                        snapshot=snapshot,
-                        signal_date=str(historical_date),
-                        fallback_universe=fallback_universe,
-                    ).universe
+                    historical_pit_universe
                     if self._pit_universe_resolver is not None
-                    else universe
+                    else None
                 ),
                 historical_candidate_codes=frozenset(fallback_universe),
             )
@@ -437,6 +452,7 @@ class FundRotationBacktestRunner:
                     date: dict(weights)
                     for date, weights in targets_map.items()
                 },
+                quality_status=pit_quality_status,
             )
 
         native_execution_config = FundRotationConfig(
@@ -470,7 +486,7 @@ class FundRotationBacktestRunner:
                 initial_capital=execution.initial_capital,
                 knowledge_cutoff=_native_knowledge_cutoff(targets_map, evaluation_dates),
                 knowledge_cutoffs={
-                    trade_date: trade_date
+                    trade_date: _decision_knowledge_cutoff(trade_date)
                     for trade_date in evaluation_dates
                 },
                 snapshot_version=_native_snapshot_version(snapshot),
@@ -519,6 +535,7 @@ class FundRotationBacktestRunner:
                 orders=native_result.orders,
                 positions_history=native_result.positions_history,
                 execution_diagnostics=execution_diagnostics,
+                quality_status=pit_quality_status,
             )
 
         actual_dates = pd.Index(
@@ -547,10 +564,17 @@ class FundRotationBacktestRunner:
                 fallback_universe=fallback_universe,
             )
             benchmark_universes[benchmark_date] = benchmark_evidence.universe
+            universe_diagnostics_by_date[benchmark_date] = dict(
+                benchmark_evidence.diagnostics
+            )
             pit_quality_status = _combine_pit_quality_status(
                 pit_quality_status,
                 benchmark_evidence.quality_status,
             )
+
+        execution_diagnostics["universe"] = _summarize_universe_diagnostics(
+            universe_diagnostics_by_date
+        )
 
         self._benchmark_snapshot_version = _native_snapshot_version(snapshot)
         benchmark_equity = self._public_benchmarks(
@@ -901,14 +925,14 @@ def _resolve_pit_universe_for_signal(
         resolution = resolver.resolve_universe(
             snapshot=snapshot,
             signal_date=signal_date,
-            knowledge_cutoff=signal_date,
+            knowledge_cutoff=_decision_knowledge_cutoff(signal_date),
             fallback_universe=fallback_universe,
         )
     elif callable(resolver):
         resolution = resolver(
             snapshot=snapshot,
             signal_date=signal_date,
-            knowledge_cutoff=signal_date,
+            knowledge_cutoff=_decision_knowledge_cutoff(signal_date),
             fallback_universe=fallback_universe,
         )
     else:
@@ -962,7 +986,16 @@ def _extract_universe_diagnostics(resolution: object) -> dict[str, Any]:
     raw = _extract_resolution_value(resolution, "diagnostics", None)
     if raw is None:
         raw = _extract_resolution_value(resolution, "audit_metrics", None)
-    return dict(raw or {})
+    diagnostics = dict(raw or {})
+    for key in (
+        "identity_hash",
+        "snapshot_fingerprint",
+        "coverage_diagnostics",
+    ):
+        value = _extract_resolution_value(resolution, key, None)
+        if value not in (None, "", {}):
+            diagnostics[key] = dict(value) if key == "coverage_diagnostics" else value
+    return diagnostics
 
 
 def _extract_resolution_value(
@@ -991,6 +1024,10 @@ def _latest_pit_universe(
 
 def _quality_status_value(value: object) -> str:
     return str(value.value) if hasattr(value, "value") else str(value)
+
+
+def _decision_knowledge_cutoff(signal_date: str) -> str:
+    return f"{pd.Timestamp(signal_date).strftime('%Y%m%d')}T15:00:00"
 
 
 _PIT_QUALITY_ORDER = {
@@ -1023,8 +1060,8 @@ def _native_knowledge_cutoff(
     evaluation_dates: list[str],
 ) -> str:
     if targets_map:
-        return max(str(signal_date) for signal_date in targets_map)
-    return evaluation_dates[0]
+        return _decision_knowledge_cutoff(max(str(signal_date) for signal_date in targets_map))
+    return _decision_knowledge_cutoff(evaluation_dates[0])
 
 
 def _native_snapshot_version(snapshot: object) -> int:
@@ -1108,6 +1145,11 @@ def _summarize_universe_diagnostics(
     latest_date = sorted(universe_diagnostics_by_date)[-1]
     latest = dict(universe_diagnostics_by_date[latest_date])
     latest.pop("signal_date", None)
+    if len(universe_diagnostics_by_date) > 1:
+        latest["by_date"] = {
+            date: dict(diagnostics)
+            for date, diagnostics in sorted(universe_diagnostics_by_date.items())
+        }
     return latest
 
 

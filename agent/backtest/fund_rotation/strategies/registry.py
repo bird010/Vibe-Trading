@@ -198,6 +198,31 @@ from backtest.fund_rotation.strategies.ai_rotation_r69_r39_transition_cap.strate
     AiRotationR69R39TransitionCap50Strategy,
     AiRotationR70R39TransitionCap25Strategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r71_r39_capacity_aware_representative.strategy import (
+    AiRotationR71R39CapacityAwareRepresentativeStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r72_r39_absolute_momentum.strategy import (
+    AiRotationR72R39AbsoluteMomentumStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r73_r39_multi_horizon_rank.strategy import (
+    AiRotationR73R39MultiHorizonRankStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r74_r39_vol_adjusted_score.strategy import (
+    AiRotationR74R39VolAdjustedScoreStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r75_r39_vol_target.strategy import (
+    AiRotationR75R39VolTargetStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r76_cash_defense_baseline.strategy import (
+    AiRotationR76CashDefenseBaselineStrategy,
+    AiRotationR76FixedShortBondStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r77_defense_relative_momentum.strategy import (
+    AiRotationR77DefenseRelativeMomentumStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r78_survivor_combo.strategy import (
+    AiRotationR78SurvivorComboStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -267,4 +292,13 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR67R39RankBufferStrategy,
         AiRotationR69R39TransitionCap50Strategy,
         AiRotationR70R39TransitionCap25Strategy,
+        AiRotationR71R39CapacityAwareRepresentativeStrategy,
+        AiRotationR72R39AbsoluteMomentumStrategy,
+        AiRotationR73R39MultiHorizonRankStrategy,
+        AiRotationR74R39VolAdjustedScoreStrategy,
+        AiRotationR75R39VolTargetStrategy,
+        AiRotationR76CashDefenseBaselineStrategy,
+        AiRotationR76FixedShortBondStrategy,
+        AiRotationR77DefenseRelativeMomentumStrategy,
+        AiRotationR78SurvivorComboStrategy,
     )

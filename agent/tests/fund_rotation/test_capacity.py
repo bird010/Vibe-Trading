@@ -4,7 +4,328 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.fund_rotation.capacity import compute_adv20, apply_capacity_and_slippage, ADVIndex
+from backtest.fund_rotation.capacity import (
+    ADVIndex,
+    apply_capacity_and_slippage,
+    compute_adv20,
+    estimate_capacity,
+    select_capacity_aware_representative,
+)
+
+
+def _candidate(
+    code: str,
+    *,
+    score: float,
+    adv: float = 100_000.0,
+    tradable: bool = True,
+    volume_date: str = "20240105",
+    cluster: str = "cluster-1",
+    identity: str = "identity-1",
+    lot_size: int = 100,
+) -> dict[str, object]:
+    return {
+        "code": code,
+        "score": score,
+        "adv": adv,
+        "tradable": tradable,
+        "visible": True,
+        "known_at": "20240105",
+        "volume_date": volume_date,
+        "as_of_date": "20240105",
+        "cluster_id": cluster,
+        "identity_key": identity,
+        "lot_size": lot_size,
+    }
+
+
+def _market(**overrides: object) -> dict[str, object]:
+    market = {
+        "decision_cutoff": "20240106",
+        "max_participation": 0.05,
+        "execution_horizon": 1,
+        "lot_size": 100,
+        "target_cluster_id": "cluster-1",
+        "target_identity_key": "identity-1",
+    }
+    market.update(overrides)
+    return market
+
+
+def test_capacity_estimate_rounds_down_and_rejects_unknown_tradability():
+    estimate = estimate_capacity(
+        adv=1_050,
+        max_participation=0.1,
+        execution_horizon=2,
+        lot_size=100,
+        tradable_state=True,
+    )
+    assert estimate.capacity_quantity == 200
+    assert estimate.reason_code == "CAPACITY_AVAILABLE"
+
+    unavailable = estimate_capacity(
+        adv=None,
+        max_participation=0.1,
+        execution_horizon=2,
+        lot_size=100,
+        tradable_state=None,
+    )
+    assert unavailable.capacity_quantity == 0
+    assert unavailable.is_valid is False
+    assert unavailable.reason_code == "CAPACITY_EVIDENCE_UNAVAILABLE"
+
+
+def test_selector_carries_sufficient_prior_representative():
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=10), _candidate("B", score=9)],
+        target_quantity=1_000,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "A"
+    assert result.reason_code == "CAPACITY_CARRY"
+    assert result.used_fallback is False
+
+
+def test_selector_unlocks_zero_capacity_and_skips_blocked_first_fallback():
+    result = select_capacity_aware_representative(
+        [
+            _candidate("A", score=10, adv=0),
+            _candidate("B", score=9, tradable=False),
+            _candidate("C", score=8),
+        ],
+        target_quantity=1_000,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "C"
+    assert result.reason_code == "CAPACITY_FALLBACK"
+    assert result.used_fallback is True
+    assert result.diagnostics["blocked_codes"] == ["A", "B"]
+
+
+def test_selector_returns_cash_when_all_candidates_are_unavailable():
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=10, tradable=False), _candidate("B", score=9, adv=None)],
+        target_quantity=1_000,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative is None
+    assert result.filled_quantity == 0
+    assert result.reason_code == "CAPACITY_CASH_FALLBACK"
+
+
+def test_selector_excludes_future_volume_and_respects_anti_flap_state():
+    result = select_capacity_aware_representative(
+        [
+            _candidate("A", score=10, volume_date="20240107"),
+            _candidate("B", score=9),
+        ],
+        target_quantity=1_000,
+        market_observation=_market(
+            anti_flap_periods=2,
+            prior_periods_held=1,
+        ),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "B"
+    assert "A" in result.diagnostics["blocked_codes"]
+
+
+def test_selector_is_deterministic_for_equal_scores_and_multi_period_hold():
+    candidates = [_candidate("B", score=10), _candidate("A", score=10)]
+    first = select_capacity_aware_representative(
+        candidates,
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative=None,
+    )
+    held = select_capacity_aware_representative(
+        candidates,
+        target_quantity=100,
+        market_observation=_market(
+            anti_flap_periods=3,
+            prior_periods_held=1,
+        ),
+        prior_representative="B",
+    )
+    assert first.selected_representative == "A"
+    assert held.selected_representative == "B"
+    assert held.reason_code == "CAPACITY_CARRY"
+
+
+def test_selector_fails_closed_for_missing_causal_fields_and_scope():
+    candidate = _candidate("A", score=1)
+    missing_market = select_capacity_aware_representative(
+        [candidate],
+        target_quantity=100,
+        market_observation={"decision_cutoff": "20240106"},
+        prior_representative="A",
+    )
+    assert missing_market.reason_code == "CAPACITY_EVIDENCE_UNAVAILABLE"
+
+    missing_candidate = dict(candidate)
+    del missing_candidate["known_at"]
+    del missing_candidate["as_of_date"]
+    invalid_time = select_capacity_aware_representative(
+        [missing_candidate],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert invalid_time.selected_representative is None
+    assert invalid_time.diagnostics["blocked_reasons"]["A"] == "INVALID_KNOWN_TIME"
+
+    mixed_scope = select_capacity_aware_representative(
+        [candidate, _candidate("B", score=2, cluster="other")],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert mixed_scope.selected_representative == "A"
+    assert mixed_scope.diagnostics["blocked_reasons"]["B"] == "OUT_OF_SCOPE"
+
+
+def test_selector_accepts_zero_score_and_rejects_overflow():
+    result = select_capacity_aware_representative(
+        [_candidate("B", score=-1), _candidate("A", score=0)],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative=None,
+    )
+    assert result.selected_representative == "A"
+
+    overflow = select_capacity_aware_representative(
+        [_candidate("A", score=1, adv=float("inf"))],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert overflow.selected_representative is None
+    assert overflow.reason_code == "CAPACITY_CASH_FALLBACK"
+
+
+def test_selector_anti_flap_holds_nonzero_partial_capacity_but_not_hard_block():
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=10, adv=50_000), _candidate("B", score=9)],
+        target_quantity=6_000,
+        market_observation=_market(anti_flap_periods=2, prior_periods_held=1),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "A"
+    assert result.filled_quantity == 2_500
+    assert result.reason_code == "CAPACITY_ANTIFLAP_CARRY"
+
+    hard_block = select_capacity_aware_representative(
+        [_candidate("A", score=10, adv=0), _candidate("B", score=9)],
+        target_quantity=1_000,
+        market_observation=_market(anti_flap_periods=2, prior_periods_held=1),
+        prior_representative="A",
+    )
+    assert hard_block.selected_representative == "B"
+    assert hard_block.reason_code == "CAPACITY_FALLBACK"
+
+
+def test_selector_does_not_let_prior_override_explicit_scope():
+    result = select_capacity_aware_representative(
+        [
+            _candidate("A", score=10, cluster="other", identity="other"),
+            _candidate("B", score=9),
+        ],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "B"
+    assert result.diagnostics["blocked_reasons"]["A"] == "OUT_OF_SCOPE"
+
+
+def test_selector_requires_both_known_time_fields_and_rejects_ambiguous_dates():
+    missing_as_of = _candidate("A", score=1)
+    del missing_as_of["as_of_date"]
+    result = select_capacity_aware_representative(
+        [missing_as_of],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative is None
+    assert result.diagnostics["blocked_reasons"]["A"] == "INVALID_KNOWN_TIME"
+
+    ambiguous = _candidate("A", score=1)
+    ambiguous["known_at"] = "01/05/2024"
+    result = select_capacity_aware_representative(
+        [ambiguous],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative is None
+    assert result.diagnostics["blocked_reasons"]["A"] == "INVALID_KNOWN_TIME"
+
+    after_cutoff = _candidate("A", score=1)
+    after_cutoff["known_at"] = "20240106T15:00:01"
+    result = select_capacity_aware_representative(
+        [after_cutoff],
+        target_quantity=100,
+        market_observation=_market(decision_cutoff="20240106T15:00:00"),
+        prior_representative="A",
+    )
+    assert result.selected_representative is None
+    assert result.diagnostics["blocked_reasons"]["A"] == "NOT_VISIBLE_AT_CUTOFF"
+
+    same_day_volume = _candidate("A", score=1, volume_date="20240106")
+    same_day_volume["known_at"] = "20240106T15:00:00"
+    same_day_volume["as_of_date"] = "20240106T15:00:00"
+    result = select_capacity_aware_representative(
+        [same_day_volume],
+        target_quantity=100,
+        market_observation=_market(decision_cutoff="20240106T15:00:00"),
+        prior_representative="A",
+    )
+    assert result.selected_representative == "A"
+
+    after_date_cutoff = _candidate("A", score=1)
+    after_date_cutoff["known_at"] = "20240106T16:00:00"
+    result = select_capacity_aware_representative(
+        [after_date_cutoff],
+        target_quantity=100,
+        market_observation=_market(),
+        prior_representative="A",
+    )
+    assert result.selected_representative is None
+    assert result.diagnostics["blocked_reasons"]["A"] == "NOT_VISIBLE_AT_CUTOFF"
+
+
+def test_selector_rejects_partial_scope_and_invalid_market_parameters():
+    partial_scope = _market()
+    del partial_scope["target_identity_key"]
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=1)],
+        target_quantity=100,
+        market_observation=partial_scope,
+        prior_representative="A",
+    )
+    assert result.reason_code == "CAPACITY_EVIDENCE_UNAVAILABLE"
+
+    null_scope = _market(target_cluster_id=None, target_identity_key=None)
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=1)],
+        target_quantity=100,
+        market_observation=null_scope,
+        prior_representative="A",
+    )
+    assert result.reason_code == "CAPACITY_EVIDENCE_UNAVAILABLE"
+
+    invalid_market = _market(lot_size=0)
+    result = select_capacity_aware_representative(
+        [_candidate("A", score=1, lot_size=100)],
+        target_quantity=100,
+        market_observation=invalid_market,
+        prior_representative="A",
+    )
+    assert result.reason_code == "CAPACITY_EVIDENCE_UNAVAILABLE"
 
 
 def _market_df(dates: list[str], amounts: list[float], code: str = "A") -> pd.DataFrame:

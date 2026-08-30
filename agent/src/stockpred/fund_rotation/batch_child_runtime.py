@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import asdict
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ import pandas as pd
 
 from backtest.fund_rotation.contracts import StrategyArtifact
 from backtest.fund_rotation.evaluation import EvaluationContext
+from backtest.fund_rotation.execution_ledger_v2 import METRIC_CONTRACT_VERSION
 from src.stockpred.fund_rotation.artifact_publisher import (
     ArtifactPublisher,
     read_valid_manifest,
@@ -61,6 +65,67 @@ def _strategy_pipeline_metadata(registered, resolved_config: dict[str, Any]) -> 
         "name": registered.descriptor.name,
         **metadata,
     }
+
+
+def project_execution_summary_metrics(result: Any) -> dict[str, Any]:
+    """Project only explicitly available execution v2 metrics into summary."""
+    diagnostics = getattr(result, "execution_diagnostics", {})
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
+    contract_version = diagnostics.get("metric_contract_version")
+    attempts = diagnostics.get("attempts")
+    trades = diagnostics.get("trades")
+    attempts = attempts if isinstance(attempts, Mapping) else {}
+    trades = trades if isinstance(trades, Mapping) else {}
+    metric_sources = {
+        "one_way_turnover": trades,
+        "annualized_one_way_turnover": trades,
+        "blocked_attempt_rate": attempts,
+        "commission": trades,
+        "explicit_fee": trades,
+        "slippage_opportunity_cost": trades,
+    }
+    projected = {
+        key: (
+            _finite_metric(source.get(key))
+            if contract_version == METRIC_CONTRACT_VERSION
+            else None
+        )
+        for key, source in metric_sources.items()
+    }
+    available_count = sum(value is not None for value in projected.values())
+    projected.update(
+        {
+            "metric_contract_version": contract_version,
+            "execution_metrics_status": (
+                "unavailable"
+                if contract_version != METRIC_CONTRACT_VERSION or available_count == 0
+                else "partial" if available_count < len(projected) else "available"
+            ),
+            "turnover": projected["one_way_turnover"],
+        }
+    )
+    return {
+        "metric_contract_version": projected["metric_contract_version"],
+        "execution_metrics_status": projected["execution_metrics_status"],
+        "turnover": projected["turnover"],
+        "one_way_turnover": projected["one_way_turnover"],
+        "annualized_one_way_turnover": projected["annualized_one_way_turnover"],
+        "blocked_attempt_rate": projected["blocked_attempt_rate"],
+        "commission": projected["commission"],
+        "explicit_fee": projected["explicit_fee"],
+        "slippage_opportunity_cost": projected["slippage_opportunity_cost"],
+    }
+
+
+def _finite_metric(value: Any) -> float | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 class BatchChildRuntime:
@@ -320,9 +385,9 @@ class BatchChildRuntime:
             "max_drawdown": result.strategy_metrics.get("max_drawdown", 0.0),
             "sharpe": result.strategy_metrics.get("sharpe", 0.0),
             "total_return": result.strategy_metrics.get("total_return", 0.0),
-            "turnover": result.execution_diagnostics.get("turnover", 0.0),
             "run_identity_hash": run_identity_hash,
         }
+        summary.update(project_execution_summary_metrics(result))
         evaluation_dates = tuple(
             date.strftime("%Y%m%d") if hasattr(date, "strftime") else str(date)
             for date in evaluation.trading_dates

@@ -333,7 +333,8 @@ def test_spy_native_engine_is_called_once_and_its_result_is_returned():
     request = engine.calls[0]["request"]
     assert request.targets == {"20240112": {"A": 1.0}}
     assert request.evaluation_dates == EVALUATION_DATES
-    assert request.knowledge_cutoff == "20240112"
+    assert request.knowledge_cutoff == "20240112T15:00:00"
+    assert request.knowledge_cutoffs["20240115"] == "20240115T15:00:00"
     assert request.snapshot_version == 7
     assert request.run_id == "runner-native-run"
     assert request.decision_ids == {"20240112": "DECISION-20240112"}
@@ -415,11 +416,11 @@ def test_diagnostics_are_computed_directly_from_native_ledger():
     assert result.execution_diagnostics["trades"]["executed_trade_count"] == 1
     assert "legacy_result" not in result.execution_diagnostics
     assert result.execution_diagnostics["execution_identity"]["rule_versions"] == ["rule-A"]
-    assert result.execution_diagnostics["universe"] == {
-        "quality_status": "RESEARCH_ONLY_UNVERIFIED_UNIVERSE",
-        "reason_code": "PIT_MASTER_MISSING",
-        "details": "snapshot does not provide PIT fund master and no PIT resolver was injected",
-    }
+    universe = result.execution_diagnostics["universe"]
+    assert universe["quality_status"] == "RESEARCH_ONLY_UNVERIFIED_UNIVERSE"
+    assert universe["reason_code"] == "PIT_MASTER_MISSING"
+    assert universe["details"] == "snapshot does not provide PIT fund master and no PIT resolver was injected"
+    assert universe["by_date"]["20240112"]["reason_code"] == "PIT_MASTER_MISSING"
 
 
 def test_exact_evaluation_calendar_and_cancellation_callback_are_preserved():

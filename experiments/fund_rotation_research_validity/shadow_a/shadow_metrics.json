@@ -1,0 +1,8 @@
+{
+  "completed_rebalance_cycles": "unavailable",
+  "forward_observation_weeks": "unavailable",
+  "reason_code": "NO_REAL_SHADOW_INPUTS",
+  "regime_exposure_coverage": "unavailable",
+  "schema_version": "shadow-metrics/v1",
+  "status": "unavailable"
+}

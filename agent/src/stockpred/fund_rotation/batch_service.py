@@ -708,6 +708,11 @@ class BatchService:
                         equity=result.executed_equity,
                         decision_quality=result.quality_status,
                         has_invalid_action=has_invalid,
+                        metric_contract_version=(
+                            result.execution_diagnostics.get(
+                                "metric_contract_version"
+                            )
+                        ),
                     )
                 )
 

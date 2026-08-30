@@ -7,11 +7,15 @@ future Lance/SQLite reader can materialize rows without changing resolver code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from types import MappingProxyType
 from typing import Iterable, Mapping, Protocol
 
 import pandas as pd
+import numpy as np
 
 
 class PITQueryMode(str, Enum):
@@ -62,6 +66,9 @@ class ExclusionReasonCode(str, Enum):
     NOT_INCLUDED_BY_POLICY = "NOT_INCLUDED_BY_POLICY"
     EXCLUDED_BY_POLICY = "EXCLUDED_BY_POLICY"
     NOT_TRADABLE = "NOT_TRADABLE"
+    MISSING_IDENTITY = "MISSING_IDENTITY"
+    DUPLICATE_IDENTITY = "DUPLICATE_IDENTITY"
+    INVALID_QUERY_TIMEZONE = "INVALID_QUERY_TIMEZONE"
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,11 @@ class FundInstrumentVersion:
     exchange: str | None
     quality_status: PITQualityStatus
     instrument_type: str | None = None
+    underlying_index: str | None = None
+    region: str | None = None
+    currency: str | None = None
+    leveraged_or_inverse: object | None = None
+    share_class_or_feeder_relationship: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +144,61 @@ class UniverseResolution:
     audit_metrics: Mapping[str, int]
     quality_status: PITQualityStatus
     cross_source_audit: Mapping[str, object] = field(default_factory=dict)
+    identity_mapping: Mapping[str, str | None] = field(default_factory=dict)
+    identity_hash: str = ""
+    snapshot_fingerprint: str = ""
+    coverage_diagnostics: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UniverseMembership:
+    """One immutable per-date membership decision for U0 or U1."""
+
+    ts_code: str
+    included: bool
+    reason_code: str
+    identity_key: str | None = None
+    layer: str = ""
+
+
+@dataclass(frozen=True)
+class PITUniverseSnapshot:
+    """Immutable, reproducible U0 or U1 snapshot for one decision date."""
+
+    layer: str
+    signal_date: str
+    knowledge_cutoff: str
+    source_snapshot_version: int | None
+    eligible_codes: tuple[str, ...]
+    membership: tuple[UniverseMembership, ...]
+    identity_mapping: Mapping[str, str | None]
+    identity_hash: str
+    snapshot_fingerprint: str
+    coverage_diagnostics: Mapping[str, object]
+    quality_status: PITQualityStatus
+
+    @property
+    def members(self) -> tuple[str, ...]:
+        return self.eligible_codes
+
+    @property
+    def membership_reasons(self) -> Mapping[str, str]:
+        return {item.ts_code: item.reason_code for item in self.membership}
+
+
+@dataclass(frozen=True)
+class PITIdentityLayers:
+    """The U0 base snapshot and its fail-closed U1 identity projection."""
+
+    u0: PITUniverseSnapshot
+    u1: PITUniverseSnapshot
+    resolution: UniverseResolution
+
+    @property
+    def quality_status(self) -> PITQualityStatus:
+        if self.u1.quality_status == PITQualityStatus.PIT_INVALID:
+            return self.u1.quality_status
+        return self.resolution.quality_status
 
 
 class CausalDataView(Protocol):
@@ -148,6 +215,25 @@ class _MasterSelection:
     audit_metrics: dict[str, int]
     fatal: bool = False
     research_only: bool = False
+
+
+def _invalid_master_selection(signal_date: str, details: str) -> _MasterSelection:
+    metrics = _empty_metrics()
+    metrics["master_excluded_count"] = 1
+    return _MasterSelection(
+        instruments=(),
+        exclusions=(
+            _exclusion(
+                ExclusionLayer.FUND_MASTER,
+                "__QUERY__",
+                ExclusionReasonCode.INVALID_QUERY_TIMEZONE,
+                signal_date,
+                details=details,
+            ),
+        ),
+        audit_metrics=metrics,
+        fatal=True,
+    )
 
 
 class PITFundMaster:
@@ -177,9 +263,22 @@ class PITFundMaster:
         snapshot_version: int,
         mode: PITQueryMode,
     ) -> _MasterSelection:
-        signal_ts = _to_timestamp(signal_date)
-        cutoff_ts = _to_timestamp(knowledge_cutoff)
+        try:
+            signal_ts = _to_timestamp(signal_date)
+            cutoff_ts = _to_timestamp(knowledge_cutoff)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return _invalid_master_selection(signal_date, f"invalid query datetime: {exc}")
+        if (signal_ts.tzinfo is None) != (cutoff_ts.tzinfo is None):
+            return _invalid_master_selection(
+                signal_date,
+                "signal_date and knowledge_cutoff must use compatible timezone forms",
+            )
         rows = self._rows_for_snapshot(snapshot_version)
+        if _has_query_timezone_mismatch(rows, signal_ts, cutoff_ts):
+            return _invalid_master_selection(
+                signal_date,
+                "query datetime timezone form does not match PIT source timestamps",
+            )
         metrics = _empty_metrics()
         exclusions: list[UniverseExclusion] = []
         instruments: list[FundInstrumentVersion] = []
@@ -258,6 +357,8 @@ class PITFundMaster:
                 if exclusion.reason_code == ExclusionReasonCode.MISSING_DELIST_DATE:
                     metrics["missing_delist_date_count"] += 1
                     research_only = True
+                if exclusion.reason_code == ExclusionReasonCode.INVALID_LIST_DATE:
+                    fatal = True
                 if exclusion.reason_code == ExclusionReasonCode.UNKNOWN_STATUS:
                     metrics["unknown_status_count"] += 1
                 if exclusion.reason_code == ExclusionReasonCode.UNKNOWN_TYPE:
@@ -401,7 +502,7 @@ class UniverseResolver:
 
         quality_status = _resolution_quality(tuple(eligible), master, strategy_exclusions, tradable_exclusions)
         quality_status = _combine_quality(quality_status, cross_audit_status)
-        return UniverseResolution(
+        resolution = UniverseResolution(
             eligible=tuple(eligible),
             master_exclusions=master.exclusions,
             strategy_exclusions=tuple(strategy_exclusions),
@@ -414,6 +515,412 @@ class UniverseResolver:
             quality_status=quality_status,
             cross_source_audit=cross_audit_output,
         )
+        return _attach_u0_metadata(resolution)
+
+    def resolve_identity_layers(
+        self,
+        signal_date: str,
+        knowledge_cutoff: str,
+        strategy_policy: UniversePolicy,
+        causal_view: CausalDataView,
+        snapshot_version: int,
+        mode: PITQueryMode,
+        cross_source_audit: Mapping[str, object] | None = None,
+    ) -> PITIdentityLayers:
+        """Resolve the existing PIT universe, then derive immutable U0/U1 layers.
+
+        The base resolver remains the source of truth for AS_WAS_KNOWN and its
+        legacy diagnostics. U1 is only a deterministic, fail-closed projection
+        of U0 and never changes the base eligible universe.
+        """
+
+        resolution = self.resolve(
+            signal_date=signal_date,
+            knowledge_cutoff=knowledge_cutoff,
+            strategy_policy=strategy_policy,
+            causal_view=causal_view,
+            snapshot_version=snapshot_version,
+            mode=mode,
+            cross_source_audit=cross_source_audit,
+        )
+        u0 = _snapshot_from_resolution(resolution, "U0")
+        u1 = _u1_snapshot(u0)
+        return PITIdentityLayers(u0=u0, u1=u1, resolution=resolution)
+
+
+def _attach_u0_metadata(resolution: UniverseResolution) -> UniverseResolution:
+    """Add U0 identity metadata without changing legacy resolution fields."""
+
+    snapshot = _snapshot_from_resolution(resolution, "U0")
+    return replace(
+        resolution,
+        identity_mapping=MappingProxyType(dict(snapshot.identity_mapping)),
+        identity_hash=snapshot.identity_hash,
+        snapshot_fingerprint=snapshot.snapshot_fingerprint,
+        coverage_diagnostics=snapshot.coverage_diagnostics,
+    )
+
+
+def _snapshot_from_resolution(
+    resolution: UniverseResolution,
+    layer: str,
+) -> PITUniverseSnapshot:
+    all_codes = sorted(
+        {
+            instrument.ts_code
+            for instrument in resolution.eligible
+        }
+        | {
+            exclusion.ts_code
+            for exclusion in (
+                *resolution.master_exclusions,
+                *resolution.strategy_exclusions,
+                *resolution.tradable_exclusions,
+            )
+        }
+    )
+    instruments = {instrument.ts_code: instrument for instrument in resolution.eligible}
+    exclusions: dict[str, UniverseExclusion] = {}
+    for exclusion in (
+        *resolution.master_exclusions,
+        *resolution.strategy_exclusions,
+        *resolution.tradable_exclusions,
+    ):
+        exclusions.setdefault(exclusion.ts_code, exclusion)
+
+    membership = []
+    identity_mapping: dict[str, str | None] = {}
+    for code in all_codes:
+        instrument = instruments.get(code)
+        identity = _identity_key(instrument) if instrument is not None else None
+        identity_mapping[code] = identity
+        if instrument is not None:
+            membership.append(
+                UniverseMembership(
+                    ts_code=code,
+                    included=True,
+                    reason_code=f"{layer}_ELIGIBLE",
+                    identity_key=identity,
+                    layer=layer,
+                )
+            )
+        else:
+            exclusion = exclusions[code]
+            membership.append(
+                UniverseMembership(
+                    ts_code=code,
+                    included=False,
+                    reason_code=exclusion.reason_code.value,
+                    identity_key=None,
+                    layer=layer,
+                )
+            )
+
+    coverage = dict(resolution.audit_metrics)
+    coverage.update(
+        {
+            "momentum_coverage": "unavailable",
+            "max_cluster_share": "unavailable",
+            "effective_cluster_count": "unavailable",
+            "tradable_representative_ratio": "unavailable",
+        }
+    )
+    known_before_cutoff_count = sum(
+        1
+        for instrument in resolution.eligible
+        if instrument.known_from is not None
+        and _to_timestamp(instrument.known_from) <= _to_timestamp(resolution.knowledge_cutoff)
+    )
+    coverage.update(
+        {
+            "available_count": len(resolution.eligible),
+            "known_before_cutoff_count": known_before_cutoff_count,
+            "identity_coverage_count": sum(value is not None for value in identity_mapping.values()),
+            "identity_coverage_ratio": (
+                sum(value is not None for value in identity_mapping.values()) / len(identity_mapping)
+                if identity_mapping
+                else 0.0
+            ),
+            "future_known_excluded_count": sum(
+                exclusion.reason_code == ExclusionReasonCode.KNOWN_AFTER_CUTOFF
+                for exclusion in resolution.master_exclusions
+            ),
+            "boundary_uncertain_count": sum(
+                exclusion.reason_code
+                in {
+                    ExclusionReasonCode.MISSING_KNOWN_FROM,
+                    ExclusionReasonCode.AMBIGUOUS_REVISION_ORDER,
+                }
+                for exclusion in resolution.master_exclusions
+            ),
+        }
+    )
+    identity_hash = _stable_hash(
+        {
+            "layer": layer,
+            "identity_mapping": sorted(identity_mapping.items()),
+        }
+    )
+    fingerprint = _stable_hash(
+        {
+            "layer": layer,
+            "signal_date": resolution.signal_date,
+            "knowledge_cutoff": resolution.knowledge_cutoff,
+            "source_snapshot_version": resolution.source_snapshot_version,
+            "eligible_codes": sorted(instrument.ts_code for instrument in resolution.eligible),
+            "membership": [_membership_payload(item) for item in membership],
+            "identity_hash": identity_hash,
+            "quality_status": resolution.quality_status.value,
+            "coverage_diagnostics": dict(sorted(coverage.items())),
+        }
+    )
+    return PITUniverseSnapshot(
+        layer=layer,
+        signal_date=resolution.signal_date,
+        knowledge_cutoff=resolution.knowledge_cutoff,
+        source_snapshot_version=resolution.source_snapshot_version,
+        eligible_codes=tuple(sorted(instrument.ts_code for instrument in resolution.eligible)),
+        membership=tuple(membership),
+        identity_mapping=MappingProxyType(dict(sorted(identity_mapping.items()))),
+        identity_hash=identity_hash,
+        snapshot_fingerprint=fingerprint,
+        coverage_diagnostics=MappingProxyType(dict(sorted(coverage.items()))),
+        quality_status=resolution.quality_status,
+    )
+
+
+def _u1_snapshot(u0: PITUniverseSnapshot) -> PITUniverseSnapshot:
+    grouped: dict[str, list[str]] = {}
+    missing_identity: set[str] = set()
+    for code in u0.eligible_codes:
+        identity = u0.identity_mapping.get(code)
+        if identity is None:
+            missing_identity.add(code)
+        else:
+            grouped.setdefault(identity, []).append(code)
+
+    representatives = {
+        identity: min(codes)
+        for identity, codes in grouped.items()
+    }
+    membership = []
+    eligible_codes = set(u0.eligible_codes)
+    for item in u0.membership:
+        code = item.ts_code
+        if code not in eligible_codes:
+            membership.append(
+                UniverseMembership(
+                    ts_code=code,
+                    included=False,
+                    reason_code=item.reason_code,
+                    identity_key=item.identity_key,
+                    layer="U1",
+                )
+            )
+            continue
+        identity = u0.identity_mapping.get(code)
+        if identity is None:
+            reason = ExclusionReasonCode.MISSING_IDENTITY.value
+            included = False
+        elif representatives[identity] == code:
+            reason = "U1_REPRESENTATIVE"
+            included = True
+        else:
+            reason = ExclusionReasonCode.DUPLICATE_IDENTITY.value
+            included = False
+        membership.append(
+            UniverseMembership(
+                ts_code=code,
+                included=included,
+                reason_code=reason,
+                identity_key=identity,
+                layer="U1",
+            )
+        )
+
+    duplicate_count = sum(max(len(codes) - 1, 0) for codes in grouped.values())
+    coverage = dict(u0.coverage_diagnostics)
+    coverage.update(
+        {
+            "available_count": len(representatives) if not missing_identity else 0,
+            "u0_available_count": len(u0.eligible_codes),
+            "u1_available_count": len(representatives) if not missing_identity else 0,
+            "duplicate_identity_count": duplicate_count,
+            "duplicate_identity_ratio": (
+                duplicate_count / len(u0.eligible_codes)
+                if u0.eligible_codes
+                else 0.0
+            ),
+            "missing_identity_count": len(missing_identity),
+        }
+    )
+    identity_mapping = dict(sorted(u0.identity_mapping.items()))
+    identity_hash = _stable_hash(
+        {
+            "layer": "U1",
+            "identity_mapping": sorted(identity_mapping.items()),
+            "representatives": sorted(representatives.items()),
+        }
+    )
+    quality = (
+        PITQualityStatus.PIT_INVALID
+        if missing_identity
+        else u0.quality_status
+    )
+    if missing_identity:
+        membership = [
+            replace(
+                item,
+                included=False,
+                reason_code=(
+                    "U1_DISABLED_MISSING_IDENTITY"
+                    if item.included
+                    else item.reason_code
+                ),
+            )
+            for item in membership
+        ]
+    fingerprint = _stable_hash(
+        {
+            "layer": "U1",
+            "signal_date": u0.signal_date,
+            "knowledge_cutoff": u0.knowledge_cutoff,
+            "source_snapshot_version": u0.source_snapshot_version,
+            "eligible_codes": sorted(representatives.values()),
+            "membership": [_membership_payload(item) for item in membership],
+            "identity_hash": identity_hash,
+            "quality_status": quality.value,
+            "coverage_diagnostics": dict(sorted(coverage.items())),
+        }
+    )
+    return PITUniverseSnapshot(
+        layer="U1",
+        signal_date=u0.signal_date,
+        knowledge_cutoff=u0.knowledge_cutoff,
+        source_snapshot_version=u0.source_snapshot_version,
+        eligible_codes=(
+            ()
+            if missing_identity
+            else tuple(sorted(representatives.values()))
+        ),
+        membership=tuple(membership),
+        identity_mapping=MappingProxyType(identity_mapping),
+        identity_hash=identity_hash,
+        snapshot_fingerprint=fingerprint,
+        coverage_diagnostics=MappingProxyType(dict(sorted(coverage.items()))),
+        quality_status=quality,
+    )
+
+
+def _project_resolution_to_snapshot(
+    layers: PITIdentityLayers,
+) -> UniverseResolution:
+    """Project the base resolution onto U1 while retaining legacy exclusions."""
+
+    selected = set(layers.u1.eligible_codes)
+    eligible = tuple(
+        instrument
+        for instrument in layers.resolution.eligible
+        if instrument.ts_code in selected
+    )
+    metrics = dict(layers.resolution.audit_metrics)
+    metrics["eligible_count"] = len(eligible)
+    return replace(
+        layers.resolution,
+        eligible=eligible,
+        audit_metrics=metrics,
+        quality_status=layers.u1.quality_status,
+        identity_mapping=layers.u1.identity_mapping,
+        identity_hash=layers.u1.identity_hash,
+        snapshot_fingerprint=layers.u1.snapshot_fingerprint,
+        coverage_diagnostics=layers.u1.coverage_diagnostics,
+    )
+
+
+def identity_key_for_instrument(
+    instrument: FundInstrumentVersion,
+) -> str | None:
+    """Return the canonical U1 identity key, or ``None`` when incomplete."""
+
+    return _identity_key(instrument)
+
+
+def _identity_key(instrument: FundInstrumentVersion | None) -> str | None:
+    if instrument is None:
+        return None
+    values = {
+        "underlying_index": _normalize_identity_value(
+            instrument.underlying_index or instrument.tracking_index,
+            uppercase=True,
+        ),
+        "asset_class": _normalize_identity_value(instrument.asset_class),
+        "region": _normalize_identity_value(instrument.region),
+        "currency": _normalize_identity_value(instrument.currency, uppercase=True),
+        "leveraged_or_inverse": _normalize_leverage(instrument.leveraged_or_inverse),
+        "share_class_or_feeder_relationship": _normalize_identity_value(
+            instrument.share_class_or_feeder_relationship
+        ),
+    }
+    if any(value is None for value in values.values()):
+        return None
+    return json.dumps(values, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _normalize_identity_value(value: object, *, uppercase: bool = False) -> str | None:
+    if not _has_value(value):
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return normalized.upper() if uppercase else normalized.lower()
+
+
+def _normalize_leverage(value: object) -> str | None:
+    if not _has_value(value):
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if not np.isfinite(value):
+            return None
+        if value == 0:
+            return "false"
+        if value == 1:
+            return "true"
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "unknown", "unk", "na", "n/a", "none"}:
+        return None
+    try:
+        numeric = float(normalized)
+    except ValueError:
+        return normalized
+    if not np.isfinite(numeric):
+        return None
+    if numeric == 0:
+        return "false"
+    if numeric == 1:
+        return "true"
+    return None
+
+
+def _optional_identity_value(value: object) -> object | None:
+    return value if _has_value(value) else None
+
+
+def _membership_payload(item: UniverseMembership) -> dict[str, object]:
+    return {
+        "ts_code": item.ts_code,
+        "included": item.included,
+        "reason_code": item.reason_code,
+        "identity_key": item.identity_key,
+        "layer": item.layer,
+    }
+
+
+def _stable_hash(value: object) -> str:
+    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _empty_metrics() -> dict[str, int]:
@@ -450,7 +957,31 @@ def _to_timestamp(value: object) -> pd.Timestamp:
 def _optional_timestamp(value: object) -> pd.Timestamp | None:
     if not _has_value(value):
         return None
-    return pd.Timestamp(value)
+    try:
+        return pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _has_query_timezone_mismatch(
+    rows: pd.DataFrame,
+    signal_ts: pd.Timestamp,
+    cutoff_ts: pd.Timestamp,
+) -> bool:
+    signal_aware = signal_ts.tzinfo is not None
+    cutoff_aware = cutoff_ts.tzinfo is not None
+    for field, expected_aware in (
+        (("valid_from", "valid_to", "list_date", "delist_date"), signal_aware),
+        (("known_from",), cutoff_aware),
+    ):
+        for column in field:
+            if column not in rows.columns:
+                continue
+            for value in rows[column]:
+                timestamp = _optional_timestamp(value)
+                if timestamp is not None and (timestamp.tzinfo is not None) != expected_aware:
+                    return True
+    return False
 
 
 def _known_from(row: pd.Series) -> pd.Timestamp | None:
@@ -480,17 +1011,14 @@ def _select_latest_known(rows: pd.DataFrame) -> tuple[pd.Series | None, bool]:
     if len(top) == 1:
         return top.iloc[0], False
 
-    revision_values = [_optional_string(value) for value in top.get("revision_id", pd.Series())]
-    if any(value is None for value in revision_values) or len(set(revision_values)) != len(revision_values):
-        return None, True
-
-    top["_revision_sort"] = top["revision_id"].astype(str)
-    top = top.sort_values(["_revision_sort", "ts_code"])
-    return top.iloc[-1], False
+    return None, True
 
 
 def _instrument_from_row(row: pd.Series) -> FundInstrumentVersion:
     quality = _row_quality(row)
+    underlying_index = _optional_string(
+        row.get("underlying_index", row.get("tracking_index"))
+    )
     return FundInstrumentVersion(
         ts_code=str(row.get("ts_code")),
         valid_from=_format_date(row.get("valid_from")),
@@ -511,6 +1039,18 @@ def _instrument_from_row(row: pd.Series) -> FundInstrumentVersion:
         exchange=_optional_string(row.get("exchange")),
         quality_status=quality,
         instrument_type=_resolve_instrument_type(row),
+        underlying_index=underlying_index,
+        region=_optional_string(row.get("region")),
+        currency=_optional_string(row.get("currency")),
+        leveraged_or_inverse=_optional_identity_value(
+            row.get("leveraged_or_inverse", row.get("is_leveraged_or_inverse"))
+        ),
+        share_class_or_feeder_relationship=_optional_string(
+            row.get(
+                "share_class_or_feeder_relationship",
+                row.get("share_class", row.get("feeder_relationship")),
+            )
+        ),
     )
 
 
@@ -519,13 +1059,27 @@ def _row_quality(row: pd.Series) -> PITQualityStatus:
         _has_value(row.get("known_from"))
         and _has_value(row.get("revision_id"))
         and _has_value(row.get("source_record_id"))
-        and bool(row.get("revision_chain_verified", False))
+        and _strict_true(row.get("revision_chain_verified", False))
     )
     if not has_revision_chain:
         return PITQualityStatus.KNOWLEDGE_TIME_UNVERIFIED
-    if not bool(row.get("independent_source_verified", False)):
+    if not _strict_true(row.get("independent_source_verified", False)):
         return PITQualityStatus.PIT_UNVERIFIED
     return PITQualityStatus.VERIFIED
+
+
+def _strict_true(value: object) -> bool:
+    return isinstance(value, (bool, np.bool_)) and bool(value)
+
+
+def _invalid_timestamp(value: object) -> bool:
+    if not _has_value(value):
+        return False
+    try:
+        pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return True
+    return False
 
 
 def _snapshot_integrity_exclusions(
@@ -537,7 +1091,38 @@ def _snapshot_integrity_exclusions(
 
     for ts_code in sorted(str(code) for code in rows["ts_code"].dropna().unique()):
         code_rows = rows[rows["ts_code"].astype(str) == ts_code]
-        if _has_unsortable_same_knowledge_tie(code_rows):
+        invalid_date_fields = []
+        for field in ("valid_from", "valid_to", "known_from", "list_date", "delist_date"):
+            if field not in code_rows.columns:
+                if field == "valid_from":
+                    invalid_date_fields.append(field)
+                continue
+            values = code_rows[field]
+            if any(_invalid_timestamp(value) for value in values):
+                invalid_date_fields.append(field)
+            elif field == "valid_from" and any(not _has_value(value) for value in values):
+                invalid_date_fields.append(field)
+        if {"valid_from", "valid_to"}.issubset(code_rows.columns):
+            for _, row in code_rows.iterrows():
+                valid_from = _optional_timestamp(row.get("valid_from"))
+                valid_to = _optional_timestamp(row.get("valid_to"))
+                if valid_from is not None and valid_to is not None and valid_from > valid_to:
+                    invalid_date_fields.append("valid_from/valid_to")
+                    break
+        if invalid_date_fields:
+            exclusions.append(
+                _exclusion(
+                    ExclusionLayer.FUND_MASTER,
+                    ts_code,
+                    ExclusionReasonCode.INVALID_LIFECYCLE_DATES,
+                    signal_date,
+                    details="invalid date fields: " + ", ".join(invalid_date_fields),
+                )
+            )
+            continue
+        has_overlap = _has_valid_range_overlap(code_rows)
+        unsortable_tie = _has_unsortable_same_knowledge_tie(code_rows)
+        if unsortable_tie:
             exclusions.append(
                 _exclusion(
                     ExclusionLayer.FUND_MASTER,
@@ -546,7 +1131,7 @@ def _snapshot_integrity_exclusions(
                     signal_date,
                 )
             )
-        if _has_valid_range_overlap(code_rows):
+        if has_overlap and not unsortable_tie:
             exclusions.append(
                 _exclusion(
                     ExclusionLayer.FUND_MASTER,
@@ -686,11 +1271,24 @@ def _strategy_exclusion_reason(
 
 def _tradable_status(causal_view: CausalDataView, ts_code: str, signal_date: str) -> tuple[bool, str]:
     if not hasattr(causal_view, "tradable_status"):
-        return True, ""
-    result = causal_view.tradable_status(ts_code, signal_date)
+        return False, "TRADABILITY_UNAVAILABLE"
+    try:
+        result = causal_view.tradable_status(ts_code, signal_date)
+    except Exception:
+        return False, "TRADABILITY_UNAVAILABLE"
+    details = ""
+    value = result
     if isinstance(result, tuple):
-        return bool(result[0]), str(result[1]) if len(result) > 1 else ""
-    return bool(result), ""
+        if len(result) not in {1, 2}:
+            return False, "TRADABILITY_UNAVAILABLE"
+        value = result[0]
+        if len(result) > 1:
+            if not isinstance(result[1], str):
+                return False, "TRADABILITY_UNAVAILABLE"
+            details = result[1]
+    if not isinstance(value, (bool, np.bool_)):
+        return False, "TRADABILITY_UNAVAILABLE"
+    return bool(value), details
 
 
 def _resolution_quality(
@@ -699,8 +1297,13 @@ def _resolution_quality(
     strategy_exclusions: list[UniverseExclusion],
     tradable_exclusions: list[UniverseExclusion],
 ) -> PITQualityStatus:
-    del strategy_exclusions, tradable_exclusions
+    del strategy_exclusions
     if master.fatal:
+        return PITQualityStatus.PIT_INVALID
+    if any(
+        exclusion.details in {"TRADABILITY_UNAVAILABLE", "TRADABILITY_CONFLICT"}
+        for exclusion in tradable_exclusions
+    ):
         return PITQualityStatus.PIT_INVALID
     if master.research_only:
         return PITQualityStatus.RESEARCH_ONLY_UNVERIFIED_UNIVERSE
@@ -954,12 +1557,16 @@ class FundRotationPITUniverseAdapter:
         causal_view_factory,
         snapshot_version: int | None = None,
         mode: PITQueryMode = PITQueryMode.AS_WAS_KNOWN,
+        identity_layer: str = "U0",
     ) -> None:
         self._resolver = resolver
         self._strategy_policy = strategy_policy
         self._causal_view_factory = causal_view_factory
         self._snapshot_version = snapshot_version
         self._mode = mode
+        if identity_layer not in {"U0", "U1"}:
+            raise ValueError("identity_layer must be 'U0' or 'U1'")
+        self._identity_layer = identity_layer
 
     def resolve_universe(
         self,
@@ -982,7 +1589,52 @@ class FundRotationPITUniverseAdapter:
             signal_date=signal_date,
             universe=candidate_universe,
         )
-        return self._resolver.resolve(
+        if self._identity_layer == "U0":
+            return self._resolver.resolve(
+                signal_date=signal_date,
+                knowledge_cutoff=knowledge_cutoff,
+                strategy_policy=self._strategy_policy,
+                causal_view=causal_view,
+                snapshot_version=snapshot_version,
+                mode=self._mode,
+            )
+        return _project_resolution_to_snapshot(
+            self._resolver.resolve_identity_layers(
+                signal_date=signal_date,
+                knowledge_cutoff=knowledge_cutoff,
+                strategy_policy=self._strategy_policy,
+                causal_view=causal_view,
+                snapshot_version=snapshot_version,
+                mode=self._mode,
+            )
+        )
+
+    def resolve_identity_layers(
+        self,
+        *,
+        snapshot: object,
+        signal_date: str,
+        knowledge_cutoff: str,
+        fallback_universe: frozenset[str],
+    ) -> PITIdentityLayers:
+        """Expose U0/U1 through the existing production adapter boundary."""
+
+        if not hasattr(self._resolver, "resolve_identity_layers"):
+            raise TypeError("resolver must support resolve_identity_layers")
+        snapshot_version = getattr(snapshot, "snapshot_version", self._snapshot_version)
+        candidate_universe = frozenset(
+            str(code)
+            for code in (
+                getattr(snapshot, "historical_candidate_codes", ())
+                or fallback_universe
+            )
+        )
+        causal_view = self._causal_view_factory(
+            snapshot=snapshot,
+            signal_date=signal_date,
+            universe=candidate_universe,
+        )
+        return self._resolver.resolve_identity_layers(
             signal_date=signal_date,
             knowledge_cutoff=knowledge_cutoff,
             strategy_policy=self._strategy_policy,

@@ -79,6 +79,16 @@ def valid_policy() -> QualificationPolicy:
                 missing_data_policy="FAIL_CLOSED",
                 evidence_artifact="shadow_metrics.json",
             ),
+            GateSpec(
+                gate_id="min-completed-rebalance-cycles",
+                metric_name="completed_rebalance_cycles",
+                formula="count(sealed_and_executed_shadow_rebalance_cycles)",
+                evaluation_scope="shadow_deployment",
+                threshold=6,
+                comparison_operator=">=",
+                missing_data_policy="FAIL_CLOSED",
+                evidence_artifact="shadow_account_state.json",
+            ),
         ),
         warning_gates=(
             GateSpec(
@@ -1106,6 +1116,16 @@ def test_decision_eligibility_requires_minimum_observation_cycles_and_manual_app
         approval=approval,
         evaluated_at=at("2026-07-10T00:00:00"),
     )
+    five_cycles = assess_decision_eligibility(
+        strategy_version_id="sv-1",
+        policy=policy,
+        evidence=(evidence,),
+        forward_observation_weeks=26,
+        completed_rebalance_cycles=5,
+        regime_coverage_sufficient=False,
+        approval=approval,
+        evaluated_at=at("2026-07-10T00:00:00"),
+    )
 
     assert too_early.decision == DecisionQualification.INELIGIBLE
     assert "MIN_FORWARD_OBSERVATION_WEEKS" in too_early.reason_codes
@@ -1114,6 +1134,8 @@ def test_decision_eligibility_requires_minimum_observation_cycles_and_manual_app
     assert approved.decision == DecisionQualification.ELIGIBLE
     assert approved.failed_hard_gates == ()
     assert approved.warnings == ("regime-coverage",)
+    assert five_cycles.decision == DecisionQualification.INELIGIBLE
+    assert "MIN_COMPLETED_REBALANCE_CYCLES" in five_cycles.reason_codes
 
 
 def test_policy_gate_specs_are_evaluated_from_evidence_metrics() -> None:

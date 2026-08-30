@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 from backtest.fund_rotation.metrics import compute_performance_metrics
+from backtest.fund_rotation.execution_ledger_v2 import METRIC_CONTRACT_VERSION
 from src.stockpred.fund_rotation.comparison import (
     CONTRACT_COMPONENT_KEYS,
     VariantComparisonInput,
@@ -38,11 +39,13 @@ def _inputs():
             variant_key="s@aaaa", strategy_id="s", run_id="r1",
             status="SUCCEEDED", equity=_equity([1.0 + i * 0.01 for i in range(10)]),
             decision_quality="VALID",
+            metric_contract_version=METRIC_CONTRACT_VERSION,
         ),
         VariantComparisonInput(
             variant_key="s@bbbb", strategy_id="s", run_id="r2",
             status="SUCCEEDED", equity=_equity([1.0 + i * 0.02 for i in range(10)]),
             decision_quality="DEGRADED",
+            metric_contract_version=METRIC_CONTRACT_VERSION,
         ),
     ]
 
@@ -64,6 +67,7 @@ class TestEligibility:
                     status="SUCCEEDED",
                     equity=_equity([1.0] * 10),
                     decision_quality="RESEARCH_ONLY_UNVERIFIED_UNIVERSE",
+                    metric_contract_version=METRIC_CONTRACT_VERSION,
                 ),
             ],
             evaluation_calendar=CALENDAR,
@@ -80,16 +84,19 @@ class TestEligibility:
                 status="SUCCEEDED",
                 equity=_equity([1.0] * 9, index=CALENDAR[:9]),  # missing day
                 decision_quality="VALID",
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
             VariantComparisonInput(
                 variant_key="s@dddd", strategy_id="s", run_id="r4",
                 status="FAILED", equity=_equity([1.0] * 10),
                 decision_quality="FAILED",
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
             VariantComparisonInput(
                 variant_key="s@eeee", strategy_id="s", run_id="r5",
                 status="CANCELED", equity=pd.Series(dtype=float),
                 decision_quality="VALID",
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
         ]
         outcome = build_comparison(
@@ -109,6 +116,7 @@ class TestEligibility:
                 status="SUCCEEDED",
                 equity=_equity([1.0] * 11, index=CALENDAR + ["20240111"]),
                 decision_quality="VALID",
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
         ]
         outcome = build_comparison(
@@ -123,6 +131,7 @@ class TestEligibility:
                 variant_key="s@aaaa", strategy_id="s", run_id="r1",
                 status="SUCCEEDED", equity=_equity([1.0] * 10),
                 decision_quality="INVALID", has_invalid_action=True,
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
         ]
         outcome = build_comparison(
@@ -139,6 +148,7 @@ class TestEligibility:
                 variant_key="s@cccc", strategy_id="s", run_id="r3",
                 status="SUCCEEDED", equity=_equity([1.0] * 10),
                 decision_quality="INVALID",
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
         ]
         outcome = build_comparison(
@@ -158,6 +168,7 @@ class TestEligibility:
                 variant_key="s@cccc", strategy_id="s", run_id="r3",
                 status="SUCCEEDED", equity=_equity([1.0] * 10),
                 decision_quality=quality,
+                metric_contract_version=METRIC_CONTRACT_VERSION,
             ),
         ]
 
@@ -168,6 +179,53 @@ class TestEligibility:
         assert "s@cccc" not in outcome.equity_frame.columns
         assert "s@cccc" not in outcome.metrics
         assert {entry["variant_key"] for entry in outcome.excluded} == {"s@cccc"}
+
+    def test_legacy_summary_contract_is_excluded_from_formal_ranking(self):
+        inputs = _inputs() + [
+            VariantComparisonInput(
+                variant_key="s@legacy",
+                strategy_id="s",
+                run_id="r-legacy",
+                status="SUCCEEDED",
+                equity=_equity([1.0 + i * 0.03 for i in range(10)]),
+                decision_quality="VALID",
+                metric_contract_version="legacy_summary_v1",
+            ),
+        ]
+
+        outcome = build_comparison(
+            inputs, evaluation_calendar=CALENDAR, **FP_KW,
+        )
+
+        assert "s@legacy" not in [entry["variant_key"] for entry in outcome.ranking]
+        assert "s@legacy" not in outcome.equity_frame.columns
+        assert {entry["variant_key"] for entry in outcome.excluded} == {"s@legacy"}
+        assert outcome.excluded[0]["reason"] == "LEGACY_SUMMARY_NOT_FORMAL"
+
+    def test_missing_summary_contract_is_excluded_from_formal_ranking(self):
+        outcome = build_comparison(
+            [
+                VariantComparisonInput(
+                    variant_key="s@unknown",
+                    strategy_id="s",
+                    run_id="r-unknown",
+                    status="SUCCEEDED",
+                    equity=_equity([1.0 + i * 0.03 for i in range(10)]),
+                    decision_quality="VALID",
+                ),
+            ],
+            evaluation_calendar=CALENDAR,
+            **FP_KW,
+        )
+
+        assert outcome.ranking == []
+        assert outcome.equity_frame.empty
+        assert outcome.excluded == [
+            {
+                "variant_key": "s@unknown",
+                "reason": "LEGACY_SUMMARY_NOT_FORMAL",
+            },
+        ]
 
 
 class TestMetrics:

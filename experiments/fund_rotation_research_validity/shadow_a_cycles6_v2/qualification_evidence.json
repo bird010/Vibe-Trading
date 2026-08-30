@@ -1,0 +1,27 @@
+{
+  "evidence": {
+    "artifact_hashes": [
+      "1808da472752cf403829258ed3c15e3ce656ad28463820a55c0fede25e2700f4",
+      "b6fd6102e69197d29300f38ef3a2cc4ff738349468077dc4b424040f11f7bfbd"
+    ],
+    "artifact_ids": [
+      "shadow_metrics.json",
+      "shadow_decisions.csv"
+    ],
+    "evidence_id": "evidence:sv-fe0c257e0a827b4c:initial",
+    "evidence_type": "SHADOW_FORWARD_METRICS",
+    "generated_at": "2026-08-30 02:06:15.142553+00:00",
+    "metrics": {},
+    "quality_status": "UNAVAILABLE",
+    "subject_id": "sv-fe0c257e0a827b4c"
+  },
+  "metrics": {
+    "completed_rebalance_cycles": "unavailable",
+    "forward_observation_weeks": "unavailable",
+    "regime_exposure_coverage": "unavailable"
+  },
+  "reason": "真实 forward 服务、U1 identity 和首个可用行情周期尚未提供",
+  "reason_code": "INSUFFICIENT_FORWARD_EVIDENCE",
+  "schema_version": "qualification-evidence/v1",
+  "status": "unavailable"
+}

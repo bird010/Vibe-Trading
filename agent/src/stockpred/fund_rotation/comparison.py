@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from backtest.fund_rotation.metrics import compute_performance_metrics
+from backtest.fund_rotation.execution_ledger_v2 import METRIC_CONTRACT_VERSION
 
 
 def _policy_source_hash(relative_path: str) -> str:
@@ -63,6 +64,7 @@ EXCLUDED_CANCELED = "CANCELED"
 EXCLUDED_DECISION_INVALID = "DECISION_INVALID"
 EXCLUDED_CALENDAR_MISMATCH = "CALENDAR_MISMATCH"
 EXCLUDED_NO_EQUITY = "NO_EQUITY"
+EXCLUDED_LEGACY_SUMMARY = "LEGACY_SUMMARY_NOT_FORMAL"
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,9 @@ class VariantComparisonInput:
     equity: pd.Series
     decision_quality: str = "VALID"
     has_invalid_action: bool = False
+    # Missing contract metadata is legacy/unknown and must not enter formal
+    # ranking. Callers publishing a v2 result must pass it explicitly.
+    metric_contract_version: str | None = None
 
 
 @dataclass
@@ -185,6 +190,11 @@ def build_comparison(
         if variant.status != "SUCCEEDED":
             excluded.append(
                 {"variant_key": key, "reason": EXCLUDED_TECHNICAL_FAILURE}
+            )
+            continue
+        if variant.metric_contract_version != METRIC_CONTRACT_VERSION:
+            excluded.append(
+                {"variant_key": key, "reason": EXCLUDED_LEGACY_SUMMARY}
             )
             continue
         if variant.has_invalid_action:

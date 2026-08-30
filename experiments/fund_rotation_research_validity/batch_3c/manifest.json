@@ -1,0 +1,105 @@
+{
+  "blocking_evidence": {
+    "causal_market_data": "unavailable",
+    "forward_outcomes": "unavailable",
+    "r39_paired_control": "unavailable",
+    "u1_snapshot": "unavailable"
+  },
+  "causal_contract": {
+    "future_dates_excluded": true,
+    "signal_date_close_included": true,
+    "t_plus_1": "unavailable",
+    "t_plus_2": "unavailable"
+  },
+  "control_strategy_id": "ai_rotation_r39_incumbent_carry",
+  "coverage": {
+    "momentum": "unavailable",
+    "paired_control": "unavailable",
+    "score": "unavailable",
+    "three_fold": "unavailable",
+    "volatility_60": "unavailable"
+  },
+  "experiment_id": "batch_3c_vol_adjusted_score",
+  "fold_contribution": {
+    "completed_folds": 0,
+    "required_folds": 3,
+    "status": "unavailable"
+  },
+  "folds": {
+    "completed": 0,
+    "required": 3,
+    "status": "unavailable"
+  },
+  "generated_at": "2026-08-30T00:00:00+08:00",
+  "inputs": {
+    "r39_control_manifest": {
+      "reason": "no verified paired-run control input supplied",
+      "status": "unavailable"
+    },
+    "u1_manifest": {
+      "reason": "no verified frozen U1 input supplied",
+      "status": "unavailable"
+    }
+  },
+  "mechanism_change": "replace only ranking with positive R39 momentum / annualized volatility_60",
+  "metrics": {
+    "blocked_attempt_ratio": "unavailable",
+    "cagr": "unavailable",
+    "calmar": "unavailable",
+    "cost_after_return": "unavailable",
+    "cvar": "unavailable",
+    "fold_contribution": "unavailable",
+    "holding_period": "unavailable",
+    "max_drawdown": "unavailable",
+    "rank_change_vs_r39": "unavailable",
+    "score_coverage": "unavailable",
+    "sharpe": "unavailable",
+    "switch_count": "unavailable",
+    "turnover": "unavailable",
+    "volatility_60_coverage": "unavailable",
+    "worst_3m": "unavailable"
+  },
+  "minimum_volatility_epsilon": 1e-08,
+  "parameter_neighborhood": {
+    "reason": "fixed volatility_60 and fixed 1/top_n slots; no parameter sweep supplied",
+    "status": "unavailable"
+  },
+  "promotion_allowed": false,
+  "reason": "缺少可验证冻结 U1、R39 paired control、三折回测入口和因果行情输入",
+  "schema_version": "fund-rotation-single-variable-experiment/v1",
+  "source_identity": {
+    "experiment_script_path": "E:\\code\\stock\\Vibe-Trading\\experiments\\fund_rotation_research_validity\\batch_3c_vol_adjusted.py",
+    "experiment_script_sha256": "f7002891eca89bfe56f336ac82ab57b9c60c156aa8d7a62de1dba5a621facdf3",
+    "r39_control_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\ai_rotation_r39_incumbent_carry\\strategy.py",
+    "r39_control_sha256": "9f9bcc49494adeb5e54f169b85605a078027098b9db3281fa895f18bf1c5d72c",
+    "r74_dependency_file_hashes": {
+      "__init__.py": "05a879abb08d727cc1133479af2012ca7ad2ae8ccf4605c233607d0f299d0dfe",
+      "dependencies/ai_rotation_r11_persist_geom/strategy.py": "675eb41123108d56025b3ffb6867e3842f08858a172db0a5e4b85d12ac834fa6",
+      "dependencies/ai_rotation_r34_staged_reentry/strategy.py": "562b359106c021c8361327a877d7e5262188d0a25ee17c365bbc8e37f231310b",
+      "dependencies/ai_rotation_r39_incumbent_carry/strategy.py": "9f9bcc49494adeb5e54f169b85605a078027098b9db3281fa895f18bf1c5d72c",
+      "dependencies/correlation_all_members/signals.py": "0dbf109cfdb712b60c19078cf02e5391f2f54d64cd6457f871e5e320781264b7",
+      "dependencies/correlation_representative/clustering.py": "3f943a7f912f9f0a953918f369572ae2b3e695b9c58d756d295016c33d4d370c",
+      "dependencies/correlation_representative/config.py": "5110315cc10d4ecdf896af3098df25a5b104a9603b0faa01ac3743ed424de71e",
+      "dependencies/correlation_representative/gates.py": "4f8c13fd4dba22e0bbf7977af40a7f653af54b6ee9529cd4b8b461329698fe3f",
+      "dependencies/correlation_representative/representative.py": "812d270760a6f3fe407e1debff78145f8f86f0755e2027c0f3f8e7bcbf6de51d",
+      "dependencies/correlation_representative/strategy.py": "72efe8ffa72eeaf1358b7965e5de0706617119ca36ce9e89533e8122c4b5e2cb",
+      "dependencies/scoring/cluster_momentum.py": "2649bbe9a54473d8acbbefcb6f8f80da22f8ddda5b2ed8dcbaa6b9b2c2f82ec6",
+      "dependencies/scoring/contracts.py": "74a1ab8c60cfc35ec51f273d54b763a12d0a475e7d33f932b852c0512de08aff",
+      "strategy.py": "d99d1a5d2b9dfaac3eb09c5215251059ce8d9d4f34321854b7795acb857d3cc4"
+    },
+    "r74_dependency_snapshot_sha256": "0dbc34a747e14a01b969a741d60459d499d5949db64e6c185bef5958a7b6c351",
+    "r74_strategy_path": "E:\\code\\stock\\Vibe-Trading\\agent\\backtest\\fund_rotation\\strategies\\ai_rotation_r74_r39_vol_adjusted_score\\strategy.py",
+    "r74_strategy_sha256": "d99d1a5d2b9dfaac3eb09c5215251059ce8d9d4f34321854b7795acb857d3cc4"
+  },
+  "status": "UNAVAILABLE_INPUTS",
+  "strategy_id": "ai_rotation_r74_r39_vol_adjusted_score",
+  "stress_scenarios": {
+    "2x_cost": "unavailable",
+    "normal_cost": "unavailable",
+    "t_plus_1": "unavailable",
+    "t_plus_2": "unavailable"
+  },
+  "volatility_annualization": 252,
+  "volatility_window_days": 60,
+  "weighting_rule": "unchanged fixed 1/top_n slots with vacant cash"
+}

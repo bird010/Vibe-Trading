@@ -101,6 +101,18 @@ class TestStrategyList:
             "ai_rotation_r64_direct_corr_diversification",
             "ai_rotation_r65_r64_direct_corr_rank_buffer",
             "ai_rotation_r66_lazy_correlation",
+            "ai_rotation_r67_r39_rank_buffer",
+            "ai_rotation_r69_r39_transition_cap_50",
+            "ai_rotation_r70_r39_transition_cap_25",
+            "ai_rotation_r71_r39_capacity_aware_representative",
+            "ai_rotation_r72_r39_absolute_momentum",
+            "ai_rotation_r73_r39_multi_horizon_rank",
+            "ai_rotation_r74_r39_vol_adjusted_score",
+            "ai_rotation_r75_r39_vol_target",
+            "ai_rotation_r76_cash_defense_baseline",
+            "ai_rotation_r76_fixed_short_bond",
+            "ai_rotation_r77_defense_relative_momentum",
+            "ai_rotation_r78_survivor_combo",
             "correlation_all_members", "correlation_representative",
         ]
 
