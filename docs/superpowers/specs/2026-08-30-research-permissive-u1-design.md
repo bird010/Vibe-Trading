@@ -131,7 +131,7 @@ deployment_allowed == True
 1. `pit_universe.py`：调整 U1 投影和 coverage diagnostics，保留现有哈希与审计结构。
 2. U1/PIT 序列化、研究 validator 和报告：增加/传递状态字段，区分研究门和晋级门。
 3. 对应 resolver、Runner adapter、Shadow validator 和实验契约测试。
-4. 中文设计、验收矩阵和运行说明。
+4. 中文设计、验收矩阵、运行说明和研究链路 continuation 记录器。
 
 不允许：
 
