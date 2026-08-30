@@ -369,6 +369,31 @@ def _batch_stage(
     return build_numeric_stage_record(stage, result, reason=reason)
 
 
+def _batch4_reason(reports: dict[str, Any]) -> str:
+    expected_ids = (
+        "correlation_all_members",
+        "correlation_representative",
+    )
+    ranked_ids = {
+        str(entry.get("strategy_id"))
+        for entry in reports.get("ranking", [])
+        if isinstance(entry, dict) and entry.get("strategy_id")
+    }
+    excluded_ids = {
+        str(entry.get("variant_key", "")).split("@", 1)[0]
+        for entry in reports.get("excluded", [])
+        if isinstance(entry, dict) and entry.get("variant_key")
+    }
+    available = [item for item in expected_ids if item in ranked_ids]
+    excluded = [item for item in expected_ids if item in excluded_ids]
+    if excluded:
+        return (
+            f"Batch 4 可比较臂为 {', '.join(available)}；技术性排除 {', '.join(excluded)}；"
+            "仅记录成功臂数值，不将一次区间当作因果晋级"
+        )
+    return "M0/M1/M2 三臂均已在同一 snapshot 执行；当前记录三臂数值，不将一次区间当作因果晋级"
+
+
 def _completed_batch_stage(
     stage: str,
     *,
@@ -730,7 +755,7 @@ def run_chain(
         "batch_4", reports=reports, snapshot_fingerprint=snapshot.fingerprint,
         batch_id=batch_id, range_info=range_info,
         challenger_ids=("correlation_all_members", "correlation_representative"),
-        reason="M0/M1/M2 三臂均已在同一 snapshot 执行；当前记录三臂数值，不将一次区间当作因果晋级",
+        reason=_batch4_reason(reports),
     ))
     stages.append(_batch_stage(
         "batch_5", reports=reports, snapshot_fingerprint=snapshot.fingerprint,

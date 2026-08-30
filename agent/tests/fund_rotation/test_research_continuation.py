@@ -8,6 +8,7 @@ import pytest
 from experiments.fund_rotation_research_validity.research_chain import (
     build_chain_manifest,
     build_numeric_stage_record,
+    _batch4_reason,
     _comparison,
     _validate_real_batch_evidence,
     resolve_stockpred_root,
@@ -185,6 +186,19 @@ def test_comparison_does_not_fill_missing_metrics_with_zero():
 
     assert result["deltas"]["annual_return"] is None
     assert result["deltas"]["sharpe"] is None
+
+
+def test_batch4_reason_records_failed_arm_without_calling_it_successful():
+    reason = _batch4_reason(
+        {
+            "ranking": [{"strategy_id": "correlation_representative"}],
+            "excluded": [{"variant_key": "correlation_all_members@config"}],
+        }
+    )
+
+    assert "correlation_representative" in reason
+    assert "correlation_all_members" in reason
+    assert "技术性排除" in reason
 
 
 def test_real_batch_evidence_validation_requires_contract_and_all_variant_outcomes(tmp_path):
