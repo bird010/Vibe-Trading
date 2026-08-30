@@ -7,18 +7,18 @@
 | PIT U0/U1 身份证据与同集合派生 | Batch 1 manifest、Batch 4/5 adapter 测试 | 已实现（研究-only 可运行） | 可选 identity/PIT 字段缺失、部分或冲突时保留 U1 同集合并允许研究；promotion/deployment 仍禁止，verified evidence 才能进入 Shadow/promotion |
 | R71 容量、回退与 blocked attempts | Batch 2 manifest、R71 tests | 已实现边界 | 容量不足回退/现金和 lot-size 规则有测试 |
 | R39/R40 执行与成本语义 | R39/R40 既有回归、Shadow A 账本 | 已保留 | 本计划未修改公共 Runner 或 execution ledger |
-| Batch 3A 绝对动量单变量 | Batch 3A manifest/report | 未晋级 | 只增加 R126d 门；输入/前瞻证据不可用 |
-| Batch 3B 多周期排名单变量 | Batch 3B manifest/report | 未晋级 | 只替换排名；输入/前瞻证据不可用 |
-| Batch 3C 波动率调整单变量 | Batch 3C manifest/report | 未晋级 | 只替换排名；输入/前瞻证据不可用 |
-| 单变量趋势/风险实验总门 | Batch 3A/3B/3C/5 manifest | 未晋级 | 产物均明确 `promotion_allowed=false` 或输入不可用 |
-| Batch 4 机制消融 | Batch 4 manifest、Luna gate | 已完成边界验证 | U1/paired 输入缺失，不能解释三臂胜负 |
-| Batch 6 仅组合幸存机制 | R78 adapter 与 `batch_6_cycles6_v3/manifest.json` | 被阻断 | 当前没有任何 `promotion_allowed=true` survivor |
+| Batch 3A 绝对动量单变量 | 真实 U0 batch `d4a2511b66aa` 的 R72/R39 ranking | 已完成数值研究（未晋级） | `20250102..20260731` 同 snapshot 配对；保留 research-only 质量，不把 PIT 缺失当作实验阻断 |
+| Batch 3B 多周期排名单变量 | 真实 U0 batch `d4a2511b66aa` 的 R73/R39 ranking | 已完成数值研究（未晋级） | 同一 snapshot、日历和执行合同；R73 数值结果已记录 |
+| Batch 3C 波动率调整单变量 | 真实 U0 batch `d4a2511b66aa` 的 R74/R39 ranking | 已完成数值研究（未晋级） | 同一 snapshot、日历和执行合同；R74 数值结果已记录 |
+| 单变量趋势/风险实验总门 | 真实链路 manifest `real-chain-final/research_chain_manifest.json` | 已完成数值研究（未晋级） | 各阶段均有 numeric result；`promotion_allowed=false` 仍由 identity/PIT、三折和 forward 门禁控制 |
+| Batch 4 机制消融 | 真实 U0 batch `d4a2511b66aa` 的 M0/M1/M2 ranking | 已完成数值研究（未晋级） | 三臂均已执行；一次历史区间只支持比较，不足以单独证明因果晋级 |
+| Batch 6 仅组合幸存机制 | 真实链路 manifest 的 Batch 6 stage、R78 child manifest | 已完成数值门控结论 | R78 无 promotion-allowed survivor，结论为 `NUMERIC_RESULT_NO_SURVIVOR`，不是 `INCONCLUSIVE` |
 | 三折 paired backtest | Batch 6 manifest | 未完成 | `0/3`，不得用单元测试替代 |
-| 正常成本与 2× 成本 | Batch 6 manifest | 未完成 | 全部 unavailable |
-| T+1/T+2 延迟 | Batch 6 manifest | 未完成 | 全部 unavailable |
+| 正常成本与 2× 成本 | Batch 6 manifest | 未完成 | 本轮真实 batch 使用正常成本；2× 成本需另行运行 |
+| T+1/T+2 延迟 | Batch 6 manifest | 未完成 | 本轮未另行运行延迟情景 |
 | 参数邻域 | Batch 6 manifest | 未完成 | 未进行事后参数搜索 |
-| fold contribution、switch、持有期、阻塞率、现金占比 | Batch 6 manifest | 未完成 | 全部 unavailable |
-| 组合后逐层边际贡献 | Batch 6 manifest | 未完成 | 无 survivor，组合未执行 |
+| fold contribution、switch、持有期、阻塞率、现金占比 | 真实 batch child execution artifacts；Batch 6 manifest | 部分完成 | 单区间的执行诊断已产生；fold contribution 仍需三折 |
+| 组合后逐层边际贡献 | Batch 6 manifest、R78 child manifest | 未完成 | 无 survivor，组合收益实验不执行；门控结论已记录 |
 | 多重检验记录 | 研究设计文档与 Batch 6 manifest | 已记录停止边界 | 当前因无晋级 survivor 未执行组合检验；不以统计修正替代前瞻验证 |
 | Shadow 冻结配置/版本/哈希 | `shadow_a_cycles6_v2/frozen_strategy_manifest.json` | 已冻结 | R40 50% cap，不调整为其他上限；旧 `shadow_a`/`shadow_a_cycles6` 作为历史证据保留 |
 | Shadow 事件账本与双净值 | `shadow_a_cycles6_v2/shadow_manifest.json` 与账本产物 | 未完成 | 需未来价格后写入 execution/ledger 事件 |
