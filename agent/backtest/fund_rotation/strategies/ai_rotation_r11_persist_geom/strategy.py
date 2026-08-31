@@ -32,6 +32,7 @@ from backtest.fund_rotation.strategies.correlation_representative.strategy impor
     CorrelationRepresentativeSession,
     CorrelationRepresentativeStrategy,
     _SIGNAL_INFORMATION_CUTOFF,
+    _cluster_state_diagnostics,
     _momentum_diagnostics,
     _serialize_scores,
     build_slot_weights,
@@ -284,6 +285,9 @@ class AiRotationR11PersistGeomSession(CorrelationRepresentativeSession):
                     "direction": "HIGHER_BETTER",
                 },
                 "strategy_scores": _serialize_scores(scores),
+                **_cluster_state_diagnostics(
+                    self._clusters, self._representatives,
+                ),
                 "num_clusters": len(self._clusters),
                 "signal_information_cutoff": _SIGNAL_INFORMATION_CUTOFF,
             },

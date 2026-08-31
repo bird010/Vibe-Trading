@@ -32,13 +32,27 @@ class CorrelationRepresentativeConfig(BaseModel):
     )
     representative_min_cluster_corr: float = Field(
         0.85, gt=0, le=1,
-        description="代表 ETF 与留一簇指数的最小相关系数",
+        description=(
+            "Legacy 模式下代表 ETF 与留一簇指数的最小相关系数硬门禁；"
+            "Relaxed 模式下仅作为历史阈值和诊断参考"
+        ),
+    )
+    representative_relaxed_selection: bool = Field(
+        False,
+        description=(
+            "实验性代表基金宽松模式：允许合格 singleton 自代表，"
+            "代表相关性阈值仅用于诊断"
+        ),
     )
     representative_liquidity_window_days: int = Field(
         20, ge=1, description="ADV 流动性窗口（交易日）",
     )
     representative_min_liquidity_observations: int = Field(
         15, ge=1, description="ADV 最小观测数",
+    )
+    cluster_cross_sectional_demean: bool = Field(
+        False,
+        description="聚类前是否对本次有效聚类样本进行横截面收益去均值",
     )
 
     # ── Cluster quality gates (§9) — strategy-owned, warn/reject pairs ──

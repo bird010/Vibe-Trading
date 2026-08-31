@@ -94,6 +94,7 @@ def _candidate_records(
     min_cluster_corr: float,
     eligible: AbstractSet[str],
     enforce_correlation: bool,
+    relaxed_selection: bool = False,
 ) -> tuple[str, tuple[CandidateRecord, ...]]:
     medoid = compute_medoid(distance, members)
     neighborhood = candidate_neighborhood(
@@ -133,7 +134,7 @@ def _candidate_records(
             if enforce_correlation:
                 if corr is None:
                     reason = INSUFFICIENT_DATA
-                elif corr < min_cluster_corr:
+                elif corr < min_cluster_corr and not relaxed_selection:
                     reason = LOW_CLUSTER_CORR
 
         records.append(
@@ -158,15 +159,49 @@ def select_representative(
     min_cluster_corr: float,
     eligible: AbstractSet[str],
     tie_break: Mapping[str, tuple[int, int]] | None = None,
+    relaxed_selection: bool = False,
 ) -> RepresentativeSelection:
     """Select a fresh representative on a reclustering date."""
-    if len(members) < 2:
+    if not members:
+        return RepresentativeSelection(
+            medoid="",
+            candidates=(),
+            selected=None,
+            exclusion_reason=SINGLE_MEMBER_CLUSTER,
+        )
+    if len(members) == 1 and not relaxed_selection:
         medoid = str(members[0]) if members else ""
         return RepresentativeSelection(
             medoid=medoid,
             candidates=(),
             selected=None,
             exclusion_reason=SINGLE_MEMBER_CLUSTER,
+        )
+    if len(members) == 1:
+        code = str(members[0])
+        raw_adv = adv20.get(code)
+        adv_value = (
+            float(raw_adv)
+            if raw_adv is not None and np.isfinite(raw_adv) and raw_adv > 0
+            else None
+        )
+        reason = ""
+        if code not in eligible:
+            reason = NOT_TRADABLE
+        elif adv_value is None:
+            reason = NO_ADV
+        record = CandidateRecord(
+            code=code,
+            distance_to_medoid=0.0,
+            leave_one_out_corr=None,
+            adv20=adv_value,
+            excluded_reason=reason,
+        )
+        return RepresentativeSelection(
+            medoid=code,
+            candidates=(record,),
+            selected=code if not reason else None,
+            exclusion_reason="" if not reason else NO_ELIGIBLE_REPRESENTATIVE,
         )
 
     medoid, records = _candidate_records(
@@ -178,6 +213,7 @@ def select_representative(
         min_cluster_corr=min_cluster_corr,
         eligible=eligible,
         enforce_correlation=True,
+        relaxed_selection=relaxed_selection,
     )
     viable = [record for record in records if not record.excluded_reason]
     if not viable:
@@ -221,6 +257,7 @@ def maintain_representative_lock(
     eligible: AbstractSet[str],
     current: str | None,
     tie_break: Mapping[str, tuple[int, int]] | None = None,
+    relaxed_selection: bool = False,
 ) -> RepresentativeSelection:
     """Keep a locked representative unless a hard failure occurs.
 
@@ -241,14 +278,41 @@ def maintain_representative_lock(
             min_cluster_corr=min_cluster_corr,
             eligible=eligible,
             tie_break=tie_break,
+            relaxed_selection=relaxed_selection,
         )
-    if len(members) < 2:
-        medoid = str(members[0]) if members else ""
+    if not members:
         return RepresentativeSelection(
-            medoid=medoid,
+            medoid="",
             candidates=(),
             selected=None,
             exclusion_reason=SINGLE_MEMBER_CLUSTER,
+            lock_maintained=False,
+        )
+    if len(members) == 1:
+        medoid = str(members[0]) if members else ""
+        code = medoid
+        raw_adv = adv20.get(code)
+        hard_valid = (
+            code in eligible
+            and raw_adv is not None
+            and np.isfinite(raw_adv)
+            and raw_adv > 0
+        )
+        record = CandidateRecord(
+            code=code,
+            distance_to_medoid=0.0,
+            leave_one_out_corr=None,
+            adv20=float(raw_adv) if hard_valid else None,
+            excluded_reason="" if hard_valid else (
+                NOT_TRADABLE if code not in eligible else NO_ADV
+            ),
+        )
+        return RepresentativeSelection(
+            medoid=medoid,
+            candidates=(record,),
+            selected=code if hard_valid else None,
+            exclusion_reason="" if hard_valid else NO_ELIGIBLE_REPRESENTATIVE,
+            lock_maintained=hard_valid,
         )
 
     medoid, records = _candidate_records(

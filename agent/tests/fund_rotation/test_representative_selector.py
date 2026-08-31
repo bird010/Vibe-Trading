@@ -322,6 +322,61 @@ class TestSelectRepresentative:
         assert selection.exclusion_reason == "SINGLE_MEMBER_CLUSTER"
         assert selection.candidates == ()  # nothing scored, nothing fabricated
 
+    def test_relaxed_singleton_selects_itself_when_hard_checks_pass(self):
+        window = _correlated_window()
+        selection = select_representative(
+            distance=_distance({"A": {"A": 0.0}}),
+            weekly_window=window, members=["A"],
+            adv20={"A": 9_999.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset({"A"}),
+            relaxed_selection=True,
+        )
+        assert selection.selected == "A"
+        assert selection.exclusion_reason == ""
+        assert selection.candidates[0].leave_one_out_corr is None
+
+    def test_relaxed_low_corr_is_eligible_but_missing_corr_is_not(self):
+        window = _correlated_window(n=40)
+        window["B"] = np.nan
+        members = ["A", "B", "C"]
+        dist = _distance({
+            "A": {"A": 0.0, "B": 0.1, "C": 0.12},
+            "B": {"B": 0.0, "A": 0.1, "C": 0.11},
+            "C": {"C": 0.0, "A": 0.12, "B": 0.11},
+        })
+        selection = select_representative(
+            distance=dist, weekly_window=window, members=members,
+            adv20={"A": 1_000.0, "B": 9_000.0, "C": 2_000.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset(members),
+            relaxed_selection=True,
+        )
+        b_record = next(c for c in selection.candidates if c.code == "B")
+        assert b_record.leave_one_out_corr is None
+        assert b_record.excluded_reason == "INSUFFICIENT_DATA"
+        assert selection.selected != "B"
+
+    def test_relaxed_low_corr_candidate_is_not_excluded(self):
+        window = _correlated_window()
+        members = ["A", "B", "C", "OUT"]
+        dist = _distance({
+            "A": {"A": 0.0, "B": 0.10, "C": 0.12, "OUT": 0.20},
+            "B": {"B": 0.0, "A": 0.10, "C": 0.11, "OUT": 0.20},
+            "C": {"C": 0.0, "A": 0.12, "B": 0.11, "OUT": 0.20},
+            "OUT": {"OUT": 0.0, "A": 0.20, "B": 0.20, "C": 0.20},
+        })
+        selection = select_representative(
+            distance=dist, weekly_window=window, members=members,
+            adv20={"A": 1_000.0, "B": 2_000.0, "C": 1_500.0, "OUT": 9_000.0},
+            candidate_count=5, min_cluster_corr=0.85,
+            eligible=frozenset(members), relaxed_selection=True,
+        )
+        out_record = next(c for c in selection.candidates if c.code == "OUT")
+        assert out_record.leave_one_out_corr < 0.85
+        assert out_record.excluded_reason == ""
+        assert selection.selected == "OUT"
+
 
 # ── lock & fallback (§8.2, Task 4) ──
 
@@ -334,6 +389,32 @@ def _abc_distance() -> pd.DataFrame:
 
 
 class TestLockAndFallback:
+    def test_relaxed_singleton_lock_is_maintained_until_hard_failure(self):
+        window = _correlated_window()
+        common = dict(
+            distance=_distance({"A": {"A": 0.0}}),
+            weekly_window=window,
+            members=["A"],
+            adv20={"A": 9_999.0},
+            candidate_count=5,
+            min_cluster_corr=0.85,
+            relaxed_selection=True,
+        )
+        first = maintain_representative_lock(
+            eligible=frozenset({"A"}), current=None, **common,
+        )
+        second = maintain_representative_lock(
+            eligible=frozenset({"A"}), current="A", **common,
+        )
+        failed = maintain_representative_lock(
+            eligible=frozenset(), current="A", **common,
+        )
+        assert first.selected == "A"
+        assert second.selected == "A"
+        assert second.lock_maintained is True
+        assert failed.selected is None
+        assert failed.lock_maintained is False
+
     def test_lock_maintained_despite_adv_overtaking(self):
         """§8.2 — ADV rank changes alone never trigger a switch."""
         window = _correlated_window()

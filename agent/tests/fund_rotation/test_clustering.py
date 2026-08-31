@@ -5,6 +5,11 @@ import pandas as pd
 import pytest
 
 from backtest.fund_rotation.clustering import hierarchical_cluster
+from backtest.fund_rotation.strategies.correlation_representative.clustering import (
+    cross_sectional_demean,
+    cross_sectional_valid_count_distribution,
+    prepare_cluster_returns,
+)
 
 
 def _distance_matrix(data: dict[tuple[str, str], float], codes: list[str]) -> pd.DataFrame:
@@ -108,3 +113,55 @@ class TestHierarchicalCluster:
         # Same grouping regardless of input order
         assert (r1["A"] == r1["B"]) == (r2["A"] == r2["B"])
         assert (r1["C"] == r1["D"]) == (r2["C"] == r2["D"])
+
+
+class TestCorrelationRepresentativeClusterInput:
+    def test_prepare_uses_only_valid_codes_before_demean(self):
+        window = pd.DataFrame(
+            {
+                "A": [0.10, 0.20],
+                "B": [0.20, 0.40],
+                "OUTSIDE": [100.0, 200.0],
+            }
+        )
+        prepared, insufficient = prepare_cluster_returns(
+            window, ["A", "B"], demean=True,
+        )
+        expected = pd.DataFrame({"A": [-0.05, -0.10], "B": [0.05, 0.10]})
+        pd.testing.assert_frame_equal(prepared, expected)
+        assert insufficient == 0
+        assert list(prepared.columns) == ["A", "B"]
+
+    def test_demean_keeps_week_nan_when_fewer_than_two_observations(self):
+        raw = pd.DataFrame(
+            {
+                "A": [0.10, np.nan, 0.30],
+                "B": [0.20, np.nan, np.nan],
+                "C": [np.nan, 0.50, 0.40],
+            }
+        )
+        demeaned, insufficient = cross_sectional_demean(raw)
+        assert insufficient == 1
+        assert demeaned.iloc[1].isna().all()
+        assert demeaned.loc[0, "A"] == pytest.approx(-0.05)
+        assert demeaned.loc[0, "B"] == pytest.approx(0.05)
+        assert demeaned.loc[2, "A"] == pytest.approx(-0.05)
+        assert demeaned.loc[2, "C"] == pytest.approx(0.05)
+
+    def test_valid_observation_distribution_is_explicit_and_json_safe(self):
+        raw = pd.DataFrame(
+            {
+                "A": [1.0, np.nan, np.nan, 1.0],
+                "B": [1.0, 1.0, 1.0, np.nan],
+                "C": [1.0, np.nan, 1.0, np.nan],
+            }
+        )
+        result = cross_sectional_valid_count_distribution(raw)
+        assert result == {
+            "weeks": 4,
+            "min": 1,
+            "p10": 1.0,
+            "median": 1.5,
+            "max": 3,
+            "histogram": {"1": 2, "2": 1, "3": 1},
+        }

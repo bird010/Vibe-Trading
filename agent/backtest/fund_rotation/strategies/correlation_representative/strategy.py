@@ -33,6 +33,8 @@ from backtest.fund_rotation.strategies.correlation_all_members.signals import (
 )
 from backtest.fund_rotation.strategies.correlation_representative.clustering import (
     correlation_cluster,
+    cross_sectional_valid_count_distribution,
+    prepare_cluster_returns,
 )
 from backtest.fund_rotation.strategies.correlation_representative.config import (
     CorrelationRepresentativeConfig,
@@ -55,7 +57,7 @@ DESCRIPTOR = FundRotationStrategyDescriptor(
     name="相关性聚类代表ETF",
     description=(
         "相关性聚类后每个入选簇只持有一只流动性最佳代表 ETF（medoid 邻域 + "
-        "留一簇指数相关性门禁 + 因果 ADV 选择 + 锁定/硬失效回退）。"
+        "代表相关性诊断 + 因果 ADV 选择 + 锁定/硬失效回退）。"
     ),
     interface_version="1.0",
     supported_universe=("etf",),
@@ -127,6 +129,54 @@ def _serialize_scores(
     scores: Mapping[int, StrategyScore],
 ) -> dict[str, dict[str, object]]:
     return {str(cluster_id): _serialize_score(score) for cluster_id, score in scores.items()}
+
+
+def _cluster_state_diagnostics(
+    clusters: Mapping[str, int],
+    representatives: Mapping[int, str | None],
+) -> dict[str, int]:
+    return {
+        "cluster_count": len(set(clusters.values())),
+        "cluster_member_count": len(clusters),
+        "representative_count": sum(
+            value is not None for value in representatives.values()
+        ),
+    }
+
+
+def _candidate_threshold_diagnostics(
+    candidates,
+    *,
+    selected: str | None,
+    threshold: float,
+) -> dict[str, object]:
+    valid = [
+        record
+        for record in candidates
+        if record.adv20 is not None and record.leave_one_out_corr is not None
+    ]
+    selected_corr = next(
+        (
+            record.leave_one_out_corr
+            for record in candidates
+            if record.code == selected
+        ),
+        None,
+    )
+    return {
+        "candidate_scope": "MEDOID_NEIGHBORHOOD",
+        "eligible_candidate_count": len(valid),
+        "eligible_candidate_below_legacy_threshold_count": sum(
+            record.leave_one_out_corr < threshold for record in valid
+        ),
+        "selected_leave_one_out_corr": selected_corr,
+        "selected_below_legacy_threshold": (
+            None
+            if selected_corr is None
+            else selected_corr < threshold
+        ),
+        "leave_one_out_corr_space": "RAW",
+    }
 
 
 class CorrelationRepresentativeSession:
@@ -273,6 +323,9 @@ class CorrelationRepresentativeSession:
                     "direction": "HIGHER_BETTER",
                 },
                 "strategy_scores": _serialize_scores(scores),
+                **_cluster_state_diagnostics(
+                    self._clusters, self._representatives,
+                ),
                 "num_clusters": len(self._clusters),
                 "signal_information_cutoff": _SIGNAL_INFORMATION_CUTOFF,
             },
@@ -311,9 +364,17 @@ class CorrelationRepresentativeSession:
                 )
             valid_codes = qualified
 
+        cluster_returns, demean_insufficient = prepare_cluster_returns(
+            window,
+            valid_codes,
+            demean=cfg.cluster_cross_sectional_demean,
+        )
+        valid_count_distribution = cross_sectional_valid_count_distribution(
+            cluster_returns,
+        )
         try:
             outcome = correlation_cluster(
-                window,
+                cluster_returns,
                 valid_codes,
                 k=cfg.k,
                 min_pairwise_weeks=cfg.min_pairwise_weeks,
@@ -346,6 +407,19 @@ class CorrelationRepresentativeSession:
                 "week": signal_date,
                 "clusters": dict(outcome.clusters),
                 "num_etfs": len(outcome.clusters),
+                "cluster_count": len(set(outcome.clusters.values())),
+                "cluster_member_count": len(outcome.clusters),
+                "cluster_input_space": (
+                    "CROSS_SECTIONAL_DEMEANED"
+                    if cfg.cluster_cross_sectional_demean
+                    else "RAW"
+                ),
+                "demean_insufficient_cross_section_weeks": (
+                    demean_insufficient
+                ),
+                "cross_sectional_valid_observation_count_distribution": (
+                    valid_count_distribution
+                ),
             }
         )
         self._gate_history.append(
@@ -422,6 +496,7 @@ class CorrelationRepresentativeSession:
                 eligible=tradable,
                 current=locked,
                 tie_break=tie_break,
+                relaxed_selection=cfg.representative_relaxed_selection,
             )
             self._representatives[cluster_id] = selection.selected
             self._selection_history.append(
@@ -431,6 +506,9 @@ class CorrelationRepresentativeSession:
                     "medoid": selection.medoid,
                     "selected": selection.selected,
                     "previous": locked,
+                    "selection_mode": (
+                        "LOCK_MAINTENANCE" if current_map else "FRESH"
+                    ),
                     "lock_maintained": selection.lock_maintained,
                     "exclusion_reason": selection.exclusion_reason,
                     "signal_information_cutoff": (
@@ -450,6 +528,11 @@ class CorrelationRepresentativeSession:
                         }
                         for record in selection.candidates
                     ],
+                    **_candidate_threshold_diagnostics(
+                        selection.candidates,
+                        selected=selection.selected,
+                        threshold=cfg.representative_min_cluster_corr,
+                    ),
                 }
             )
 

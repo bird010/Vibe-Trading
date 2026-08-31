@@ -35,6 +35,59 @@ class ClusterOutcome:
     distance: pd.DataFrame
 
 
+def cross_sectional_demean(
+    returns: pd.DataFrame,
+) -> tuple[pd.DataFrame, int]:
+    """Remove each week's cross-sectional mean without fabricating 1-D rows."""
+    valid_count = returns.notna().sum(axis=1)
+    weekly_mean = returns.mean(axis=1, skipna=True).where(valid_count >= 2)
+    demeaned = returns.sub(weekly_mean, axis=0)
+    return demeaned, int((valid_count < 2).sum())
+
+
+def cross_sectional_valid_count_distribution(
+    returns: pd.DataFrame,
+) -> dict[str, object]:
+    """Return a deterministic, JSON-safe distribution of weekly valid counts."""
+    counts = returns.notna().sum(axis=1).astype(int)
+    if counts.empty:
+        return {
+            "weeks": 0,
+            "min": None,
+            "p10": None,
+            "median": None,
+            "max": None,
+            "histogram": {},
+        }
+    histogram = {
+        str(int(value)): int((counts == value).sum())
+        for value in sorted(counts.unique())
+    }
+    return {
+        "weeks": int(len(counts)),
+        "min": int(counts.min()),
+        "p10": float(counts.quantile(0.10)),
+        "median": float(counts.quantile(0.50)),
+        "max": int(counts.max()),
+        "histogram": histogram,
+    }
+
+
+def prepare_cluster_returns(
+    window: pd.DataFrame,
+    valid_codes: Sequence[str],
+    *,
+    demean: bool,
+) -> tuple[pd.DataFrame, int]:
+    """Restrict to the clustering sample, then optionally demean it."""
+    cluster_returns = window.loc[
+        :, [code for code in valid_codes if code in window.columns]
+    ]
+    if not demean:
+        return cluster_returns.copy(), 0
+    return cross_sectional_demean(cluster_returns)
+
+
 def normalize_cluster_labels(clusters: Mapping[str, int]) -> dict[str, int]:
     """Relabel clusters deterministically: largest cluster first (label 1),
     ties broken by the lexicographically smallest member."""

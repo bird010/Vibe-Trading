@@ -33,6 +33,8 @@ DESIGN_DEFAULTS = {
     "max_cluster_share_reject": 0.80,
     "min_effective_cluster_count_warn": 4.0,
     "min_effective_cluster_count_reject": 2.5,
+    "representative_relaxed_selection": False,
+    "cluster_cross_sectional_demean": False,
 }
 
 
@@ -116,6 +118,11 @@ class TestSchemaAndValidation:
             CorrelationRepresentativeConfig(representative_min_cluster_corr=0.0)
         with pytest.raises(ValidationError):
             CorrelationRepresentativeConfig(representative_min_cluster_corr=1.5)
+
+    def test_experiment_flags_default_to_legacy_behavior(self):
+        cfg = CorrelationRepresentativeConfig()
+        assert cfg.representative_relaxed_selection is False
+        assert cfg.cluster_cross_sectional_demean is False
 
 
 class TestGateThresholdConflicts:
