@@ -21,7 +21,6 @@ const BATCH: BatchDetail = {
       {
         variant_key: "variant-ok",
         strategy_id: "correlation_representative",
-        label: "基准参数",
         implementation_hash: "strategy",
         resolved_config_hash: "config",
         run_id: "run-success",
@@ -101,7 +100,7 @@ describe("VariantRunsTable", () => {
       />,
     );
 
-    expect(screen.getByText("基准参数")).toBeDefined();
+    expect(screen.queryByText("标签")).toBeNull();
     expect(screen.getByText("排除：technical_failure")).toBeDefined();
     expect(screen.getByText("查看详情")).toBeDefined();
     expect(screen.getByText("查看错误")).toBeDefined();

@@ -177,7 +177,6 @@ export const useFundRotation = create<FundRotationState>((set, get) => ({
         execution,
         variants: variants.map((variant) => ({
           strategy_id: variant.strategyId,
-          label: variant.label || undefined,
           params: variant.params,
         })),
       };

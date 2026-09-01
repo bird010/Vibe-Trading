@@ -124,6 +124,7 @@ describe("BacktestDetailPanel chart lifecycle", () => {
     runDetail.batch_id = "batch-1";
     runDetail.variant_key = "variant-1";
     runDetail.strategy_id = "correlation_representative";
+    runDetail.label = "旧标签数据";
     runDetail.quality_status = "RESEARCH_ONLY_UNVERIFIED_UNIVERSE";
     runDetail.events = [
       { seq: 1, ts: "2024-01-01T09:00:00Z", stage: "PREPARING_DATA" },
@@ -139,6 +140,8 @@ describe("BacktestDetailPanel chart lifecycle", () => {
     expect(screen.getByText("batch-1")).toBeInTheDocument();
     expect(screen.getByText("执行生命周期")).toBeInTheDocument();
     expect(screen.getByText("PREPARING_DATA")).toBeInTheDocument();
+    expect(screen.queryByText("参数标签")).toBeNull();
+    expect(screen.queryByText("旧标签数据")).toBeNull();
     expect(screen.getAllByText("Run identity")).toHaveLength(1);
   });
 

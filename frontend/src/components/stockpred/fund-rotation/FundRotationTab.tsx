@@ -105,7 +105,6 @@ export function FundRotationTab() {
         {
           uiKey: createVariantUiKey(),
           strategyId: strategy.strategy_id,
-          label: "",
           params: {
             ...((strategyDetails.get(strategy.strategy_id)?.default_config) ?? {}),
           },
@@ -163,9 +162,8 @@ export function FundRotationTab() {
   const payloadSignature = useMemo(
     () =>
       JSON.stringify({
-        variants: variants.map(({ strategyId, label, params }) => ({
+        variants: variants.map(({ strategyId, params }) => ({
           strategyId,
-          label,
           params,
         })),
         startDate,

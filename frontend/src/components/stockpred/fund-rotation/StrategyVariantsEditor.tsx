@@ -8,7 +8,6 @@ export interface VariantDraft {
   /** Temporary UI-only key; never sent as backend variant identity. */
   uiKey: string;
   strategyId: string;
-  label: string;
   params: Record<string, unknown>;
 }
 
@@ -43,7 +42,6 @@ export function StrategyVariantsEditor({
       {
         uiKey: createVariantUiKey(),
         strategyId,
-        label: "",
         params: { ...strategy.default_config },
       },
     ]);
@@ -68,7 +66,6 @@ export function StrategyVariantsEditor({
       {
         ...source,
         uiKey: createVariantUiKey(),
-        label: source.label ? `${source.label} (副本)` : "副本",
         params: structuredClone(source.params),
       },
     ]);
@@ -117,16 +114,6 @@ export function StrategyVariantsEditor({
                   </option>
                 ))}
               </select>
-              <input
-                type="text"
-                value={variant.label}
-                onChange={(event) =>
-                  updateVariant(variant.uiKey, { label: event.target.value })
-                }
-                placeholder="变体标签（可选）"
-                disabled={disabled}
-                className="min-w-0 w-32 rounded border px-2 py-1.5 text-sm disabled:opacity-50"
-              />
               <button
                 type="button"
                 onClick={() => copyVariant(variant.uiKey)}

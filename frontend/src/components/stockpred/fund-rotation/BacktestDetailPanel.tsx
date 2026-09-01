@@ -236,8 +236,6 @@ export function BacktestDetailPanel() {
               <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1 rounded border p-3 text-xs sm:grid-cols-[9rem_1fr_9rem_1fr]">
                 <dt className="text-muted-foreground">批次 ID</dt>
                 <dd className="font-mono">{formatValue(detail.batch_id)}</dd>
-                <dt className="text-muted-foreground">参数标签</dt>
-                <dd>{formatValue(detail.label)}</dd>
                 <dt className="text-muted-foreground">运行模式</dt>
                 <dd>{formatValue(detail.mode)}</dd>
                 <dt className="text-muted-foreground">部分完成</dt>

@@ -59,7 +59,7 @@ describe("StrategyVariantsEditor", () => {
       <StrategyVariantsEditor
         strategies={STRATEGIES}
         variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: { k: 8 } },
+          { uiKey: "v1", strategyId: "baseline", params: { k: 8 } },
         ]}
         onChange={onChange}
       />,
@@ -68,7 +68,7 @@ describe("StrategyVariantsEditor", () => {
     expect(screen.getByText(/变体\s*1/)).toBeDefined();
   });
 
-  it("protects the first-row controls from long strategy and variant labels", () => {
+  it("removes the variant label control and keeps the strategy selector flexible", () => {
     const onChange = vi.fn();
     render(
       <StrategyVariantsEditor
@@ -79,7 +79,6 @@ describe("StrategyVariantsEditor", () => {
           {
             uiKey: "v1",
             strategyId: "baseline",
-            label: "一个非常长的变体标签",
             params: { k: 8 },
           },
         ]}
@@ -94,10 +93,7 @@ describe("StrategyVariantsEditor", () => {
     );
     expect(screen.getByTestId("variant-first-row")).toHaveClass("min-w-0");
     expect(screen.getByTestId("variant-drag-handle")).toHaveClass("shrink-0");
-    expect(screen.getByPlaceholderText("变体标签（可选）")).toHaveClass(
-      "min-w-0",
-      "w-32",
-    );
+    expect(screen.queryByPlaceholderText("变体标签（可选）")).toBeNull();
     expect(screen.getByTitle("复制变体")).toHaveClass("shrink-0");
     expect(screen.getByTitle("删除变体")).toHaveClass("shrink-0");
   });
@@ -105,7 +101,7 @@ describe("StrategyVariantsEditor", () => {
   it("adds a variant via the dropdown", () => {
     const onChange = vi.fn();
     const variants = [
-      { uiKey: "v1", strategyId: "baseline", label: "", params: { k: 8 } },
+      { uiKey: "v1", strategyId: "baseline", params: { k: 8 } },
     ];
     render(
       <StrategyVariantsEditor
@@ -131,7 +127,7 @@ describe("StrategyVariantsEditor", () => {
       <StrategyVariantsEditor
         strategies={STRATEGIES}
         variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: { k: 8 } },
+          { uiKey: "v1", strategyId: "baseline", params: { k: 8 } },
         ]}
         onChange={onChange}
       />,
@@ -149,7 +145,7 @@ describe("StrategyVariantsEditor", () => {
       <StrategyVariantsEditor
         strategies={STRATEGIES}
         variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: {} },
+          { uiKey: "v1", strategyId: "baseline", params: {} },
         ]}
         onChange={onChange}
       />,
@@ -166,8 +162,8 @@ describe("StrategyVariantsEditor", () => {
       <StrategyVariantsEditor
         strategies={STRATEGIES}
         variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: {} },
-          { uiKey: "v2", strategyId: "corr", label: "", params: {} },
+          { uiKey: "v1", strategyId: "baseline", params: {} },
+          { uiKey: "v2", strategyId: "corr", params: {} },
         ]}
         onChange={onChange}
       />,
@@ -179,28 +175,12 @@ describe("StrategyVariantsEditor", () => {
     expect(newVariants.length).toBe(1);
   });
 
-  it("updates variant label", () => {
-    const onChange = vi.fn();
-    render(
-      <StrategyVariantsEditor
-        strategies={STRATEGIES}
-        variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: { k: 8 } },
-        ]}
-        onChange={onChange}
-      />,
-    );
-    const labelInput = screen.getByPlaceholderText("变体标签（可选）");
-    fireEvent.change(labelInput, { target: { value: "测试标签" } });
-    expect(onChange).toHaveBeenCalled();
-  });
-
   it("respects disabled prop", () => {
     render(
       <StrategyVariantsEditor
         strategies={STRATEGIES}
         variants={[
-          { uiKey: "v1", strategyId: "baseline", label: "", params: { k: 8 } },
+          { uiKey: "v1", strategyId: "baseline", params: { k: 8 } },
         ]}
         onChange={vi.fn()}
         disabled

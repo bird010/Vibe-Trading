@@ -59,7 +59,6 @@ export function VariantRunsTable({
               <th className="py-2 pr-3">状态</th>
               <th className="py-2 pr-3">变体</th>
               <th className="py-2 pr-3">策略</th>
-              <th className="py-2 pr-3">标签</th>
               <th className="py-2 pr-3">数据起始</th>
               <th className="py-2 pr-3">决策起始</th>
               <th className="py-2 pr-3">质量/排除</th>
@@ -87,7 +86,6 @@ export function VariantRunsTable({
                   </td>
                   <td className="py-2 pr-3 font-mono">{variant.variant_key}</td>
                   <td className="py-2 pr-3">{variant.strategy_id}</td>
-                  <td className="py-2 pr-3">{variant.label || "—"}</td>
                   <td className="py-2 pr-3 font-mono">{variant.data_start || "—"}</td>
                   <td className="py-2 pr-3 font-mono">
                     {variant.decision_start_date || "—"}
