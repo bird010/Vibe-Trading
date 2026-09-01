@@ -187,6 +187,25 @@ class TestStrategyDetail:
         assert "cluster_history" in body["artifact_roles"]
         assert body["default_config"]["k"] == 8
 
+    @pytest.mark.parametrize(
+        "strategy_id",
+        [
+            "ai_rotation_r79_economic_role_members",
+            "ai_rotation_r80_economic_role_fixed_rep",
+            "ai_rotation_r81_economic_role_dynamic_rep",
+        ],
+    )
+    def test_economic_role_manifest_is_read_only_in_catalog_schema(
+        self, tmp_path, strategy_id
+    ):
+        body = _client(tmp_path).get(
+            f"/stockpred/fund-rotation/strategies/{strategy_id}"
+        ).json()
+
+        manifest = body["config_schema"]["properties"]["fixed_role_manifest"]
+        assert manifest["readOnly"] is True
+        assert body["default_config"]["fixed_role_manifest"]
+
     def test_unknown_strategy_returns_structured_not_found(self, tmp_path):
         response = _client(tmp_path).get(
             "/stockpred/fund-rotation/strategies/does_not_exist"

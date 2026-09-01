@@ -46,6 +46,7 @@ function extractFields(
     fieldDefault: unknown,
     isRequired: boolean,
   ): void => {
+    if (property.readOnly === true) return;
     const type = property.type as string;
     const dotted = path.join(".");
     if (!SUPPORTED_TYPES.has(type)) {

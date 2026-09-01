@@ -31,7 +31,8 @@ class EconomicRoleConfig(BaseModel):
     fixed_role_manifest: Mapping[str, tuple[str, ...]] = Field(
         default_factory=lambda: {
             key: tuple(value) for key, value in _DEFAULT_MANIFEST.items()
-        }
+        },
+        json_schema_extra={"readOnly": True},
     )
 
     @model_validator(mode="after")

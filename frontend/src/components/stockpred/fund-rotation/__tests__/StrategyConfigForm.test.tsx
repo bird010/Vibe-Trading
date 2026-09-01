@@ -187,6 +187,42 @@ describe("StrategyConfigForm", () => {
     expect(screen.getByText(/oneof_field/)).toBeDefined();
   });
 
+  it("does not block submission for read-only structured config fields", () => {
+    const onUnsupportedChange = vi.fn();
+    render(
+      <StrategyConfigForm
+        schema={{
+          type: "object",
+          properties: {
+            fixed_role_manifest: {
+              type: "object",
+              readOnly: true,
+              additionalProperties: {
+                type: "array",
+                items: { type: "string" },
+              },
+            },
+            top_n: { type: "integer", description: "持仓个数" },
+          },
+        }}
+        defaults={{
+          fixed_role_manifest: { BOND: ["511010.SH"] },
+          top_n: 3,
+        }}
+        descriptions={{ top_n: "持仓个数" }}
+        value={{
+          fixed_role_manifest: { BOND: ["511010.SH"] },
+          top_n: 3,
+        }}
+        onChange={() => {}}
+        onUnsupportedChange={onUnsupportedChange}
+      />,
+    );
+
+    expect(screen.queryByText(/当前客户端无法安全编辑以下配置项/)).toBeNull();
+    expect(onUnsupportedChange).toHaveBeenLastCalledWith([]);
+  });
+
   it("respects disabled prop", () => {
     render(
       <StrategyConfigForm
