@@ -50,6 +50,7 @@ class PinnedFundDataSnapshot:
     trading_dates: tuple[str, ...]
     fingerprint: str
     historical_candidate_codes: tuple[str, ...] = ()
+    role_universe_codes: tuple[str, ...] = ()
 
 
 def compute_fingerprint(
@@ -59,6 +60,7 @@ def compute_fingerprint(
     universe_codes,
     trading_dates,
     historical_candidate_codes=(),
+    role_universe_codes=None,
 ) -> str:
     """Stable SHA-256 over the canonical (sorted) snapshot identity.
 
@@ -74,6 +76,12 @@ def compute_fingerprint(
             "universe_codes": sorted(str(c) for c in universe_codes),
             "historical_candidate_codes": sorted(
                 str(c) for c in historical_candidate_codes
+            ),
+            "role_universe_codes": sorted(
+                str(c) for c in (
+                    universe_codes if role_universe_codes is None
+                    else role_universe_codes
+                )
             ),
             "trading_dates": sorted(str(d) for d in trading_dates),
         },
@@ -132,7 +140,9 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
     dim_cols = [c for c in _DIM_COLS if c in ds_dim.schema.names]
     dim_df = ds_dim.to_table(columns=dim_cols).to_pandas()
     universe = filter_etf_universe(dim_df)
+    role_universe = filter_etf_universe(dim_df, include_qdii=True)
     universe_codes = tuple(sorted({str(c) for c in universe["ts_code"]}))
+    role_universe_codes = tuple(sorted({str(c) for c in role_universe["ts_code"]}))
 
     fingerprint = compute_fingerprint(
         fund_version,
@@ -141,6 +151,7 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
         universe_codes,
         trading_dates,
         historical_candidate_codes,
+        role_universe_codes,
     )
     return PinnedFundDataSnapshot(
         fund_version=fund_version,
@@ -150,6 +161,7 @@ def resolve_pinned_snapshot(lance_dir: Path) -> PinnedFundDataSnapshot:
         trading_dates=trading_dates,
         fingerprint=fingerprint,
         historical_candidate_codes=historical_candidate_codes,
+        role_universe_codes=role_universe_codes,
     )
 
 

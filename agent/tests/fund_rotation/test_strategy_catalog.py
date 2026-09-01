@@ -115,6 +115,9 @@ class TestCatalogRegistration:
             "ai_rotation_r76_fixed_short_bond",
             "ai_rotation_r77_defense_relative_momentum",
             "ai_rotation_r78_survivor_combo",
+            "ai_rotation_r79_economic_role_members",
+            "ai_rotation_r80_economic_role_fixed_rep",
+            "ai_rotation_r81_economic_role_dynamic_rep",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:

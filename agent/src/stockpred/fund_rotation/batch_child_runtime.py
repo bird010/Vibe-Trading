@@ -128,6 +128,44 @@ def _finite_metric(value: Any) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _role_input_contract(result: Any) -> dict[str, Any]:
+    """Freeze the Role inputs that must remain identical for comparisons."""
+    decisions = getattr(result, "decisions", ())
+    rows: list[dict[str, str]] = []
+    for decision in decisions:
+        diagnostics = getattr(decision, "diagnostics", {})
+        if not isinstance(diagnostics, Mapping):
+            continue
+        required = {
+            key: diagnostics.get(key)
+            for key in (
+                "role_rule_hash",
+                "effective_universe_hash",
+                "effective_role_assignment_hash",
+            )
+        }
+        if all(isinstance(value, str) and value for value in required.values()):
+            rows.append({"signal_date": str(decision.signal_date), **required})
+    if not rows:
+        return {}
+    rows.sort(key=lambda row: row["signal_date"])
+    payload = {
+        "schema_version": "1",
+        "decision_inputs": rows,
+    }
+    return {
+        **payload,
+        "role_rule_hashes": sorted({row["role_rule_hash"] for row in rows}),
+        "effective_universe_hashes": sorted(
+            {row["effective_universe_hash"] for row in rows}
+        ),
+        "effective_role_assignment_hashes": sorted(
+            {row["effective_role_assignment_hash"] for row in rows}
+        ),
+        "role_input_contract_hash": _canonical_hash(payload),
+    }
+
+
 class BatchChildRuntime:
     def __init__(self, runs_root: Path, catalog, framework_hash: str) -> None:
         self.runs_root = Path(runs_root)
@@ -214,6 +252,7 @@ class BatchChildRuntime:
             else request.execution.model_dump(mode="json")
         )
         resolved_execution_hash = _canonical_hash(resolved_execution)
+        role_input_contract = _role_input_contract(result)
         research_contract = {
             "schema_version": request.schema_version,
             "mode": request.mode,
@@ -223,6 +262,7 @@ class BatchChildRuntime:
             "evaluation_start_date": request.evaluation_start_date,
             "evaluation_end_date": request.evaluation_end_date,
             "resolved_requirements_hash": identity.resolved_requirements_hash,
+            "role_input_contract": role_input_contract,
         }
         run_identity_hash = compute_run_identity_hash(
             identity.implementation_hash,

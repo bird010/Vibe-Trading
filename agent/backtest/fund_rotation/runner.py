@@ -281,7 +281,12 @@ class FundRotationBacktestRunner:
                 error_message=str(exc),
             )
 
-        if self._pit_universe_resolver is None:
+        candidate_resolver = getattr(
+            strategy, "resolve_candidate_universe_codes", None
+        )
+        if self._pit_universe_resolver is None and callable(candidate_resolver):
+            candidate_codes = candidate_resolver(snapshot)
+        elif self._pit_universe_resolver is None:
             candidate_codes = snapshot.universe_codes
         else:
             candidate_codes = (

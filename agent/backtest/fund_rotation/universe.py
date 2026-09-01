@@ -41,7 +41,11 @@ class ExclusionRecord:
 _EXCLUDE_KEYWORDS = ("QDII", "LOF", "联接")
 
 
-def filter_etf_universe(dim_fund: pd.DataFrame) -> pd.DataFrame:
+def filter_etf_universe(
+    dim_fund: pd.DataFrame,
+    *,
+    include_qdii: bool = False,
+) -> pd.DataFrame:
     """§8.1 — Static ETF name filter.
 
     Keeps rows where:
@@ -59,7 +63,10 @@ def filter_etf_universe(dim_fund: pd.DataFrame) -> pd.DataFrame:
 
     name = dim_fund["name"].astype(str)
     mask = name.str.contains("ETF", case=True, na=False)
-    for kw in _EXCLUDE_KEYWORDS:
+    excluded_keywords = tuple(
+        kw for kw in _EXCLUDE_KEYWORDS if not (include_qdii and kw == "QDII")
+    )
+    for kw in excluded_keywords:
         mask &= ~name.str.contains(kw, case=True, na=False)
 
     return dim_fund[mask].reset_index(drop=True)

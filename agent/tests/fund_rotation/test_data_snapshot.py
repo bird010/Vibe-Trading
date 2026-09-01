@@ -70,7 +70,8 @@ def _adj_rows(codes=ETF_CODES, dates=DATES):
 def _create_datasets(lance_dir: Path, *, codes=ETF_CODES, dates=DATES, dim_extra=None):
     lance_dir.mkdir(parents=True, exist_ok=True)
     lance.write_dataset(pd.DataFrame(_fund_rows(codes, dates)), str(lance_dir / "fund.lance"), mode="create")
-    lance.write_dataset(pd.DataFrame(_dim_rows(codes, dim_extra)), str(lance_dir / "dim_fund.lance"), mode="create")
+    dim_codes = ETF_CODES if dim_extra is not None else codes
+    lance.write_dataset(pd.DataFrame(_dim_rows(dim_codes, extra=dim_extra)), str(lance_dir / "dim_fund.lance"), mode="create")
     lance.write_dataset(pd.DataFrame(_adj_rows(codes, dates)), str(lance_dir / "fact_fund_adj.lance"), mode="create")
     return lance_dir
 
@@ -110,10 +111,25 @@ def test_resolve_derives_pool_and_calendar(tmp_path):
     assert snapshot.fund_adj_version == 1
     assert snapshot.dim_version == 1
     assert snapshot.historical_candidate_codes == tuple(sorted(ETF_CODES))
+    assert snapshot.role_universe_codes == tuple(sorted(ETF_CODES))
     assert snapshot.fingerprint == compute_fingerprint(
         1, 1, 1, snapshot.universe_codes, snapshot.trading_dates,
-        snapshot.historical_candidate_codes,
+        snapshot.historical_candidate_codes, snapshot.role_universe_codes,
     )
+
+
+def test_role_universe_admits_qdii_without_changing_legacy_universe(tmp_path):
+    qdii = {
+        "ts_code": "513100.SH",
+        "name": "纳斯达克100ETF(QDII)",
+        "list_date": "20200101",
+        "fund_type": "QDII",
+    }
+    _create_datasets(tmp_path, codes=ETF_CODES + ["513100.SH"], dim_extra=[qdii])
+    snapshot = resolve_pinned_snapshot(tmp_path)
+
+    assert "513100.SH" not in snapshot.universe_codes
+    assert "513100.SH" in snapshot.role_universe_codes
 
     _, _, dim_fund = load_pinned_frames(snapshot, tmp_path)
     assert "fund_type" in dim_fund.columns

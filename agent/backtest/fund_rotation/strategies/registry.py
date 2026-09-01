@@ -223,6 +223,11 @@ from backtest.fund_rotation.strategies.ai_rotation_r77_defense_relative_momentum
 from backtest.fund_rotation.strategies.ai_rotation_r78_survivor_combo.strategy import (
     AiRotationR78SurvivorComboStrategy,
 )
+from backtest.fund_rotation.strategies.economic_role_rotation.strategy import (
+    AiRotationR79EconomicRoleMembersStrategy,
+    AiRotationR80EconomicRoleFixedRepresentativeStrategy,
+    AiRotationR81EconomicRoleDynamicRepresentativeStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -301,4 +306,7 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR76FixedShortBondStrategy,
         AiRotationR77DefenseRelativeMomentumStrategy,
         AiRotationR78SurvivorComboStrategy,
+        AiRotationR79EconomicRoleMembersStrategy,
+        AiRotationR80EconomicRoleFixedRepresentativeStrategy,
+        AiRotationR81EconomicRoleDynamicRepresentativeStrategy,
     )

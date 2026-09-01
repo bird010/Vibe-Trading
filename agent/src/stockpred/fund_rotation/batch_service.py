@@ -366,9 +366,23 @@ class BatchService:
             raise ValueError(
                 "research static execution rules are only available for RESEARCH_ONLY"
             )
+        role_strategy_prefixes = (
+            "ai_rotation_r79_economic_role",
+            "ai_rotation_r80_economic_role",
+            "ai_rotation_r81_economic_role",
+        )
+        use_role_pool = any(
+            str(variant.strategy_id).startswith(role_strategy_prefixes)
+            for variant in request.variants
+        )
+        execution_universe = (
+            getattr(snapshot, "role_universe_codes", ()) or snapshot.universe_codes
+            if use_role_pool
+            else snapshot.universe_codes
+        )
         return build_research_static_execution_rule_context(
             dim_fund=dim_fund,
-            universe_codes=snapshot.universe_codes,
+            universe_codes=execution_universe,
             evaluation_start_date=request.evaluation_start_date,
             evaluation_end_date=request.evaluation_end_date,
             snapshot_version=snapshot.dim_version,
