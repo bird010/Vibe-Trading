@@ -1,8 +1,9 @@
-"""Sequential strategy-batch orchestration — Phase 4 Task 4 (§22/§25/§26).
+"""Strategy-batch orchestration — Phase 4 Task 4 (§22/§25/§26).
 
-One bounded single-worker executor runs variants strictly ordered by
-``variant_key``; every variant gets an isolated strategy/session/data view/run
-directory while sharing one pinned snapshot and evaluation context.
+One bounded executor runs batches sequentially; variants within a batch run in
+parallel with isolated runners, strategy sessions and run directories while
+sharing one pinned snapshot and evaluation context. Parent results are merged
+strictly by ``variant_key``.
 
 Planning keeps two different time boundaries explicit:
 
@@ -92,7 +93,7 @@ def catalog_identity_hash(catalog) -> str:
 
 
 class BatchService:
-    """Bounded sequential batch orchestrator (single-user local service)."""
+    """Bounded batch orchestrator for a single-user local service."""
 
     def __init__(
         self,
@@ -104,6 +105,7 @@ class BatchService:
         frames_loader: Callable[..., tuple] | None = None,
         execution_rule_context_loader: Callable[..., ResearchExecutionRuleContext | None] | None = None,
         auto_start: bool = True,
+        variant_max_workers: int = 4,
     ) -> None:
         from backtest.fund_rotation.catalog import FundRotationStrategyCatalog
 
@@ -128,6 +130,7 @@ class BatchService:
         self.frames_loader = frames_loader
         self.execution_rule_context_loader = execution_rule_context_loader
         self.auto_start = auto_start
+        self.variant_max_workers = variant_max_workers
         self.executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="fund-rotation-batch",
@@ -498,14 +501,6 @@ class BatchService:
                 error=f"execution rule context failed: {exc}",
             )
             return
-        runner = FundRotationBacktestRunner(
-            fund_daily,
-            fund_adj,
-            dim_fund,
-            market_rule_resolver=rule_context.resolver,
-            market_rule_instruments=rule_context.instruments,
-        )
-
         advance(BatchStage.RUNNING_STRATEGIES)
 
         ordered = sorted(plans, key=lambda plan: plan["identity"].variant_key)
@@ -536,13 +531,11 @@ class BatchService:
                 stage=ChildStage.QUEUED.value,
             )
 
-        for plan in ordered:
+        def run_variant(plan: dict[str, Any]) -> tuple[str, object | None]:
             identity = plan["identity"]
             variant_key = identity.variant_key
             run_id = plan["run_id"]
             if token.is_cancelled:
-                statuses[variant_key] = SubRunStatus.CANCELED.value
-                executed_order.append({"variant_key": variant_key})
                 self._record_child_stage(
                     batch_id=batch_id,
                     request=request,
@@ -561,7 +554,7 @@ class BatchService:
                     stage=ChildStage.CANCELED.value,
                     message="CANCELED before start",
                 )
-                continue
+                return SubRunStatus.CANCELED.value, None
 
             for child_stage in (
                 ChildStage.PREPARING_DATA,
@@ -585,6 +578,13 @@ class BatchService:
                     stage=child_stage.value,
                 )
 
+            runner = FundRotationBacktestRunner(
+                fund_daily,
+                fund_adj,
+                dim_fund,
+                market_rule_resolver=rule_context.resolver,
+                market_rule_instruments=rule_context.instruments,
+            )
             result = None
             try:
                 result = runner.run(
@@ -604,7 +604,6 @@ class BatchService:
                     "rule_version": rule_context.rule_version,
                 }
                 status = result.status.value
-                run_results[variant_key] = result
             except Exception as exc:
                 status = SubRunStatus.FAILED.value
                 events.append(
@@ -681,8 +680,6 @@ class BatchService:
                     error="runner raised before returning a result",
                 )
 
-            statuses[variant_key] = status
-            executed_order.append({"variant_key": variant_key})
             events.append(
                 event_type="TERMINAL",
                 scope="VARIANT",
@@ -692,6 +689,27 @@ class BatchService:
                 stage=status,
                 message=status,
             )
+            return status, result
+
+        worker_count = min(self.variant_max_workers, len(ordered))
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix=f"fund-rotation-{batch_id[:8]}",
+        ) as variant_executor:
+            futures = {
+                plan["identity"].variant_key: variant_executor.submit(
+                    run_variant,
+                    plan,
+                )
+                for plan in ordered
+            }
+            for plan in ordered:
+                variant_key = plan["identity"].variant_key
+                status, result = futures[variant_key].result()
+                statuses[variant_key] = status
+                executed_order.append({"variant_key": variant_key})
+                if result is not None:
+                    run_results[variant_key] = result
 
         if not token.is_cancelled:
             advance(BatchStage.COMPARING)

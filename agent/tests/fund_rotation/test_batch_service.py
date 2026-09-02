@@ -117,6 +117,37 @@ class FakeBatchStrategy:
         return FakeBatchSession(config, self.execution_log, record)
 
 
+PARALLEL_PROBE_DESCRIPTOR = FundRotationStrategyDescriptor(
+    id="parallel_probe_batch",
+    name="Parallel Probe Batch",
+    description="detects overlapping batch variant execution",
+    interface_version="1.0",
+    supported_universe=("etf",),
+    deterministic=True,
+)
+
+
+class ParallelProbeSession(FakeBatchSession):
+    barrier = threading.Barrier(2)
+    overlapped = False
+
+    def evaluate(self, context):
+        if self.evaluate_count == 0:
+            try:
+                self.barrier.wait(timeout=2)
+                type(self).overlapped = True
+            except threading.BrokenBarrierError:
+                pass
+        return super().evaluate(context)
+
+
+class ParallelProbeStrategy(FakeBatchStrategy):
+    descriptor = PARALLEL_PROBE_DESCRIPTOR
+
+    def create_session(self, initialization, config):
+        return ParallelProbeSession(config)
+
+
 NATIVE_FAKE_DESCRIPTOR = FundRotationStrategyDescriptor(
     id="native_fake_batch",
     name="Native Fake Batch",
@@ -251,6 +282,7 @@ def _service(
     execution_rule_context_loader=None,
     strategy_class=FakeBatchStrategy,
     auto_start=False,
+    variant_max_workers=4,
 ):
     FakeBatchStrategy.session_log = []
 
@@ -271,6 +303,7 @@ def _service(
         frames_loader=frames,
         execution_rule_context_loader=execution_rule_context_loader,
         auto_start=auto_start,
+        variant_max_workers=variant_max_workers,
     )
 
 
@@ -656,6 +689,148 @@ class TestExecution:
     def test_single_worker_executor(self, tmp_path):
         service = _service(tmp_path)
         assert service.executor._max_workers == 1
+
+    def test_variants_execute_in_parallel_within_one_batch(self, tmp_path):
+        ParallelProbeSession.barrier = threading.Barrier(2)
+        ParallelProbeSession.overlapped = False
+        service = _service(
+            tmp_path,
+            strategy_class=ParallelProbeStrategy,
+            variant_max_workers=2,
+        )
+        request = _request(
+            [
+                {
+                    "strategy_id": "parallel_probe_batch",
+                    "label": "first",
+                    "params": {"lookback_days": 30},
+                },
+                {
+                    "strategy_id": "parallel_probe_batch",
+                    "label": "second",
+                    "params": {"lookback_days": 40},
+                },
+            ]
+        )
+
+        outcome = _submit_and_run(service, request)
+
+        assert ParallelProbeSession.overlapped is True
+        assert _state(service, outcome["batch_id"])["stage"] == "SUCCEEDED"
+
+    def test_parallel_and_serial_business_artifacts_are_identical(self, tmp_path):
+        variants = [
+            {
+                "strategy_id": "native_fake_batch",
+                "label": "first",
+                "params": {"lookback_days": 30},
+            },
+            {
+                "strategy_id": "native_fake_batch",
+                "label": "second",
+                "params": {"lookback_days": 40},
+            },
+        ]
+        serial = _service(
+            tmp_path / "serial",
+            frames_loader=_native_frames_loader,
+            strategy_class=NativeFakeBatchStrategy,
+            variant_max_workers=1,
+        )
+        parallel = _service(
+            tmp_path / "parallel",
+            frames_loader=_native_frames_loader,
+            strategy_class=NativeFakeBatchStrategy,
+            variant_max_workers=2,
+        )
+        serial_outcome = _submit_and_run(
+            serial,
+            _request(variants, key="serial-key"),
+        )
+        parallel_outcome = _submit_and_run(
+            parallel,
+            _request(variants, key="parallel-key"),
+        )
+
+        def without_runtime_ids(value):
+            if isinstance(value, dict):
+                return {
+                    key: without_runtime_ids(item)
+                    for key, item in value.items()
+                    if key != "run_id"
+                }
+            if isinstance(value, list):
+                return [without_runtime_ids(item) for item in value]
+            return value
+
+        def business_artifacts(service, batch_id):
+            resolved = _resolved(service, batch_id)
+            children = {}
+            for variant in resolved["variants"]:
+                run_dir = service.runs_root / variant["run_id"]
+                children[variant["variant_key"]] = {
+                    name: (
+                        without_runtime_ids(
+                            json.loads(
+                                (run_dir / name).read_text(encoding="utf-8")
+                            )
+                        )
+                        if name.endswith(".json")
+                        else (run_dir / name).read_text(encoding="utf-8")
+                    )
+                    for name in (
+                        "target_decisions.csv",
+                        "targets.csv",
+                        "orders.csv",
+                        "trade_events.csv",
+                        "positions.csv",
+                        "equity.csv",
+                        "metrics.json",
+                        "summary.json",
+                        "holdings_timeline.json",
+                        "rebalance_decisions.json",
+                        "rebalance_index.json",
+                        "strategy_evidence.json",
+                        "strategy_execution_diagnostics.json",
+                    )
+                }
+            reports = json.loads(
+                (
+                    service.persistence.batch_dir(batch_id) / "reports.json"
+                ).read_text(encoding="utf-8")
+            )
+            return {
+                "children": children,
+                "reports": without_runtime_ids(reports),
+                "comparison_equity": (
+                    service.persistence.batch_dir(batch_id)
+                    / "comparison_equity.csv"
+                ).read_text(encoding="utf-8"),
+                "comparison_metrics": (
+                    service.persistence.batch_dir(batch_id)
+                    / "comparison_metrics.csv"
+                ).read_text(encoding="utf-8"),
+                "statuses": {
+                    item["variant_key"]: item["status"]
+                    for item in resolved["variants"]
+                },
+                "executed_order": resolved["executed_order"],
+            }
+
+        parallel_artifacts = business_artifacts(
+            parallel,
+            parallel_outcome["batch_id"],
+        )
+        serial_artifacts = business_artifacts(
+            serial,
+            serial_outcome["batch_id"],
+        )
+
+        assert parallel_artifacts == serial_artifacts
+        for child in parallel_artifacts["children"].values():
+            assert child["orders.csv"].count("\n") > 1
+            assert child["trade_events.csv"].count("\n") > 1
+            assert child["positions.csv"].count("\n") > 1
 
     def test_variant_failure_isolates_and_publishes_partial_evidence(
         self,
