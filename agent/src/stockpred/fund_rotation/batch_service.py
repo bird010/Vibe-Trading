@@ -373,6 +373,10 @@ class BatchService:
             "ai_rotation_r79_economic_role",
             "ai_rotation_r80_economic_role",
             "ai_rotation_r81_economic_role",
+            "ai_rotation_r82_economic_role",
+            "ai_rotation_r83_r81_r57_r77_combo",
+            "ai_rotation_r84_r81_r57_r62_combo",
+            "ai_rotation_r85_r81_r74_combo",
         )
         use_role_pool = any(
             str(variant.strategy_id).startswith(role_strategy_prefixes)

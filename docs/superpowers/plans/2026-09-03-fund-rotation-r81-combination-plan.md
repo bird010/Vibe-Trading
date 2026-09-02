@@ -6,8 +6,8 @@
 
 - 工作目录：`E:\code\stock\Vibe-Trading`；保持当前分支和用户已有改动，不创建或修改公共执行合同。
 - 正式快照：`fund.lance` v77、`fact_fund_adj.lance` v671、`dim_fund.lance` v62，指纹 `7596807626fdf7f1aa9bdaddd84cd4575e15ac473c8331879d841ecacd941de6`。
-- 正式研究区间：`2004-01-02..2022-07-29`；确认区间 `2022-08-01..2026-08-01` 只记录为已消费，不用于本轮选择。
-- 折叠：Train156 / Validation52 / Test52 / Step52，共 14 折；连续账户运行，按折叠切分指标。
+- 正式研究区间：`2013-03-29..2022-07-29`；这是固定短债 `511010.SH` 上市后的第一个完整交易周；确认区间 `2022-08-01..2026-08-01` 只记录为已消费，不用于本轮选择。
+- 折叠：Train156 / Validation52 / Test52 / Step52，共 5 折；连续账户运行，按折叠切分指标。`2004-01-02..2013-03-22` 只保留为预热/失败可用性审计，不进入 Champion gate。
 - 执行合同：初始资金 100 万、佣金 0.00025 最低 5、其他费率 0、参与率 0.05、ADV 20/10、滑点 5–30 bps、整手 100。
 - 固定 seed：`e33b00bd5689`。找不到该身份时标记 `SEED_UNREPRODUCIBLE`，不得用 `f988e415122d` 替代正式证据。
 - 新策略 ID：`ai_rotation_r82_economic_role_dynamic_rep_r57_signal`；独立包、独立 source snapshot 和 implementation hash。
@@ -19,7 +19,7 @@
 2. 生成 `seed_repro_probe`：尝试解析默认 `correlation_representative` seed，记录解析结果、身份、快照、失败原因；旧 `f988` 只写入背景引用字段。
 3. 生成 R81 anchor 的正式运行请求，不使用已消费确认区间。
 
-验证：JSON 可解析；快照版本/指纹、研究区间、14 折边界、执行合同和 seed 缺口均与设计规范一致；ledger 首条记录为 append-only 的 seed probe。
+验证：JSON 可解析；快照版本/指纹、研究区间、5 折边界、执行合同和 seed 缺口均与设计规范一致；ledger 首条记录为 append-only 的 seed probe。
 
 ## 任务 2：先写 R82 失败测试
 
@@ -49,7 +49,7 @@
 1. 提交并轮询 `seed_repro_probe`，验证 202 状态不是终态，直到 `SUCCEEDED`、`FAILED` 或 `CANCELED`；保存完整 request/resolved/reports。
 2. 在同一快照连续运行 R81 anchor，写入 `round_00` 基线审计产物；记录名义收益与成交完成率、父单成交率、阻塞率、换手率和容量。
 3. 以 R81 anchor 为 Champion、R82 为 Challenger，创建 round_01 paired batch；只允许两个变体，幂等键稳定，schema `v1`、`RESEARCH_ONLY`。
-4. 汇总 14 折 validation/test 指标，执行 Champion gate；无论通过与否都追加 ledger，不覆盖历史。
+4. 汇总 5 折 validation/test 指标，执行 Champion gate；无论通过与否都追加 ledger，不覆盖历史。
 
 验证：两个策略使用同一 snapshot/universe/fold manifest/execution hash；批次为终态；报告身份无串线；折叠指标可由原始 equity 重建。
 
@@ -69,7 +69,7 @@
 
 ## 任务 6：冻结研究候选和最终审计
 
-1. 对最后 Champion 重新计算全量研究指标、14 折汇总、执行质量、容量、回撤和收益归因；只读原始批次产物。
+1. 对最后 Champion 重新计算全量研究指标、5 折汇总、执行质量、容量、回撤和收益归因；只读原始批次产物。
 2. 运行独立的身份/快照/因果性/报告重建检查，确认结果不依赖确认区间或未来行。
 3. 写入中文 `final_report.md`、`champion.json` 和 `forward_shadow_plan.json`，状态为 `FROZEN_RESEARCH_CANDIDATE` 或明确未通过。
 4. 记录至少 104 周 forward-shadow 计划；不发起部署动作。

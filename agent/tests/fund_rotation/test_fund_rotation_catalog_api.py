@@ -116,6 +116,10 @@ class TestStrategyList:
             "ai_rotation_r79_economic_role_members",
             "ai_rotation_r80_economic_role_fixed_rep",
             "ai_rotation_r81_economic_role_dynamic_rep",
+            "ai_rotation_r82_economic_role_dynamic_rep_r57_signal",
+            "ai_rotation_r83_r81_r57_r77_combo",
+            "ai_rotation_r84_r81_r57_r62_combo",
+            "ai_rotation_r85_r81_r74_combo",
             "correlation_all_members", "correlation_representative",
         ]
 
@@ -193,6 +197,10 @@ class TestStrategyDetail:
             "ai_rotation_r79_economic_role_members",
             "ai_rotation_r80_economic_role_fixed_rep",
             "ai_rotation_r81_economic_role_dynamic_rep",
+            "ai_rotation_r82_economic_role_dynamic_rep_r57_signal",
+            "ai_rotation_r83_r81_r57_r77_combo",
+            "ai_rotation_r84_r81_r57_r62_combo",
+            "ai_rotation_r85_r81_r74_combo",
         ],
     )
     def test_economic_role_manifest_is_read_only_in_catalog_schema(

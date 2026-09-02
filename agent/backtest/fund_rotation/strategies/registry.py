@@ -228,6 +228,18 @@ from backtest.fund_rotation.strategies.economic_role_rotation.strategy import (
     AiRotationR80EconomicRoleFixedRepresentativeStrategy,
     AiRotationR81EconomicRoleDynamicRepresentativeStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r82_economic_role_dynamic_rep_r57_signal.strategy import (
+    AiRotationR82EconomicRoleDynamicRepR57SignalStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r83_r81_r57_r77_combo.strategy import (
+    AiRotationR83R81R57R77ComboStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r84_r81_r57_r62_combo.strategy import (
+    AiRotationR84R81R57R62ComboStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r85_r81_r74_combo.strategy import (
+    AiRotationR85R81R74ComboStrategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -309,4 +321,8 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR79EconomicRoleMembersStrategy,
         AiRotationR80EconomicRoleFixedRepresentativeStrategy,
         AiRotationR81EconomicRoleDynamicRepresentativeStrategy,
+        AiRotationR82EconomicRoleDynamicRepR57SignalStrategy,
+        AiRotationR83R81R57R77ComboStrategy,
+        AiRotationR84R81R57R62ComboStrategy,
+        AiRotationR85R81R74ComboStrategy,
     )
