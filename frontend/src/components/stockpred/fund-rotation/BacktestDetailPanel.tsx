@@ -77,6 +77,11 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
+function formatFundDisplay(code: string, charts: Record<string, InstrumentChartResponse>): string {
+  const name = charts[code]?.name?.trim();
+  return name ? `${name}（${code}）` : code;
+}
+
 function backtestDateRange(detail: { period: { data_start?: string | null; decision_start_date?: string | null; evaluation_start_date?: string | null; evaluation_end_date?: string | null } }) {
   const start = [detail.period.data_start, detail.period.decision_start_date, detail.period.evaluation_start_date]
     .map(normalizeEvidenceDate)
@@ -85,6 +90,16 @@ function backtestDateRange(detail: { period: { data_start?: string | null; decis
     .map(normalizeEvidenceDate)
     .find((value): value is string => Boolean(value));
   return start && end ? { start, end } : undefined;
+}
+
+function isEconomicRoleDetail(detail: { artifacts: Array<{ role: string; file: string }> } | null): boolean {
+  return Boolean(
+    detail?.artifacts.some(
+      (artifact) =>
+        artifact.role === "role_history" ||
+        artifact.file === "strategy_role_history.json",
+    ),
+  );
 }
 
 export function BacktestDetailPanel() {
@@ -112,26 +127,39 @@ export function BacktestDetailPanel() {
   } = useBacktestDetail();
   const urlState = readFundRotationUrl();
   const singleChartLoader = selectInstrument as ((tsCode: string) => Promise<void>) | undefined;
+  const economicRole = isEconomicRoleDetail(detail) || candidatePool?.kind === "ECONOMIC_ROLE";
 
   useEffect(() => {
     if (
-      (activeTab !== "chart" && activeTab !== "cluster_interval") ||
+      (activeTab !== "chart" && activeTab !== "candidate_pool" && activeTab !== "cluster_interval") ||
       !detail ||
-      detail.instruments.length === 0 ||
       chartLoading
     ) return;
     if (activeTab === "chart" && singleChartLoader) {
+      if (detail.instruments.length === 0) return;
       const tsCode = selectedInstrument ?? detail.instruments[0]?.ts_code;
       if (tsCode && !chart && !chartErrors[tsCode]) void singleChartLoader(tsCode);
       return;
     }
+    const requiredCodes = new Set(detail.instruments.map((instrument) => instrument.ts_code));
+    if (candidatePool?.kind === "ECONOMIC_ROLE") {
+      for (const snapshot of candidatePool.role_snapshots ?? []) {
+        for (const role of snapshot.roles) {
+          if (activeTab === "candidate_pool") {
+            role.members.forEach((code) => requiredCodes.add(code));
+          } else if (role.representative) {
+            requiredCodes.add(role.representative);
+          }
+        }
+      }
+    }
     if (
-      detail.instruments.some((instrument) => !charts[instrument.ts_code]) &&
+      Array.from(requiredCodes).some((tsCode) => !charts[tsCode]) &&
       Object.keys(chartErrors).length === 0
     ) {
       void loadCharts();
     }
-  }, [activeTab, chart, chartErrors, charts, chartLoading, detail, loadCharts, selectedInstrument, singleChartLoader]);
+  }, [activeTab, candidatePool, chart, chartErrors, charts, chartLoading, detail, loadCharts, selectedInstrument, singleChartLoader]);
 
   useEffect(() => {
     if (
@@ -198,7 +226,7 @@ export function BacktestDetailPanel() {
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
-              {tab.label}
+              {tab.id === "cluster_interval" && economicRole ? "角色区间" : tab.label}
             </button>
           );
         })}
@@ -374,6 +402,7 @@ export function BacktestDetailPanel() {
         {!loading && !error && detail && activeTab === "candidate_pool" && (
           <CandidatePoolContent
             candidatePool={candidatePool}
+            charts={charts}
             loading={candidatePoolLoading}
             error={candidatePoolError}
           />
@@ -502,10 +531,12 @@ function formatRatio(value: number | null): string {
 
 function CandidatePoolContent({
   candidatePool,
+  charts,
   loading,
   error,
 }: {
   candidatePool: CandidatePoolResponse | null;
+  charts: Record<string, InstrumentChartResponse>;
   loading: boolean;
   error: string | null;
 }) {
@@ -525,6 +556,9 @@ function CandidatePoolContent({
     );
   }
   if (!candidatePool || candidatePool.reclusters.length === 0) {
+    if (candidatePool?.kind === "ECONOMIC_ROLE") {
+      return <EconomicRoleCandidatePoolContent candidatePool={candidatePool} charts={charts} />;
+    }
     return (
       <div className="rounded border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
         当前运行没有基金候选池聚类结果。
@@ -576,6 +610,72 @@ function CandidatePoolContent({
                     <td className="px-3 py-2">{formatValue(representative.selected_fund_type)}</td>
                     <td className="px-3 py-2">{representative.selected_code ? (representative.lock_maintained ? "延续" : "新选") : "未选"}</td>
                     <td className="px-3 py-2">{formatValue(representative.exclusion_reason)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function EconomicRoleCandidatePoolContent({
+  candidatePool,
+  charts,
+}: {
+  candidatePool: CandidatePoolResponse;
+  charts: Record<string, InstrumentChartResponse>;
+}) {
+  const snapshots = candidatePool.role_snapshots ?? [];
+  if (snapshots.length === 0) {
+    return (
+      <div className="rounded border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
+        当前运行没有可用的经济角色候选池快照。
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h4 className="text-sm font-medium">基金候选池 · Economic Role</h4>
+        <p className="mt-1 text-xs text-muted-foreground">
+          以下为 Role 定期刷新时冻结的候选成员与执行代表；该策略不使用相关性聚类。
+        </p>
+      </div>
+      {snapshots.map((snapshot) => (
+        <section key={snapshot.signal_date} className="rounded border">
+          <div className="border-b bg-muted/20 px-3 py-2">
+            <h5 className="text-sm font-medium">Role 刷新日期：{snapshot.signal_date}</h5>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b text-left text-muted-foreground">
+                  <th className="px-3 py-2">Role</th>
+                  <th className="px-3 py-2">候选成员（名称/代码）</th>
+                  <th className="px-3 py-2">代表基金（名称/代码）</th>
+                  <th className="px-3 py-2">代表状态</th>
+                  <th className="px-3 py-2">成员快照日</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshot.roles.map((role) => (
+                  <tr key={`${snapshot.signal_date}-${role.role_id}`} className="border-b last:border-0">
+                    <td className="px-3 py-2">
+                      <div>{role.role_name}</div>
+                      <div className="font-mono text-muted-foreground">{role.role_id}</div>
+                    </td>
+                    <td className="px-3 py-2">
+                      {role.members.length > 0
+                        ? role.members.map((code) => <div key={code}>{formatFundDisplay(code, charts)}</div>)
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2">{role.representative ? formatFundDisplay(role.representative, charts) : "—"}</td>
+                    <td className="px-3 py-2">{role.selection_mode || "—"}</td>
+                    <td className="px-3 py-2 font-mono">{formatValue(role.members_as_of)}</td>
                   </tr>
                 ))}
               </tbody>

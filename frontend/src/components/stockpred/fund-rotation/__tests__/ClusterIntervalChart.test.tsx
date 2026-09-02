@@ -148,6 +148,72 @@ function chart(
 }
 
 describe("buildClusterIntervalChartModel", () => {
+  it("uses Economic Role refresh snapshots and representatives for role intervals", () => {
+    const rolePool: CandidatePoolResponse = {
+      run_id: "run-role",
+      kind: "ECONOMIC_ROLE",
+      reclusters: [],
+      role_snapshots: [
+        {
+          signal_date: "20250103",
+          is_refresh: true,
+          roles: [
+            {
+              role_id: "CN_GROWTH_EQUITY",
+              role_name: "中国成长权益",
+              members: ["AAA.SZ"],
+              members_as_of: "20250103",
+              representative: "AAA.SZ",
+              representative_as_of: "20250103",
+              selection_mode: "REGULAR_REFRESH",
+            },
+          ],
+        },
+        {
+          signal_date: "20250110",
+          is_refresh: true,
+          roles: [
+            {
+              role_id: "CN_GROWTH_EQUITY",
+              role_name: "中国成长权益",
+              members: ["BBB.SZ"],
+              members_as_of: "20250110",
+              representative: "BBB.SZ",
+              representative_as_of: "20250110",
+              selection_mode: "REGULAR_REFRESH",
+            },
+          ],
+        },
+      ],
+    };
+    const model = buildClusterIntervalChartModel({
+      equity: {
+        dates: ["20250103", "20250106", "20250110", "20250113"],
+        series: { strategy: [1, 1.01, 1.02, 1.03] },
+      },
+      candidatePool: rolePool,
+      charts: {
+        "AAA.SZ": chart("AAA.SZ", [
+          { trade_date: "20250103", open: 9, high: 11, low: 8, close: 10, vol: 1 },
+          { trade_date: "20250106", open: 10, high: 12, low: 9, close: 11, vol: 1 },
+        ]),
+        "BBB.SZ": chart("BBB.SZ", [
+          { trade_date: "20250110", open: 9, high: 11, low: 8, close: 10, vol: 1 },
+          { trade_date: "20250113", open: 10, high: 12, low: 9, close: 11, vol: 1 },
+        ]),
+      },
+    });
+
+    expect(model.intervals).toEqual([
+      expect.objectContaining({ start: "20250103", end: "20250109", reclusterDate: "20250103" }),
+      expect.objectContaining({ start: "20250110", end: "20250113", reclusterDate: "20250110" }),
+    ]);
+    expect(model.series.filter((series) => series.kind === "fund").map((series) => series.instrument)).toEqual([
+      "AAA.SZ",
+      "BBB.SZ",
+    ]);
+  });
+
   beforeEach(() => {
     chartMock.options = null;
     chartMock.handlers = {};

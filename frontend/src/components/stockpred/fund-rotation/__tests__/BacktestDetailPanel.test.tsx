@@ -80,10 +80,11 @@ function state(runDetail: BacktestDetailResponse, loadCharts: ReturnType<typeof 
   };
 }
 
-function chart(tsCode: string, signalDate: string, tradeDate: string): InstrumentChartResponse {
+function chart(tsCode: string, signalDate: string, tradeDate: string, name?: string): InstrumentChartResponse {
   return {
     ts_code: tsCode,
     run_id: "run-1",
+    name,
     signals: [{ date: signalDate, target_weight: 0.25 }],
     trades: [{ trade_date: tradeDate, action: "BUY", status: "FILLED", filled: 10, price: 3.5 }],
     ohlcv: [],
@@ -222,6 +223,102 @@ describe("BacktestDetailPanel chart lifecycle", () => {
     expect(screen.getByText(/门禁：\s*REJECT/)).toBeInTheDocument();
     expect(screen.getByText("SINGLE_MEMBER_CLUSTER")).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("shows Economic Role candidates and labels the interval as a role interval", () => {
+    const runDetail = detail([]);
+    runDetail.strategy_id = "ai_rotation_r80_economic_role_fixed_rep";
+    runDetail.artifacts = [
+      {
+        role: "role_history",
+        file: "strategy_role_history.json",
+        media_type: "application/json",
+        producer: "ai_rotation_r80_economic_role_fixed_rep",
+        columns: [],
+      },
+    ];
+    const loadCharts = vi.fn();
+    const panelState = state(runDetail, loadCharts);
+    panelState.activeTab = "candidate_pool";
+    panelState.candidatePool = {
+      run_id: "run-1",
+      kind: "ECONOMIC_ROLE",
+      reclusters: [],
+      role_snapshots: [
+        {
+          signal_date: "20250103",
+          is_refresh: true,
+          roles: [
+            {
+              role_id: "CN_GROWTH_EQUITY",
+              role_name: "中国成长权益",
+              members: ["159915.SZ", "159949.SZ"],
+              members_as_of: "20250103",
+              representative: "159915.SZ",
+              representative_as_of: "20250103",
+              selection_mode: "REGULAR_REFRESH",
+            },
+          ],
+        },
+      ],
+    };
+    panelState.charts = {
+      "159915.SZ": chart("159915.SZ", "20250103", "20250106", "中国成长 ETF"),
+      "159949.SZ": chart("159949.SZ", "20250103", "20250106", "创业板 ETF"),
+    };
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    expect(screen.getByRole("button", { name: "角色区间" })).toBeInTheDocument();
+    expect(screen.getByText("基金候选池 · Economic Role")).toBeInTheDocument();
+    expect(screen.getByText("中国成长权益")).toBeInTheDocument();
+    expect(screen.getAllByText("中国成长 ETF（159915.SZ）").length).toBeGreaterThan(0);
+    expect(screen.getByText("创业板 ETF（159949.SZ）")).toBeInTheDocument();
+    expect(loadCharts).not.toHaveBeenCalled();
+  });
+
+  it("loads Role member charts when the candidate pool tab is active", async () => {
+    const runDetail = detail([]);
+    runDetail.artifacts = [
+      {
+        role: "role_history",
+        file: "strategy_role_history.json",
+        media_type: "application/json",
+        producer: "ai_rotation_r80_economic_role_fixed_rep",
+        columns: [],
+      },
+    ];
+    const loadCharts = vi.fn();
+    const panelState = state(runDetail, loadCharts);
+    panelState.activeTab = "candidate_pool";
+    panelState.candidatePool = {
+      run_id: "run-1",
+      kind: "ECONOMIC_ROLE",
+      reclusters: [],
+      role_snapshots: [
+        {
+          signal_date: "20250103",
+          is_refresh: true,
+          roles: [
+            {
+              role_id: "CN_GROWTH_EQUITY",
+              role_name: "中国成长权益",
+              members: ["159915.SZ"],
+              members_as_of: "20250103",
+              representative: "159915.SZ",
+              representative_as_of: "20250103",
+              selection_mode: "REGULAR_REFRESH",
+            },
+          ],
+        },
+      ],
+    };
+    useBacktestDetail.mockReturnValue(panelState);
+
+    render(<BacktestDetailPanel />);
+
+    await waitFor(() => expect(loadCharts).toHaveBeenCalledTimes(1));
   });
 
   it("shows a local candidate pool error without replacing the detail panel", () => {

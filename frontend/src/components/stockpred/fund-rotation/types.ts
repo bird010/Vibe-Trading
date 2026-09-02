@@ -281,9 +281,28 @@ export interface CandidatePoolRecluster {
   representatives: CandidatePoolRepresentative[];
 }
 
+export interface EconomicRoleCandidate {
+  role_id: string;
+  role_name: string;
+  members: string[];
+  members_as_of: string;
+  representative: string | null;
+  representative_as_of: string | null;
+  selection_mode: string;
+  previous_representative?: string | null;
+}
+
+export interface EconomicRoleSnapshot {
+  signal_date: string;
+  is_refresh: boolean;
+  roles: EconomicRoleCandidate[];
+}
+
 export interface CandidatePoolResponse {
   run_id: string;
   reclusters: CandidatePoolRecluster[];
+  kind?: "CLUSTER" | "ECONOMIC_ROLE";
+  role_snapshots?: EconomicRoleSnapshot[];
 }
 
 export interface HoldingInterval {

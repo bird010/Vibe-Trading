@@ -6,6 +6,7 @@ import {
   fetchBacktestDetail,
   fetchBacktestEquity,
   fetchInstrumentChart,
+  fetchRoleCandidatePool,
 } from "./api";
 import type {
   BacktestDetailResponse,
@@ -229,11 +230,24 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
   loadCharts: async () => {
     const runId = get().selectedRunId;
     const instruments = get().detail?.instruments;
-    if (!runId || !instruments || instruments.length === 0) return;
+    if (!runId || !instruments) return;
     if (get().chartLoading) return;
-    const missingInstruments = instruments.filter(
-      (instrument) => !get().charts[instrument.ts_code],
-    );
+    const requiredCodes = new Set(instruments.map((instrument) => instrument.ts_code));
+    const candidatePool = get().candidatePool;
+    if (candidatePool?.kind === "ECONOMIC_ROLE") {
+      for (const snapshot of candidatePool.role_snapshots ?? []) {
+        for (const role of snapshot.roles) {
+          if (get().activeTab === "candidate_pool") {
+            role.members.forEach((code) => requiredCodes.add(code));
+          } else if (role.representative) {
+            requiredCodes.add(role.representative);
+          }
+        }
+      }
+    }
+    const missingInstruments = Array.from(requiredCodes)
+      .filter((tsCode) => !get().charts[tsCode])
+      .map((tsCode) => ({ ts_code: tsCode }));
     if (missingInstruments.length === 0) {
       if (Object.keys(get().chartErrors).length > 0) set({ chartErrors: {} });
       return;
@@ -282,16 +296,24 @@ export const useBacktestDetail = create<BacktestDetailState>((set, get) => ({
     if (!runId) return;
     if (get().candidatePoolLoading || get().candidatePool) return;
 
+    const detail = get().detail;
+    const isEconomicRole = Boolean(
+      detail?.artifacts.some(
+        (artifact) =>
+          artifact.role === "role_history" ||
+          artifact.file === "strategy_role_history.json",
+      ),
+    );
+
     const requestId = ++candidatePoolRequestId;
     candidatePoolAbortController?.abort();
     candidatePoolAbortController = new AbortController();
     set({ candidatePoolLoading: true, candidatePoolError: null });
 
     try {
-      const candidatePool = await fetchCandidatePool(
-        runId,
-        candidatePoolAbortController.signal,
-      );
+      const candidatePool = isEconomicRole
+        ? await fetchRoleCandidatePool(runId, candidatePoolAbortController.signal)
+        : await fetchCandidatePool(runId, candidatePoolAbortController.signal);
       if (
         requestId !== candidatePoolRequestId ||
         get().selectedRunId !== runId

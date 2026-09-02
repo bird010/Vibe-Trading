@@ -17,6 +17,11 @@ import type {
   RebalanceDecisionResponse,
   RebalanceIndexResponse,
 } from "./types";
+import {
+  buildEconomicRoleCandidatePool,
+  type RoleHistoryArtifact,
+  type RoleRepresentativeArtifact,
+} from "./roleArtifacts";
 import { normalizeStrategyName } from "./strategyDisplay";
 
 const BASE = "/stockpred/fund-rotation";
@@ -308,6 +313,38 @@ export function backtestChartUrl(
   return withAuthQuery(
     `${BASE}/backtests/${encodeURIComponent(runId)}/instruments/${encodeURIComponent(tsCode)}/chart?${params.toString()}`,
   );
+}
+
+export async function fetchBacktestArtifactJson<T>(
+  runId: string,
+  artifactName: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(backtestArtifactUrl(runId, artifactName), {
+    headers: authHeaders(),
+    signal,
+  });
+  if (!res.ok) throw await responseError(res, `fetchBacktestArtifact:${artifactName}`);
+  return res.json() as Promise<T>;
+}
+
+export async function fetchRoleCandidatePool(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<CandidatePoolResponse> {
+  const [history, representatives] = await Promise.all([
+    fetchBacktestArtifactJson<RoleHistoryArtifact[]>(
+      runId,
+      "strategy_role_history.json",
+      signal,
+    ),
+    fetchBacktestArtifactJson<RoleRepresentativeArtifact[]>(
+      runId,
+      "strategy_role_representatives.json",
+      signal,
+    ),
+  ]);
+  return buildEconomicRoleCandidatePool(runId, history, representatives);
 }
 
 export async function fetchInstrumentChart(

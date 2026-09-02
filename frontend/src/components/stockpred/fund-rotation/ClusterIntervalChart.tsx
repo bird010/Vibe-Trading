@@ -357,9 +357,9 @@ function buildIntervals(
   const start = dataDates[0];
   const end = dataDates[dataDates.length - 1];
   const allReclusterDates = uniqueSortedDates(
-    (input.candidatePool?.reclusters ?? [])
-      .map((recluster) => canonicalDate(recluster.week))
-      .filter(Boolean),
+    input.candidatePool?.kind === "ECONOMIC_ROLE"
+      ? (input.candidatePool.role_snapshots ?? []).map((snapshot) => canonicalDate(snapshot.signal_date))
+      : (input.candidatePool?.reclusters ?? []).map((recluster) => canonicalDate(recluster.week)),
   );
   const precedingReclusters = allReclusterDates.filter(
     (date) => date <= start,
@@ -388,6 +388,17 @@ function representativeCodesForInterval(
   interval: ClusterInterval,
 ): Set<string> {
   if (!candidatePool || !interval.reclusterDate) return new Set();
+  if (candidatePool.kind === "ECONOMIC_ROLE") {
+    const snapshots = (candidatePool.role_snapshots ?? [])
+      .filter((candidate) => canonicalDate(candidate.signal_date) <= interval.start)
+      .sort((left, right) => canonicalDate(left.signal_date).localeCompare(canonicalDate(right.signal_date)));
+    const snapshot = snapshots[snapshots.length - 1];
+    return new Set(
+      (snapshot?.roles ?? [])
+        .map((role) => String(role.representative ?? "").trim())
+        .filter(Boolean),
+    );
+  }
   const recluster = candidatePool.reclusters.find(
     (candidate) => canonicalDate(candidate.week) === interval.reclusterDate,
   );
@@ -666,7 +677,7 @@ export function buildClusterIntervalChartModel(
         ? [{
             intervalIndex: interval.index,
             xAxis: interval.reclusterDate,
-            name: `重聚类 · 区间 ${interval.index + 1}`,
+            name: `${input.candidatePool?.kind === "ECONOMIC_ROLE" ? "角色刷新" : "重聚类"} · 区间 ${interval.index + 1}`,
           }]
         : [],
     ),
@@ -714,6 +725,7 @@ export function ClusterIntervalChart({
     ? representativeCodesForInterval(candidatePool, selectedInterval)
     : new Set<string>();
   const hasNoRepresentatives = Boolean(selectedInterval) && selectedRepresentativeCodes.size === 0;
+  const isEconomicRole = candidatePool?.kind === "ECONOMIC_ROLE";
   const possiblyTruncated = Object.values(charts).some(
     (chart) => chart.ohlcv.length >= CHART_BAR_LIMIT,
   );
@@ -1047,18 +1059,18 @@ export function ClusterIntervalChart({
       {model.intervals.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <label htmlFor="cluster-interval-select" className="text-sm font-medium">
-            选择聚类区间
+            选择{isEconomicRole ? "角色" : "聚类"}区间
           </label>
           <select
             id="cluster-interval-select"
-            aria-label="选择聚类区间"
+            aria-label={`选择${isEconomicRole ? "角色" : "聚类"}区间`}
             className="rounded border bg-background px-2 py-1 text-sm"
             value={activeIntervalIndex === undefined ? "" : String(activeIntervalIndex)}
             onChange={(event) => setSelectedIntervalIndex(Number(event.target.value))}
           >
             {model.intervals.map((interval) => (
               <option key={interval.index} value={interval.index}>
-                {`重聚类 ${interval.reclusterDate ? formatDisplayDate(interval.reclusterDate) : "未知"} · 区间 ${formatDisplayDate(interval.start)} 至 ${formatDisplayDate(interval.end)}`}
+                {`${isEconomicRole ? "角色刷新" : "重聚类"} ${interval.reclusterDate ? formatDisplayDate(interval.reclusterDate) : "未知"} · 区间 ${formatDisplayDate(interval.start)} 至 ${formatDisplayDate(interval.end)}`}
               </option>
             ))}
           </select>
@@ -1066,18 +1078,20 @@ export function ClusterIntervalChart({
       )}
       {model.intervals.length === 0 ? (
         <div className="rounded border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
-          当前没有可用的聚类区间。
+          当前没有可用的{isEconomicRole ? "角色" : "聚类"}区间。
         </div>
       ) : (
         <>
           {hasNoRepresentatives && (
             <div className="rounded border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-              当前区间没有可用的代表基金，以下仅展示组合收益。
+              {isEconomicRole
+                ? "当前角色区间没有可用的代表基金，以下仅展示组合收益。"
+                : "当前区间没有可用的代表基金，以下仅展示组合收益。"}
             </div>
           )}
           {model.series.length === 0 ? (
             <div className="rounded border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
-              当前没有可用的聚类区间收益或基金行情数据。
+              当前没有可用的{isEconomicRole ? "角色" : "聚类"}区间收益或基金行情数据。
             </div>
           ) : (
             <div ref={ref} style={{ height }} />

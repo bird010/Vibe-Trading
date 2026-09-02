@@ -11,6 +11,8 @@ import {
   fetchBatchReports,
   batchArtifactUrl,
   fetchCandidatePool,
+  fetchBacktestArtifactJson,
+  fetchRoleCandidatePool,
 } from "../api";
 
 function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
@@ -160,5 +162,51 @@ describe("Fund Rotation API", () => {
       "/stockpred/fund-rotation/backtests/run-1/candidate-pool",
     );
     expect(result.run_id).toBe("run-1");
+  });
+
+  it("fetches a published Role artifact through the existing artifact endpoint", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ signal_date: "20250103" }]));
+
+    const result = await fetchBacktestArtifactJson<Array<{ signal_date: string }>>(
+      "run-role",
+      "strategy_role_history.json",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(
+      "/stockpred/fund-rotation/backtests/run-role/artifacts/strategy_role_history.json",
+    );
+    expect(result[0]?.signal_date).toBe("20250103");
+  });
+
+  it("loads and adapts all Role artifacts without a new backend endpoint", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([
+        {
+          signal_date: "20250103",
+          role_id: "BOND",
+          role_name: "债券",
+          members: ["511010.SH"],
+          members_as_of: "20250103",
+          representative: "511010.SH",
+          representative_as_of: "20250103",
+          selection_mode: "REGULAR_REFRESH",
+        },
+      ]))
+      .mockResolvedValueOnce(jsonResponse([
+        {
+          signal_date: "20250103",
+          role_id: "BOND",
+          representative: "511010.SH",
+          selection_mode: "REGULAR_REFRESH",
+          previous_representative: null,
+        },
+      ]));
+
+    const result = await fetchRoleCandidatePool("run-role");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.kind).toBe("ECONOMIC_ROLE");
+    expect(result.role_snapshots?.[0]?.roles[0]?.representative).toBe("511010.SH");
   });
 });

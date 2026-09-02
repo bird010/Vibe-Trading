@@ -4,6 +4,7 @@ const api = vi.hoisted(() => ({
   fetchBacktestDetail: vi.fn(),
   fetchBacktestEquity: vi.fn(),
   fetchCandidatePool: vi.fn(),
+  fetchRoleCandidatePool: vi.fn(),
   fetchInstrumentChart: vi.fn(),
 }));
 
@@ -109,6 +110,38 @@ describe("useBacktestDetail", () => {
     api.fetchBacktestDetail.mockResolvedValue(detail("run-2"));
     await useBacktestDetail.getState().openRun("variant-2", "run-2");
     expect(useBacktestDetail.getState().candidatePool).toBeNull();
+  });
+
+  it("loads Role artifacts directly for an Economic Role run", async () => {
+    const runDetail = detail("run-role");
+    runDetail.strategy_id = "ai_rotation_r80_economic_role_fixed_rep";
+    runDetail.artifacts = [
+      {
+        role: "role_history",
+        file: "strategy_role_history.json",
+        media_type: "application/json",
+        producer: "ai_rotation_r80_economic_role_fixed_rep",
+        columns: [],
+      },
+    ];
+    const rolePool = {
+      run_id: "run-role",
+      kind: "ECONOMIC_ROLE" as const,
+      reclusters: [],
+      role_snapshots: [],
+    };
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+    api.fetchRoleCandidatePool.mockResolvedValue(rolePool);
+
+    await useBacktestDetail.getState().openRun("variant-role", "run-role");
+    await useBacktestDetail.getState().loadCandidatePool();
+
+    expect(api.fetchCandidatePool).not.toHaveBeenCalled();
+    expect(api.fetchRoleCandidatePool).toHaveBeenCalledWith(
+      "run-role",
+      expect.any(AbortSignal),
+    );
+    expect(useBacktestDetail.getState().candidatePool).toEqual(rolePool);
   });
 
   it("does not refetch cached candidate pool or charts", async () => {
@@ -337,6 +370,61 @@ describe("useBacktestDetail", () => {
     expect(useBacktestDetail.getState().chartErrors).toEqual({
       "159915.SZ": "159915.SZ chart unavailable",
     });
+  });
+
+  it("loads Role representatives in addition to target instruments", async () => {
+    const runDetail = detail("run-role");
+    runDetail.instruments = [];
+    runDetail.artifacts = [
+      {
+        role: "role_history",
+        file: "strategy_role_history.json",
+        media_type: "application/json",
+        producer: "ai_rotation_r80_economic_role_fixed_rep",
+        columns: [],
+      },
+    ];
+    api.fetchBacktestDetail.mockResolvedValue(runDetail);
+    api.fetchInstrumentChart.mockImplementation((_runId: string, tsCode: string) =>
+      Promise.resolve(chart("run-role", tsCode)),
+    );
+
+    await useBacktestDetail.getState().openRun("variant-role", "run-role");
+    useBacktestDetail.setState({
+      candidatePool: {
+        run_id: "run-role",
+        kind: "ECONOMIC_ROLE",
+        reclusters: [],
+        role_snapshots: [
+          {
+            signal_date: "20240105",
+            is_refresh: true,
+            roles: [
+              {
+                role_id: "CN_GROWTH_EQUITY",
+                role_name: "中国成长权益",
+                members: ["159915.SZ"],
+                members_as_of: "20240105",
+                representative: "159915.SZ",
+                representative_as_of: "20240105",
+                selection_mode: "REGULAR_REFRESH",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    await useBacktestDetail.getState().loadCharts();
+
+    expect(api.fetchInstrumentChart).toHaveBeenCalledWith(
+      "run-role",
+      "159915.SZ",
+      2000,
+      expect.any(AbortSignal),
+      undefined,
+      undefined,
+    );
+    expect(useBacktestDetail.getState().charts["159915.SZ"]).toBeDefined();
   });
 
   it("retries only failed charts without dropping the successful cache", async () => {

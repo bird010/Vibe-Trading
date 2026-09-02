@@ -267,6 +267,7 @@ describe("FundRotationTab (batch UI)", () => {
   beforeEach(() => {
     mockState.batches = [];
     mockState.activeBatchId = null;
+    mockState.activeBatch = null;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: false,
       json: async () => null,
@@ -309,13 +310,29 @@ describe("FundRotationTab (batch UI)", () => {
   it("renders a history batch", () => {
     mockState.batches = [{ batch_id: "batch-history", status: "SUCCEEDED" }];
     mockState.activeBatchId = "batch-history";
+    mockState.activeBatch = {
+      batch_id: "batch-history",
+      state: { schema_version: "1", stage: "SUCCEEDED", batch_id: "batch-history", mode: "RESEARCH_ONLY" },
+      resolved: {
+        batch_id: "batch-history",
+        schema_version: "1",
+        mode: "RESEARCH_ONLY",
+        catalog_version: "v1",
+        framework_implementation_hash: "hash",
+        variants: [{ variant_key: "v1", strategy_id: "baseline", data_start: "2020-01-01", decision_start_date: "2020-01-01", anchor_decision_date: "2020-01-01", status: "SUCCEEDED", run_id: "run-1" }],
+        plan: { data_start: "2020-01-01", earliest_decision_start_date: "2020-01-01", evaluation_start_date: "2020-01-01", evaluation_end_date: "2020-12-31", variants: [] },
+        executed_order: [],
+      },
+      child_runs: [{ schema_version: "1", stage: "SUCCEEDED", batch_id: "batch-history", run_id: "run-1", variant_key: "v1", strategy_id: "baseline", mode: "RESEARCH_ONLY" }],
+      mode: "RESEARCH_ONLY",
+    };
     mockState.selectBatch.mockClear();
 
     render(<FundRotationTab />);
 
     expect(screen.getByText("历史批次")).toBeDefined();
     expect(screen.getByText("batch-histor…")).toBeDefined();
-    expect(screen.getByText("完成")).toBeDefined();
+    expect(screen.getAllByText("完成").length).toBeGreaterThan(0);
     const batchRow = screen.getByRole("button", {
       name: /batch-histor…完成/,
     });
@@ -323,6 +340,7 @@ describe("FundRotationTab (batch UI)", () => {
     fireEvent.click(batchRow);
     expect(mockState.selectBatch).toHaveBeenCalledWith("batch-history");
     expect(screen.queryByText("批次进度")).toBeNull();
+    expect(screen.queryByText("逐期选基明细")).toBeNull();
   });
 
   it("renders comparison section", () => {
