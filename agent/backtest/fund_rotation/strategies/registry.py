@@ -240,6 +240,9 @@ from backtest.fund_rotation.strategies.ai_rotation_r84_r81_r57_r62_combo.strateg
 from backtest.fund_rotation.strategies.ai_rotation_r85_r81_r74_combo.strategy import (
     AiRotationR85R81R74ComboStrategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.strategy import (
+    AiRotationR86R81TransitionCap50Strategy,
+)
 
 
 def default_fund_rotation_strategies() -> tuple[type, ...]:
@@ -325,4 +328,5 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR83R81R57R77ComboStrategy,
         AiRotationR84R81R57R62ComboStrategy,
         AiRotationR85R81R74ComboStrategy,
+        AiRotationR86R81TransitionCap50Strategy,
     )

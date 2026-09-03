@@ -122,6 +122,7 @@ class TestCatalogRegistration:
             "ai_rotation_r83_r81_r57_r77_combo",
             "ai_rotation_r84_r81_r57_r62_combo",
             "ai_rotation_r85_r81_r74_combo",
+            "ai_rotation_r86_r81_transition_cap_50",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:
