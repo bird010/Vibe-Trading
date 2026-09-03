@@ -397,12 +397,19 @@ class EconomicRoleSession:
         carried_weights, carried_cash, carried_codes, incumbents = apply_incumbent_carry(
             self._previous_weights, staged_weights,
         )
+        is_r81 = self._descriptor_id == "ai_rotation_r81_economic_role_dynamic_rep"
+        defense_code = "511010.SH" if not is_r81 or "511010.SH" in signal_eligible else None
         final_weights, final_cash, defense_diagnostics = apply_defense_asset(
-            carried_weights, carried_cash, defense_code="511010.SH",
+            carried_weights, carried_cash, defense_code=defense_code,
         )
         reason = _append_reason("", "STAGED_REENTRY" if staged else "")
         reason = _append_reason(reason, "INCUMBENT_CARRY" if incumbents else "")
-        reason = _append_reason(reason, "FIXED_SHORT_BOND_DEFENSE")
+        reason = _append_reason(
+            reason,
+            "FIXED_SHORT_BOND_DEFENSE"
+            if defense_code
+            else "FIXED_SHORT_BOND_UNAVAILABLE",
+        )
         quality = QualityStatus.VALID if all(scores[role].eligible for role in selected_roles) else QualityStatus.DEGRADED
         role_rows: list[dict[str, object]] = []
         rank_by_role = {role_id: index for index, role_id in enumerate(ranked, start=1)}
@@ -478,7 +485,7 @@ class EconomicRoleSession:
             "incumbent_carry_codes": sorted(incumbents),
             "carried_codes": sorted(carried_codes),
             "risk_layer": "fixed_short_bond",
-            "defense_asset": "511010.SH",
+            "defense_asset": defense_code,
             "defense_diagnostics": defense_diagnostics,
             "selection_modes": selection_modes,
             "history_quality_lookback_weeks": cfg.history_quality_lookback_weeks,
