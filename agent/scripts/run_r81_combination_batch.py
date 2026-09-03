@@ -61,6 +61,7 @@ def main() -> None:
             "ai_rotation_r83_r81_r57_r77_combo",
             "ai_rotation_r84_r81_r57_r62_combo",
             "ai_rotation_r85_r81_r74_combo",
+            "ai_rotation_r90_r81_role_r61_dual_horizon",
         )
         use_role_pool = any(
             str(variant.strategy_id).startswith(role_prefixes)
