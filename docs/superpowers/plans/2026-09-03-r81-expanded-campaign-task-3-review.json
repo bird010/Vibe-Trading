@@ -1,0 +1,45 @@
+{
+  "task": "task-3-r87-implementation-review",
+  "verdict": "CHANGES_REQUIRED",
+  "scope": "implementation_only",
+  "implementation_modified_by_reviewer": false,
+  "p0": [],
+  "p1": [
+    {
+      "title": "Remove process-global rank_scores monkeypatch",
+      "file": "agent/backtest/fund_rotation/strategies/ai_rotation_r86_r81_transition_cap_50/r87_role_rank_buffer.py",
+      "lines": "71-92",
+      "body": "R87 replaces the economic-role module's global rank_scores during evaluation and discards cluster_members. Concurrent or nested sessions can observe R87 role-only behavior, creating cross-session semantic contamination and undermining deterministic auditability. Use a session-local explicit ranking/selection seam and add isolation coverage."
+    },
+    {
+      "title": "Synchronize returned diagnostics with decisions artifact",
+      "file": "agent/backtest/fund_rotation/strategies/ai_rotation_r86_r81_transition_cap_50/r87_role_rank_buffer.py",
+      "lines": "94-103",
+      "body": "R86 writes _decision_log in its _patch_artifacts before R87 appends role_rank_buffer to the returned decision diagnostics. The returned decision and finalized decisions artifact therefore diverge. Persist the final diagnostics and test equality between the returned decision and artifact row."
+    }
+  ],
+  "p2": [
+    {
+      "title": "Add real session continuity and epoch reset coverage",
+      "body": "The tests cover the pure selector but not consecutive evaluate calls, refresh-epoch reset through the session, or uncapped/no-op cap behavior."
+    },
+    {
+      "title": "Record final selected roles explicitly",
+      "body": "The diagnostics should explicitly expose final selected roles and/or a dedicated role-buffer artifact after the artifact synchronization issue is fixed."
+    }
+  ],
+  "p3": [
+    {
+      "title": "Existing pytest cache ACL warning",
+      "body": "Focused tests emit the pre-existing PytestCacheWarning because the workspace pytest cache is not writable."
+    }
+  ],
+  "tests": {
+    "command": "E:\\anaconda3\\envs\\AlphaFin\\python.exe -m pytest agent/tests/fund_rotation/test_ai_rotation_r87_r81_role_rank_buffer.py agent/tests/fund_rotation/test_strategy_catalog.py agent/tests/fund_rotation/test_economic_role_rotation.py -q",
+    "status": "passed",
+    "passed": 46,
+    "warnings": 1
+  },
+  "backtest": "not_run_by_request",
+  "git_diff_check": "passed"
+}

@@ -1,0 +1,51 @@
+{
+  "round": 4,
+  "strategy_id": "ai_rotation_r88_r81_role_r60_gate",
+  "verdict": "PASS",
+  "p0_count": 0,
+  "p1_count": 0,
+  "original_findings": [
+    {
+      "severity": "P1",
+      "title": "R88 missing from role-universe routing prefixes",
+      "status": "ADDRESSED",
+      "evidence": [
+        "agent/src/stockpred/fund_rotation/batch_service.py includes ai_rotation_r88_r81_role_r60_gate in role_strategy_prefixes",
+        "agent/scripts/run_r81_combination_batch.py includes ai_rotation_r88_r81_role_r60_gate in _execution_rule_loader",
+        "agent/tests/fund_rotation/test_r81_runner_output_root.py provides an R88-only role-universe regression"
+      ]
+    }
+  ],
+  "new_findings": [],
+  "tests": {
+    "command_scope": "R88/R87/R86, economic-role, catalog, and runner routing regressions",
+    "passed": 57,
+    "failed": 0,
+    "warnings": 1,
+    "warning_summary": "Pre-existing pytest cache write ACL warning",
+    "long_backtest_run": false,
+    "broader_batch_service_note": "Full batch-service selection was blocked for tmp_path tests by the existing Windows pytest temp-directory ACL; no R88 assertion failed."
+  },
+  "verified_properties": {
+    "batch_service_role_universe_routing": true,
+    "runner_role_universe_routing": true,
+    "r88_only_runner_regression": true,
+    "causal_signal_date_cutoff": true,
+    "strict_127_observation_gate": true,
+    "current_representative_scope": true,
+    "r87_rank_buffer_inheritance": true,
+    "r86_transition_cap_inheritance": true,
+    "no_new_p0_or_p1": true
+  },
+  "deferred_p2": [
+    "Future-row perturbation invariance is not directly tested",
+    "Full-session returned-diagnostics versus decisions-artifact equality is not directly tested",
+    "Batch-service routing regression is role-branch based rather than R88-only"
+  ],
+  "residual_risks": [
+    "No long paired backtest was run",
+    "Research-only and RESEARCH_ONLY_UNVERIFIED_UNIVERSE caveats remain applicable",
+    "Windows pytest temp/cache ACL warnings remain environmental"
+  ],
+  "backtest_status": "ELIGIBLE_AFTER_P1_FIX"
+}

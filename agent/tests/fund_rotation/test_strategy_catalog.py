@@ -47,6 +47,7 @@ class TestCatalogRegistration:
             "ai_rotation_r05_mom_persist",
             "ai_rotation_r06_rank_buffer",
             "ai_rotation_r07_tail_persist",
+            "ai_rotation_r100_r81_r88_invvol_slots",
             "ai_rotation_r11_persist_geom",
             "ai_rotation_r12_nondecay_geom",
             "ai_rotation_r13_arith_persist",
@@ -123,7 +124,10 @@ class TestCatalogRegistration:
             "ai_rotation_r84_r81_r57_r62_combo",
             "ai_rotation_r85_r81_r74_combo",
             "ai_rotation_r86_r81_transition_cap_50",
+            "ai_rotation_r87_r81_role_rank_buffer",
+            "ai_rotation_r88_r81_role_r60_gate",
             "ai_rotation_r90_r81_role_r61_dual_horizon",
+            "ai_rotation_r91_r81_role_r73_multi_horizon",
             "correlation_all_members", "correlation_representative",
         ]
         for entry in entries:

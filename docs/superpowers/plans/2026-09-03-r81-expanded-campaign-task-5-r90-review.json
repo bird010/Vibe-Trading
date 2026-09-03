@@ -1,0 +1,46 @@
+{
+  "task": "Task 5",
+  "strategy_id": "ai_rotation_r90_r81_role_r61_dual_horizon",
+  "brief": "docs/superpowers/plans/2026-09-03-r81-expanded-campaign-task-5-r90-brief.md",
+  "verdict": "PASS",
+  "issues": {
+    "P0": [],
+    "P1": [],
+    "P2": [
+      {
+        "title": "R90-only routing lacks a persistent dedicated test",
+        "status": "deferred",
+        "evidence": "现场调用 runner execution-rule loader，R90-only request 得到 E1 与 513100.SH 的 role universe。"
+      },
+      {
+        "title": "No R90-specific future-date perturbation test",
+        "status": "deferred",
+        "evidence": "R90 复用 R88 _causal 与 compute_adjusted_return_126d，并在调用处按 signal_date 截断。"
+      }
+    ],
+    "P3": []
+  },
+  "scope_checks": {
+    "equal_standardized_short_medium": true,
+    "required_observations": 127,
+    "fail_closed_missing_data": true,
+    "deterministic_role_id_tiebreak": true,
+    "causal_signal_date_cutoff": true,
+    "role_only": true,
+    "preserves_r88_gate": true,
+    "preserves_r87_buffer": true,
+    "preserves_r86_transition_cap": true,
+    "preserves_r81_lifecycle_and_representatives": true,
+    "diagnostics_decisions_artifact_consistent": true,
+    "registry_catalog": true,
+    "batch_service_role_routing": true,
+    "runner_role_routing": true
+  },
+  "tests": {
+    "command": "E:\\anaconda3\\envs\\AlphaFin\\python.exe -m pytest agent/tests/fund_rotation/test_ai_rotation_r90_r81_role_r61_dual_horizon.py agent/tests/fund_rotation/test_ai_rotation_r86_r81_transition_cap_50.py agent/tests/fund_rotation/test_ai_rotation_r87_r81_role_rank_buffer.py agent/tests/fund_rotation/test_ai_rotation_r88_r81_role_r60_gate.py agent/tests/fund_rotation/test_strategy_catalog.py agent/tests/fund_rotation/test_r81_runner_output_root.py -q",
+    "result": "43 passed, 1 warning in 8.70s",
+    "diff_check": "passed",
+    "long_backtest": false
+  },
+  "next_gate": "Run exactly one fixed-contract paired backtest: R88 Champion vs R90 Challenger; do not promote from code review alone."
+}

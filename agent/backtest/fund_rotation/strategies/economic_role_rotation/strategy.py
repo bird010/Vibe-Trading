@@ -285,6 +285,12 @@ class EconomicRoleSession:
             )
         return selected, mode if selected is not None else f"{mode}_NO_AVAILABLE"
 
+    def _rank_roles(self, scores: Mapping[str, StrategyScore]) -> list[str]:
+        """Local seam for role ranking; default behavior remains unchanged."""
+        return rank_scores(scores, cluster_members={
+            role_id: self._role_members.get(role_id, []) for role_id in ROLE_IDS
+        })
+
     def evaluate(self, context: StrategyDecisionContext) -> TargetWeightDecision:
         cfg = self._config
         signal_date = context.signal_date
@@ -376,9 +382,7 @@ class EconomicRoleSession:
             scores[role_id] = score
             score_diagnostics[role_id] = diagnostics
 
-        ranked = rank_scores(scores, cluster_members={
-            role_id: self._role_members.get(role_id, []) for role_id in ROLE_IDS
-        })
+        ranked = self._rank_roles(scores)
         selected_roles = ranked[:cfg.top_n]
         base_weights: dict[str, float] = {}
         vacant_roles: list[str] = []

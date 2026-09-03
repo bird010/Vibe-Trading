@@ -377,7 +377,12 @@ class BatchService:
             "ai_rotation_r83_r81_r57_r77_combo",
             "ai_rotation_r84_r81_r57_r62_combo",
             "ai_rotation_r85_r81_r74_combo",
+            "ai_rotation_r86_r81_transition_cap_50",
+            "ai_rotation_r87_r81_role_rank_buffer",
+            "ai_rotation_r88_r81_role_r60_gate",
             "ai_rotation_r90_r81_role_r61_dual_horizon",
+            "ai_rotation_r91_r81_role_r73_multi_horizon",
+            "ai_rotation_r100_r81_r88_invvol_slots",
         )
         use_role_pool = any(
             str(variant.strategy_id).startswith(role_strategy_prefixes)

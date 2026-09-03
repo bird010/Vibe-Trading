@@ -503,6 +503,43 @@ class TestPlanning:
 
 
 class TestExecution:
+    def test_r86_r87_only_request_routes_research_rules_to_role_universe(
+        self,
+    ):
+        from src.stockpred.fund_rotation.data_snapshot import PinnedFundDataSnapshot
+
+        service = BatchService.__new__(BatchService)
+        service.execution_rule_context_loader = None
+        snapshot = PinnedFundDataSnapshot(
+            fund_version=17,
+            fund_adj_version=23,
+            dim_version=31,
+            universe_codes=("E1",),
+            role_universe_codes=("513100.SH", "E1"),
+            trading_dates=tuple(CALENDAR),
+            fingerprint="fp-role-routing",
+        )
+        dim_fund = _pd.DataFrame(
+            [
+                {"ts_code": "E1", "name": "测试ETF", "instrument_type": "domestic_equity_etf"},
+                {"ts_code": "513100.SH", "name": "纳斯达克100ETF(QDII)", "instrument_type": "cross_border_etf"},
+            ]
+        )
+        request = _request(
+            [
+                {"strategy_id": "ai_rotation_r86_r81_transition_cap_50", "params": {}},
+                {"strategy_id": "ai_rotation_r87_r81_role_rank_buffer", "params": {}},
+            ]
+        )
+
+        context = service._resolve_execution_rule_context(
+            request=request,
+            snapshot=snapshot,
+            dim_fund=dim_fund,
+        )
+
+        assert set(context.instruments) == {"E1", "513100.SH"}
+
     def test_real_pit_context_takes_priority_over_research_static(
         self,
         tmp_path,

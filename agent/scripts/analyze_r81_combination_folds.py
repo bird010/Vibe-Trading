@@ -15,14 +15,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-id", required=True)
     parser.add_argument("--experiment", default="fund_rotation_r81_combinations_20260903_v2")
+    parser.add_argument("--output-root", default=None)
+    parser.add_argument("--experiment-root", default=None)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1] / "runs" / "fund_rotation"
-    batch_dir = root / "strategy_batches" / args.batch_id
-    manifest = json.loads(
-        (root / "experiments" / args.experiment / "fold_manifest.json").read_text(
-            encoding="utf-8"
-        )
+    root = (
+        Path(args.output_root)
+        if args.output_root
+        else Path(__file__).resolve().parents[1] / "runs" / "fund_rotation"
     )
+    batch_dir = root / "strategy_batches" / args.batch_id
+    experiment_root = (
+        Path(args.experiment_root)
+        if args.experiment_root
+        else root / "experiments" / args.experiment
+    )
+    manifest = json.loads((experiment_root / "fold_manifest.json").read_text(encoding="utf-8"))
     events = [
         json.loads(line)
         for line in (batch_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()

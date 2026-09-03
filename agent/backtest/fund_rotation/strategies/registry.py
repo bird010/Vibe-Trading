@@ -243,8 +243,20 @@ from backtest.fund_rotation.strategies.ai_rotation_r85_r81_r74_combo.strategy im
 from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.strategy import (
     AiRotationR86R81TransitionCap50Strategy,
 )
+from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.r87_role_rank_buffer import (
+    AiRotationR87R81RoleRankBufferStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.r88_r81_role_r60_gate import (
+    AiRotationR88R81RoleR60GateStrategy,
+)
 from backtest.fund_rotation.strategies.ai_rotation_r90_r81_role_r61_dual_horizon.strategy import (
     AiRotationR90R81RoleR61DualHorizonStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.r91_r81_role_r73_multi_horizon import (
+    AiRotationR91R81RoleR73MultiHorizonStrategy,
+)
+from backtest.fund_rotation.strategies.ai_rotation_r86_r81_transition_cap_50.r100_r81_r88_invvol_slots import (
+    AiRotationR100R81R88InvvolSlotsStrategy,
 )
 
 
@@ -332,5 +344,9 @@ def default_fund_rotation_strategies() -> tuple[type, ...]:
         AiRotationR84R81R57R62ComboStrategy,
         AiRotationR85R81R74ComboStrategy,
         AiRotationR86R81TransitionCap50Strategy,
+        AiRotationR87R81RoleRankBufferStrategy,
+        AiRotationR88R81RoleR60GateStrategy,
         AiRotationR90R81RoleR61DualHorizonStrategy,
+        AiRotationR91R81RoleR73MultiHorizonStrategy,
+        AiRotationR100R81R88InvvolSlotsStrategy,
     )

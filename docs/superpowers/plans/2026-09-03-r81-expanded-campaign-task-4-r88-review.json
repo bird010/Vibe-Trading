@@ -1,0 +1,45 @@
+{
+  "round": 4,
+  "strategy_id": "ai_rotation_r88_r81_role_r60_gate",
+  "verdict": "CHANGES_REQUIRED",
+  "p0_count": 0,
+  "p1_count": 1,
+  "findings": [
+    {
+      "severity": "P1",
+      "title": "R88 missing from role-universe routing prefixes",
+      "evidence": "agent/src/stockpred/fund_rotation/batch_service.py:372-386 and agent/scripts/run_r81_combination_batch.py:29-44 list role prefixes through R87 but omit ai_rotation_r88_r81_role_r60_gate.",
+      "file": "agent/src/stockpred/fund_rotation/batch_service.py",
+      "line": 372,
+      "impact": "An R88-only request routes through snapshot.universe_codes rather than snapshot.role_universe_codes, violating role-only execution scope and potentially excluding current R81 representatives. The R87-vs-R88 pair masks this because R87 already triggers the role pool.",
+      "minimal_fix": "Append the exact R88 prefix to the existing role-prefix tuples in batch_service.py and run_r81_combination_batch.py; add an R88-only routing regression without changing PIT or execution semantics."
+    },
+    {
+      "severity": "P2",
+      "title": "Missing future-row invariance test",
+      "evidence": "R88 tests verify a pre-signal row is excluded but do not perturb post-signal rows and compare results.",
+      "file": "agent/tests/fund_rotation/test_ai_rotation_r88_r81_role_r60_gate.py",
+      "line": 36,
+      "impact": "The causal implementation is present, but this important regression boundary is not directly locked by a test.",
+      "minimal_fix": "Add a test that changes post-signal bars/adjustments and asserts the 126-day result is unchanged."
+    },
+    {
+      "severity": "P2",
+      "title": "Session-level artifact consistency is not directly tested",
+      "evidence": "Implementation patches the final decisions artifact diagnostics, but the R88 test suite only checks helper diagnostics and pipeline metadata.",
+      "file": "agent/backtest/fund_rotation/strategies/ai_rotation_r86_r81_transition_cap_50/r88_r81_role_r60_gate.py",
+      "line": 140,
+      "impact": "A future regression could desynchronize returned diagnostics and persisted decisions evidence without failing the current focused tests.",
+      "minimal_fix": "Add a minimal session fixture asserting the returned medium_trend_gate equals the corresponding decisions artifact entry."
+    }
+  ],
+  "tests_reviewed": [
+    "55 passed: R88, R87, R86, economic-role, and strategy-catalog focused regression suite",
+    "1 pre-existing pytest cache ACL warning"
+  ],
+  "residual_risks": [
+    "No long paired backtest was run per instruction.",
+    "Research-only and RESEARCH_ONLY_UNVERIFIED_UNIVERSE caveats remain applicable.",
+    "Windows pytest cache/temp ACL warnings are environmental."
+  ]
+}

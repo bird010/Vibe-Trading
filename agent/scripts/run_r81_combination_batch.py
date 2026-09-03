@@ -26,6 +26,40 @@ RESEARCH_START = "20130329"
 RESEARCH_END = "20220729"
 
 
+def _execution_rule_loader(*, request, snapshot, dim_fund):
+    role_prefixes = (
+        "ai_rotation_r79_economic_role",
+        "ai_rotation_r80_economic_role",
+        "ai_rotation_r81_economic_role",
+        "ai_rotation_r82_economic_role",
+        "ai_rotation_r83_r81_r57_r77_combo",
+        "ai_rotation_r84_r81_r57_r62_combo",
+        "ai_rotation_r85_r81_r74_combo",
+        "ai_rotation_r86_r81_transition_cap_50",
+        "ai_rotation_r87_r81_role_rank_buffer",
+        "ai_rotation_r88_r81_role_r60_gate",
+        "ai_rotation_r90_r81_role_r61_dual_horizon",
+        "ai_rotation_r91_r81_role_r73_multi_horizon",
+        "ai_rotation_r100_r81_r88_invvol_slots",
+    )
+    use_role_pool = any(
+        str(variant.strategy_id).startswith(role_prefixes)
+        for variant in request.variants
+    )
+    codes = (
+        snapshot.role_universe_codes
+        if use_role_pool
+        else snapshot.universe_codes
+    )
+    return build_research_static_execution_rule_context(
+        dim_fund=dim_fund,
+        universe_codes=codes,
+        evaluation_start_date=request.evaluation_start_date,
+        evaluation_end_date=request.evaluation_end_date,
+        snapshot_version=snapshot.dim_version,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--idempotency-key", required=True)
@@ -52,34 +86,6 @@ def main() -> None:
             data_end=data_end,
         )
 
-    def execution_rule_loader(*, request, snapshot, dim_fund):
-        role_prefixes = (
-            "ai_rotation_r79_economic_role",
-            "ai_rotation_r80_economic_role",
-            "ai_rotation_r81_economic_role",
-            "ai_rotation_r82_economic_role",
-            "ai_rotation_r83_r81_r57_r77_combo",
-            "ai_rotation_r84_r81_r57_r62_combo",
-            "ai_rotation_r85_r81_r74_combo",
-            "ai_rotation_r90_r81_role_r61_dual_horizon",
-        )
-        use_role_pool = any(
-            str(variant.strategy_id).startswith(role_prefixes)
-            for variant in request.variants
-        )
-        codes = (
-            snapshot.role_universe_codes
-            if use_role_pool
-            else snapshot.universe_codes
-        )
-        return build_research_static_execution_rule_context(
-            dim_fund=dim_fund,
-            universe_codes=codes,
-            evaluation_start_date=request.evaluation_start_date,
-            evaluation_end_date=request.evaluation_end_date,
-            snapshot_version=snapshot.dim_version,
-        )
-
     output_root = (
         Path(args.output_root)
         if args.output_root
@@ -90,7 +96,7 @@ def main() -> None:
         runs_root=output_root,
         metadata_loader=lambda: snapshot,
         frames_loader=frames_loader,
-        execution_rule_context_loader=execution_rule_loader,
+        execution_rule_context_loader=_execution_rule_loader,
         auto_start=False,
     )
     request = StrategyBatchRequest(
