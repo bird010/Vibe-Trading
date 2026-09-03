@@ -33,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--challenger", required=True)
     parser.add_argument("--champion-label", default="Champion")
     parser.add_argument("--challenger-label", default="Challenger")
+    parser.add_argument("--output-root", default=None)
     return parser
 
 
@@ -78,7 +79,11 @@ def main() -> None:
             snapshot_version=snapshot.dim_version,
         )
 
-    output_root = repo_root / "agent" / "runs" / "fund_rotation"
+    output_root = (
+        Path(args.output_root)
+        if args.output_root
+        else repo_root / "agent" / "runs" / "fund_rotation"
+    )
     service = BatchService(
         output_root / "strategy_batches",
         runs_root=output_root,

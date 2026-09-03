@@ -58,5 +58,29 @@ warning 是既有 `.pytest_cache` 写入权限 warning，不是测试失败。
 - fold manifest：`agent/runs/fund_rotation/experiments/fund_rotation_r81_combinations_20260903_v2/fold_manifest.json`，5 folds。
 - 修复实现 hash（git blob）：`2ce5ddbdcfd9b039e0fed3091e520c2fa9339d66`。
 - 新 anchor 尝试在提交 batch 前因 Windows ACL 拒绝写入 `agent/runs/fund_rotation/strategy_batches/idempotency/...`；补齐 `PYTHONPATH` 后仍为环境写权限问题，未产生新的 batch/run ID。旧失败 run 不冒充修复后结果。
-- 因此尚未验证两个 child 的终态、contract violation、publishable/comparable anchor；这是当前唯一未完成的简报验收项，也是残余风险。
+- 当时尚未验证两个 child 的终态、contract violation、publishable/comparable anchor；该残余风险已由下方 P1 fix round 1 的成功批次关闭。
 - 未运行全量测试；本报告只依据上述新鲜聚焦测试和回归测试。
+
+## P1 fix round 1
+
+使用修复后的 R81 实现、同一日期区间和同一快照重跑 anchor batch，P1 已解决：
+
+- batch_id：`92ceb1c4e41b`
+- R81 run_id：`23cfd2292050`
+- R58 control run_id：`09c059d2f91d`
+- 两者终态：`SUCCEEDED`
+- `comparison_available=true`
+- `comparable_variant_count=2`
+- 区间：`20130329..20220729`
+- snapshot：`7596807626fdf7f1aa9bdaddd84cd4575e15ac473c8331879d841ecacd941de6`
+- output_root：`C:\Users\LK\.codex\visualizations\2026\09\02\01a062de-a2d8-7272-8687-0c37c9e3efdb\r81runs`
+
+R81 指标：
+
+- annual_return：`0.10684818002280339`
+- annual_volatility：`0.12502190028359905`
+- sharpe：`0.854635706067733`
+- max_drawdown：`-0.31146480897784284`
+- total_return：`1.5724334844560595`
+
+本轮同时验证了 anchor 与 R58 control 的可比较性；此前因 ACL 阻塞的 anchor 残余风险已由该成功批次关闭。runner 新增 `--output-root`，允许将 `strategy_batches` 与 `runs` 产物写入指定输出根目录；未改变日期常量、PIT/data contract、执行语义或 R81 策略逻辑。
