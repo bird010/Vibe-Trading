@@ -88,6 +88,18 @@ const mockState = vi.hoisted(() => ({
       required_fields: ["close"],
       frequency: "weekly",
     },
+    {
+      strategy_id: "ai_rotation_r83_r81_r57_r77_combo",
+      name: "R83 动态代表 R57 信号 R77 防御",
+      description: "R83",
+      interface_version: "1.0",
+      implementation_hash: "r83",
+      supported_universe: ["cn_etf"],
+      warmup_trade_days: 260,
+      required_datasets: ["fund"],
+      required_fields: ["close"],
+      frequency: "weekly",
+    },
   ],
   strategyDetails: new Map([
     [
@@ -237,6 +249,27 @@ const mockState = vi.hoisted(() => ({
         artifact_roles: [],
       },
     ],
+    [
+      "ai_rotation_r83_r81_r57_r77_combo",
+      {
+        strategy_id: "ai_rotation_r83_r81_r57_r77_combo",
+        name: "R83 动态代表 R57 信号 R77 防御",
+        description: "R83",
+        interface_version: "1.0",
+        implementation_hash: "r83",
+        supported_universe: ["cn_etf"],
+        warmup_trade_days: 260,
+        required_datasets: ["fund"],
+        required_fields: ["close"],
+        frequency: "weekly",
+        config_schema: { type: "object", properties: {} },
+        config_schema_version: "v1",
+        config_schema_hash: "h-r83",
+        default_config: {},
+        parameter_descriptions: {},
+        artifact_roles: [],
+      },
+    ],
   ]),
   catalogLoading: false,
   catalogError: null,
@@ -290,13 +323,13 @@ describe("FundRotationTab (batch UI)", () => {
     expect(screen.getByText("初始资金")).toBeDefined();
   });
 
-  it("uses the requested default dates and R76 fixed short bond strategy", () => {
+  it("uses the requested default dates and R83 research champion strategy", () => {
     render(<FundRotationTab />);
 
     expect(screen.getByLabelText("开始日期")).toHaveValue("2022-08-01");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-08-01");
     expect(screen.getAllByRole("combobox")[0]).toHaveValue(
-      "ai_rotation_r76_fixed_short_bond",
+      "ai_rotation_r83_r81_r57_r77_combo",
     );
   });
 
